@@ -62,7 +62,10 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
         AnimatedBuilder(
           animation: _shake,
           builder: (context, child) => Transform.translate(
-            offset: Offset(sin(_shake.value * pi * 6) * 12 * (1 - _shake.value), 0),
+            offset: Offset(
+              sin(_shake.value * pi * 6) * 12 * (1 - _shake.value),
+              0,
+            ),
             child: child,
           ),
           child: Row(
@@ -77,7 +80,10 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: filled ? DmColors.alive : Colors.transparent,
-                  border: Border.all(color: filled ? DmColors.alive : DmColors.muted, width: 1.5),
+                  border: Border.all(
+                    color: filled ? DmColors.alive : DmColors.muted,
+                    width: 1.5,
+                  ),
                 ),
               );
             }),
@@ -104,13 +110,24 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
                         : TextButton(
                             style: TextButton.styleFrom(
                               shape: const CircleBorder(),
-                              backgroundColor: k == '<' ? Colors.transparent : DmColors.surface,
+                              backgroundColor: k == '<'
+                                  ? Colors.transparent
+                                  : DmColors.surface,
                               foregroundColor: DmColors.text,
                             ),
                             onPressed: () => k == '<' ? _back() : _tap(k),
                             child: k == '<'
-                                ? const Icon(Icons.backspace_outlined, color: DmColors.muted)
-                                : Text(k, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w500)),
+                                ? const Icon(
+                                    Icons.backspace_outlined,
+                                    color: DmColors.muted,
+                                  )
+                                : Text(
+                                    k,
+                                    style: const TextStyle(
+                                      fontSize: 26,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
                           ),
                   ),
                 ),

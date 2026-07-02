@@ -4,98 +4,156 @@
 
 Deadman is an Android app for the Solana Seeker plus an Anchor program. You put assets in one on-chain vault, and that vault covers three threats:
 
-| Threat       | What happens                                                                                                                                                                                               |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Silence**  | If you stop checking in, a dead-man switch opens the vault to your heirs. They receive fixed shares.                                                                                                       |
-| **Coercion** | A duress PIN looks like a normal unlock. Behind the scenes it signs `lockdown` with the device guard key, and no wallet prompt appears. Withdrawals and policy changes stay frozen until the lock expires. |
-| **Loss**     | A lost or stolen phone holds only the guard key, which cannot move funds. You rotate it from your restored wallet. A guardian can freeze the vault while the phone is missing.                             |
+| Threat       | What happens                                                                                                                                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Silence**  | If you stop checking in, your **release plan** runs: up to 8 ordered rules, each paying a beneficiary a fixed amount or a percentage of one asset after a set period of silence. Payouts can go to a plain Solana wallet or privately. |
+| **Coercion** | A duress PIN looks like a normal unlock. Behind the scenes it signs `lockdown` with the device guard key, and no wallet prompt appears. Withdrawals and plan changes stay frozen until the lock expires.                               |
+| **Loss**     | A lost or stolen phone holds only the guard key, which cannot move funds. You rotate it from your restored wallet. A guardian can freeze the vault while the phone is missing.                                                         |
 
-You check in with a daily **Pulse**: one biometric touch, about 3 seconds, and no wallet prompt. It resets the switch and adds to an on-chain streak. With **Family Circle**, your heirs and guardian can see your liveness ("checked in 2h ago"), so they have a reason to open the app too.
+You check in with a **Pulse**: one biometric touch, about 3 seconds, and no wallet prompt. It resets every pending rule and adds to an on-chain streak. With **Family Circle**, your beneficiaries and guardian see your liveness ("checked in 2h ago") and the state of each tier that names them.
 
-> **Status: unaudited hackathon build.** It runs on devnet only. Do not put real funds in it.
+Deadman is free to use. The protocol charges a fee only when a rule actually releases funds.
+
+> **Status: unaudited hackathon build.** The program runs on devnet. The private rails (Cloak, Zcash) and Earn call mainnet-only services and work only in a mainnet build. Do not put real funds in it.
+
+For a plain-language walkthrough, see [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Why it is different
 
 Dead-man switches and inheritance vaults are a crowded idea on Solana. Colosseum's project archive lists 15+ near-identical projects, and none of them won an award ([evidence](docs/JUDGING.md#prior-art-colosseum-copilot)). The closest one, [SolGuard](https://colosseum.com/projects/explore/solguard-5), already has heartbeat inheritance, a duress key and defend-only guardians. Its interface is a web app.
 
-Deadman's bet is not a new mechanism. It is execution on the phone:
+Deadman's bet is execution on the phone, plus a release plan richer than "split it N ways at death":
 
-- **Guard key.** Each install generates a hot key in secure storage behind biometrics. On-chain, this key may only `pulse` and `lockdown`; it can never withdraw. Daily check-ins and the duress path therefore need no Seed Vault prompt, and a stolen guard key cannot take funds.
+- **Guard key.** Each install generates a hot key in secure storage behind biometrics. On-chain, this key may only `pulse` and `lockdown`; it can never withdraw. Check-ins and the duress path therefore need no Seed Vault prompt, and a stolen guard key cannot take funds.
 - **Duress is a time-lock, not a decoy.** The duress PIN does not send funds to a "safe wallet" that the attacker could demand next. It freezes the vault for `lock_secs`. An early unlock needs the owner and the guardian to sign together.
-- **A daily habit and a social loop.** The Pulse streak and Family Circle answer the question every proof-of-life app faces: "why open it when nothing is happening?"
-- **Seeker-native.** The owner key stays in the Seed Vault and is reached through Mobile Wallet Adapter. Distribution is the Solana dApp Store, and Plus is paid in SKR.
+- **Tiered release, not a single trigger.** "After 10 days, 1 SOL to my partner; after 30 days, everything else to my brother." Tiers fire one by one, and one Pulse stops the rest. A long trip costs you the first tier at most, not the estate.
+- **Private delivery.** A tier can pay out through Cloak (shielded pool on Solana) or as shielded ZEC, so a beneficiary's main wallet is not publicly tied to the estate on Solana. The limits of that privacy are spelled out [below](#private-rails).
+- **A habit and a social loop.** The Pulse streak and Family Circle answer the question every proof-of-life app faces: "why open it when nothing is happening?"
+- **Seeker-native.** The owner key stays in the Seed Vault and is reached through Mobile Wallet Adapter. Distribution is the Solana dApp Store.
 
 ## How it works
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active: create_vault (owner)
-    state Active {
+    [*] --> Armed: create_vault (owner, counts as first pulse)
+    state Armed {
         [*] --> Unlocked
-        Unlocked --> Locked: lockdown (owner, guard or guardian)
+        Unlocked --> Locked: lockdown (owner, guard, or guardian outside cooldown)
         Locked --> Locked: lockdown again (extends)
         Locked --> Unlocked: lock expires, or unlock (owner + guardian)
     }
-    note right of Active
-        pulse (owner or guard) resets the deadline in both sub-states.
-        Every owner-signed action also counts as a pulse.
+    note right of Armed
+        pulse (owner or guard) and every owner-signed action
+        reset last_pulse. A lockdown does not, and it does not
+        block rule execution.
     end note
-    Active --> Triggered: trigger (anyone, after last_pulse + interval + grace)
-    Active --> [*]: close_vault (owner, unlocked only)
-    Triggered --> Triggered: claim_sol / claim_token (each heir, once per asset)
+    Armed --> [*]: close_vault (owner, unlocked only)
 ```
 
-- **Active, unlocked.** The owner can deposit, withdraw and edit the policy. The guard key pulses every day.
-- **Active, locked (overlay).** `withdraw_sol`, `withdraw_token`, `update_policy` and `close_vault` fail with `VaultLocked`. `pulse`, `set_guard`, `subscribe` and `trigger` still work. A lockdown does not reset the switch, so inheritance keeps working during a lock.
-- **Triggered.** Anyone can call `trigger` once `now > last_pulse + interval_secs + grace_secs`. Heirs are the natural callers, and there is no keeper network. A trigger cannot be undone. The SOL balance is snapshotted at trigger. Each token mint is snapshotted at the first claim for that mint. Each heir then claims `bps / 10000` of the snapshot. The protocol success fee (`fee_bps`, capped at 100 = 1% in the program) is taken from each share.
+Each rule in the plan has its own lifecycle. "Due" is not stored; it is computed from `last_pulse`:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: create_vault / update_policy
+    Pending --> Due: last_pulse + after_secs has passed
+    Pending --> Pending: pulse restarts the clock
+    Due --> Pending: pulse or any owner-signed action
+    Due --> Executed: execute_sol_rule / execute_token_rule (anyone, earlier rules for the same asset first)
+    Executed --> Pending: update_policy installs a new plan
+```
+
+- **Release plan.** 1 to 8 rules, sorted by `after_secs`. Each rule has a `beneficiary`, a `rail` (Solana, Cloak or Zcash), `after_secs` of owner silence, an asset (`mint: None` for SOL, or any SPL mint) and an amount: `Fixed` (lamports or base units, capped at the balance) or `Percent` (bps of the asset's balance at execution time).
+- **Firing.** A rule is due when `now > last_pulse + after_secs`. `after_secs` must be at least `interval_secs + 60`, so no rule can fire before a missed check-in.
+- **Execution is permissionless.** Anyone can execute a due rule, usually the protocol keeper (`tool/keeper.dart`). Destinations are fixed on-chain, so the executor cannot redirect anything. Order is enforced per asset: a SOL rule never waits on a USDC rule, but two SOL rules execute in index order.
+- **A Pulse resets, it does not refund.** A pulse restarts the clock for every pending rule. Rules already executed stay executed.
+- **Fee.** On execution, `fee = gross × fee_bps / 10 000` goes to the treasury and the beneficiary receives the rest. The rate depends on the rail. If a SOL payout to a brand-new account would leave it below rent exemption, the rule is marked executed with `paid = 0` and the dust stays in the vault, so a tiny tier cannot block the ones after it.
+- **Lockdown and inheritance.** A lockdown freezes withdrawals, plan changes and closing. It does not block pulses, guard rotation or rule execution.
 
 ### Instructions
 
-| Instruction      | Signer(s)                 | Effect                                                                                                             |
-| ---------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `init_config`    | program upgrade authority | Creates the `Config` PDA: treasury, SKR mint, Plus price, `fee_bps` (at most 100).                                 |
-| `set_config`     | `config.admin`            | Updates the same fields. The fee cap is enforced again.                                                            |
-| `create_vault`   | owner                     | Creates `Vault` PDA `["vault", owner]` with the guard key, the durations and the heirs. Counts as the first pulse. |
-| `update_policy`  | owner                     | Replaces durations, heirs and the guardian (a guardian requires Plus). Blocked while locked.                       |
-| `set_guard`      | owner                     | Rotates the guard key. **Allowed during lockdown.**                                                                |
-| `pulse`          | owner or guard            | Resets the switch and updates `streak`, `best_streak` and `total_pulses`.                                          |
-| `lockdown`       | owner, guard or guardian  | `locked_until = max(locked_until, now + lock_secs)`. Does not reset the switch.                                    |
-| `unlock`         | owner **and** guardian    | Ends a lockdown early.                                                                                             |
-| `withdraw_sol`   | owner                     | Withdraws lamports above rent. Blocked while locked.                                                               |
-| `withdraw_token` | owner                     | Withdraws from the vault's ATA (SPL Token or Token-2022). Blocked while locked.                                    |
-| `close_vault`    | owner                     | Closes the vault and returns its lamports. Blocked while locked. Does not sweep token accounts.                    |
-| `trigger`        | anyone                    | Fires an expired switch and snapshots the SOL balance.                                                             |
-| `claim_sol`      | heir                      | Pays the heir's share minus the fee. The fee goes to the treasury.                                                 |
-| `claim_token`    | heir                      | Same per mint. Tracked in `TokenClaim` PDA `["claim", vault, mint]`.                                               |
-| `subscribe`      | owner                     | Pays `plus_price × months` in SKR to the treasury (1 to 12 months).                                                |
+| Instruction          | Signer(s)                                    | Effect                                                                                                                                                                                 |
+| -------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init_config`        | program upgrade authority                    | Creates the `Config` PDA: `treasury`, `fee_bps_public`, `fee_bps_private`. Each fee is capped at 500 bps (5%).                                                                         |
+| `set_config`         | `config.admin`                               | Updates the same fields. The cap is enforced again.                                                                                                                                    |
+| `create_vault`       | owner                                        | Creates `Vault` PDA `["vault", owner]` with the guard key, `interval_secs`, `lock_secs` and the rules. Counts as the first pulse.                                                      |
+| `update_policy`      | owner                                        | Replaces the cadence, lock length, guardian and the whole plan. Every rule becomes pending again. Blocked while locked.                                                                |
+| `set_guard`          | owner                                        | Rotates the guard key. **Allowed during lockdown.**                                                                                                                                    |
+| `pulse`              | owner or guard                               | Resets `last_pulse` and updates `streak`, `best_streak` and `total_pulses`.                                                                                                            |
+| `lockdown`           | owner, guard or guardian                     | `locked_until = max(locked_until, now + lock_secs)`. Does not reset the clock. A guardian must wait until `guardian_ready_at`, which is set to `locked_until + lock_secs`.             |
+| `unlock`             | owner **and** guardian                       | Ends a lockdown early.                                                                                                                                                                 |
+| `withdraw_sol`       | owner                                        | Withdraws lamports above rent. Blocked while locked.                                                                                                                                   |
+| `withdraw_token`     | owner                                        | Withdraws from the vault's ATA (SPL Token or Token-2022). Blocked while locked.                                                                                                        |
+| `close_vault`        | owner                                        | Closes the vault and returns its lamports. Blocked while locked. Does not sweep token accounts.                                                                                        |
+| `execute_sol_rule`   | anyone                                       | Pays a due SOL rule to its beneficiary, minus the rail's fee to the treasury.                                                                                                          |
+| `execute_token_rule` | anyone (pays rent for the beneficiary's ATA) | Pays a due token rule, minus the fee to the treasury's token account. On a private rail it also sends 0.003 SOL to the claim key if the claim key has less and the vault can spare it. |
 
 There is no deposit instruction. To deposit SOL, send a plain system transfer to the vault PDA. To deposit tokens, transfer them into the vault PDA's associated token account.
 
-### Plans
+### Pricing
 
-|             | Free                                     | Deadman Plus (paid in SKR)            |
-| ----------- | ---------------------------------------- | ------------------------------------- |
-| Heirs       | 1                                        | up to 4                               |
-| Guardian    | no                                       | yes (lockdown + co-sign early unlock) |
-| Success fee | `fee_bps` (≤1%), taken from heir payouts | same                                  |
+| Line                      | Who pays           | Rate                                                                                                  |
+| ------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------- |
+| Using the app             | nobody             | Free. No subscription.                                                                                |
+| Payout fee, Solana rail   | the released funds | `fee_bps_public`, 2% at launch, charged on-chain only when a rule releases funds                      |
+| Payout fee, private rails | the released funds | `fee_bps_private`, 5% at launch. The gas stipend comes from the vault, not from the fee.              |
+| Hard cap                  | -                  | 5% per rail, enforced in the program (`MAX_FEE_BPS = 500`)                                            |
+| Earn swap (optional)      | the owner          | Jupiter referral fee, at least 50 bps; Jupiter keeps 20% of it                                        |
+| Zcash routing (optional)  | the beneficiary    | NEAR Intents `appFees`, split 50/50 with 1Click. Off by default until a treasury NEAR account is set. |
 
-Duration bounds enforced on-chain: interval 60 s to 366 days, grace 60 s to 90 days, lock 60 s to 30 days. The 60-second minimums exist so the switch can be demoed live.
+Duration bounds enforced on-chain: check-in interval 60 s to 366 days, rule delay from `interval + 60 s` to about 3 years, lock 60 s to 30 days. The 60-second minimums exist so the switch can be demoed live; the app's Demo cadence is a 2-minute check-in with a 3-minute first release.
 
 Full account, trust and threat models: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Private rails
+
+On-chain, every rail pays a Solana key. For Cloak and Zcash that key is a **claim key**: a fresh keypair the beneficiary's Deadman app generates (Security → Receive privately) and shares as a claim code such as `zcash:<address>`. The owner pastes the code into a tier. When the tier releases, the beneficiary's app routes the funds onward:
+
+- **Zcash.** Through the NEAR Intents 1Click API to the beneficiary's unified `u1` address. The claim key deposits into a one-time 1Click deposit address; solvers deliver ZEC; refunds go back to the claim key. Details: [docs/research/zcash-near-intents.md](docs/research/zcash-near-intents.md).
+- **Cloak.** Through the Cloak SDK bundled into a headless WebView, which builds a Groth16 proof on the device and deposits into Cloak's shielded pool. Details: [docs/research/cloak.md](docs/research/cloak.md).
+- **Gas.** A private token payout also sends the claim key 0.003 SOL, so it can pay routing fees without being funded from a linkable wallet.
+- **Mainnet only.** Cloak has no devnet deployment, and 1Click routes real assets. On devnet the program still pays claim keys, but routing is disabled.
+
+What this privacy does **not** cover:
+
+- The vault → claim key payout is public on Solana: amount, time and rail.
+- **Zcash:** the NEAR Intents explorer publicly maps each 1Click deposit address to the recipient `u1` address and the amounts. Anyone can link vault → claim key → `u1`. What stays private is everything the beneficiary does with the ZEC afterwards, so they should use a fresh, shielded-only `u1` per payout.
+- **Cloak:** the deposit amount into the pool is visible and linkable to the vault. A private send out of the pool is linked to the deposit only by amount and timing. Cloak's relay holds the claim identity's viewing key and can see the whole path.
+- Operators (1Click, Cloak's relay, RPC providers) see IP addresses and keys.
+- If the beneficiary releases a private tier from their own wallet, that wallet becomes the public executor. The keeper exists so they do not have to.
+
+## Earn
+
+Idle SOL in the vault earns nothing. Earn swaps SOL for JitoSOL through Jupiter Swap V2 (`/order`, then `/execute`), with an optional Jupiter referral fee to the treasury (minimum 50 bps; Jupiter keeps 20%). The app then deposits the JitoSOL into the vault as an ordinary token, so a rule can pay it out like any other SPL asset. The program has no CPI into Jupiter or the stake pool. Earn is mainnet-only. The user pays the swap fee, and beneficiaries of a JitoSOL rule receive JitoSOL with its depeg exposure. See [docs/research/earn-jupiter-jito.md](docs/research/earn-jupiter-jito.md).
+
+## Keeper
+
+`tool/keeper.dart` scans every vault and executes due rules with its own key. It executes at most one rule per vault per sweep, so a percentage rule always sees the balance that earlier rules left. The keeper pays transaction fees and, for token rules, the rent for the beneficiary's and the treasury's token accounts. The payout fee pays for that. Anyone can run it, and beneficiaries can also release a due tier from the Family Circle tab.
+
+```bash
+dart run tool/keeper.dart --keypair <path> --rpc https://api.devnet.solana.com --every 30
+```
 
 ## Repository layout
 
 ```
-onchain/                 Anchor workspace
-  programs/deadman/src/  program (lib.rs, state.rs, instructions/{config,vault,funds}.rs)
-  programs/deadman/tests LiteSVM integration tests
-lib/                     Flutter app
-  core/config.dart       cluster, RPC, program id, SKR mint
-  solana/deadman_api.dart  program client contract (tx builders, guard-key actions)
-  wallet/wallet_bridge.dart  MWA contract (authorize, signTransactions)
-  state/, ui/            Riverpod state and screens
-android/                 Android host app (app.deadman.seeker), Kotlin MWA bridge to Seed Vault Wallet
-docs/                    judging report, architecture, pitch outline, demo script
+onchain/                   Anchor workspace
+  programs/deadman/src/    program (lib.rs, state.rs, instructions/{config,vault,funds}.rs)
+  programs/deadman/tests/  LiteSVM integration tests
+  target/idl/deadman.json  IDL
+lib/                       Flutter app
+  core/config.dart         cluster, RPC, program id (override with --dart-define)
+  solana/                  program client: codec, tx builders, guard-key and keeper actions
+  wallet/                  MWA contract and the platform-channel bridge
+  rails/                   Zcash (1Click), Cloak (SDK in a headless WebView), Earn (Jupiter)
+  state/, ui/              Riverpod state and screens (rules_editor.dart is the release plan)
+assets/cloak/              bundled Cloak SDK and its WebView host page
+android/                   Android host app (app.deadman.seeker), Kotlin MWA bridge to Seed Vault Wallet
+tool/keeper.dart           protocol keeper
+tool/init_config.dart      admin: initialize Config (treasury, fees)
+tool/cloak_bundle/         esbuild project that produces assets/cloak/cloak.js
+scripts/devnet_setup.sh    one-time Config setup after deploy
+test/                      Dart tests for the rails and the program client
+docs/                      how it works, architecture, pitch outline, demo script, research, judging report
 ```
 
 ## Build and test
@@ -110,35 +168,40 @@ cargo fmt --all
 cargo clippy -- -W clippy::all
 cargo test                          # LiteSVM tests load target/deploy/deadman.so, so build first
 
-# App
+# One-time Config after deploying (signs with the upgrade authority)
 cd ..
+KEYPAIR=<upgrade-authority.json> scripts/devnet_setup.sh   # 2% / 5% by default; TREASURY defaults to the admin
+
+# App
 flutter pub get
-flutter build apk --dart-define=SKR_MINT=<devnet SKR stand-in mint>
+flutter test
+flutter build apk                   # devnet: Solana rail end to end
+flutter build apk --dart-define=CLUSTER=mainnet-beta --dart-define=RPC_URL=<rpc> \
+  --dart-define=JUP_API_KEY=<key> --dart-define=JUP_REFERRAL_ACCOUNT=<account> \
+  --dart-define=ONECLICK_JWT=<optional partner token>      # private rails and Earn
 ```
 
-The integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover these cases: config gated to the upgrade authority, guard pulses and day streaks, duress lockdown with guard rotation, the guard being unable to move funds, free versus Plus limits, guardian lock and co-signed unlock, the switch firing only after the deadline, a pulse preventing a trigger, and pro-rata token claims.
+The integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover: config gated to the upgrade authority and the 5% cap, guard pulses and day streaks, rule validation, tiered SOL rules paying in order with per-rail fees, per-asset ordering, a pulse resetting pending rules after a partial release, dust to a fresh account being skipped, token rules with fees and independent order, the private-rail gas stipend, duress lockdown freezing funds and policy, lockdown not stopping inheritance, the guard being unable to move funds, the guardian lockdown cooldown and removal, co-signed unlock, owner-only token withdrawal, `close_vault` blocked while locked, and a compute-unit profile.
 
-**Devnet program ID:** `ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL`. Check that it is deployed with `solana program show ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL --url devnet`.
+**Program ID:** `ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL`. Check the devnet deployment with `solana program show ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL --url devnet`.
 
 ## Security notes
 
 - **Unaudited.** This is a hackathon build. Nobody outside the team has reviewed it. It has not been fuzzed, and it is not a verifiable build yet.
 - **Single-key admin.** `init_config` can only be called by the program's upgrade authority, and that key also controls upgrades. Until the authority moves to a multisig or the program is frozen, that one key can change the program.
-- **Only vaulted assets are covered.** Funds left in your Seed Vault wallet are not protected by the switch or by lockdown.
+- **Fees are read at execution.** The admin can change either fee, up to the 5% cap, and the new rate applies to rules that have not executed yet.
+- **Only vaulted assets are covered.** Funds left in your Seed Vault wallet are not protected by the plan or by lockdown. Funds in the vault that no rule reaches stay there if you never return.
 - **Owner-key compromise is out of scope.** There is no on-chain owner rotation. Someone who holds your seed can withdraw while the vault is unlocked.
-- **Known limitations** (details in [ARCHITECTURE.md](docs/ARCHITECTURE.md#known-limitations)):
-  - A guardian can keep extending a lockdown while Plus is active; guardian lockdowns stop working once Plus lapses, so the worst case is the prepaid Plus time plus one lock period.
-  - `close_vault` does not sweep token accounts.
-  - SOL deposited after `trigger` is not distributed.
-  - Each claimed mint needs a treasury token account.
-- Program hygiene: canonical bumps are stored, arithmetic is checked, and there is no `unwrap()` in program code. Every instruction validates the signer against the vault's stored roles.
+- **Claim keys live on one phone.** A beneficiary who loses the phone or resets the app before routing loses what landed on the claim key.
+- **Private rails and Earn depend on third parties** (1Click and NEAR Intents solvers, Cloak's relay and program, Jupiter, the Jito stake pool), and none of them has been exercised end to end with real funds yet.
+- **Known limitations** are listed in [ARCHITECTURE.md](docs/ARCHITECTURE.md#known-limitations).
+- Program hygiene: canonical bumps are stored, arithmetic is checked, and there is no `unwrap()` in program code. Every instruction validates the signer against the vault's stored roles, and execution pins the beneficiary to the rule and the treasury to the config.
 
 ## Roadmap
 
-- **Now (hackathons):** Solana Mobile CLOCK IN (APK, GitHub, demo video and deck, due 2026-10-08) and the Colosseum Crypto World's Fair, Solana track (due 2026-10-12).
-- **Before mainnet:** external audit, a multisig upgrade authority, a verifiable build, a fix for guardian removal during lockdown, a token sweep in `close_vault`, and a Seeker Genesis Token check for Seeker-only perks.
-- **Cloak private payouts to heirs.** Heirs claim without linking the estate to their main wallet publicly. Cloak's SDK is TypeScript only today, so this needs a bridge or a backend.
-- **Zcash shielded inheritance.** A shielded version of the switch for ZEC holders.
+- **Now (hackathons):** Solana Mobile CLOCK IN (APK, GitHub, demo video and deck, due 2026-10-08) and the Colosseum Crypto World's Fair (due 2026-10-12).
+- **Before mainnet:** external audit, a multisig upgrade authority, a verifiable build, a first small real-funds run of each private rail and of Earn, a token sweep in `close_vault`, an indexer for the keeper, and claim-key backup.
+- **Private rails:** routing SPL payouts from claim keys in the app, receiving Cloak shielded transfers (`cloak:` destinations), and NEAR Intents confidential mode once a partner token is available.
 - **DAO signer recovery.** The same switch applied to multisig signers: a signer who stays silent for N months is replaced by a pre-agreed backup.
 
 ## License

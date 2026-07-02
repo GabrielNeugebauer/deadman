@@ -29,15 +29,17 @@ void reminderDispatcher() {
 }
 
 Future<void> _init() => _notifications.initialize(
-      settings: const InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      ),
-    );
+  settings: const InitializationSettings(
+    android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+  ),
+);
 
 Future<void> initReminders() async {
   await _init();
   await _notifications
-      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
       ?.requestNotificationsPermission();
   await Workmanager().initialize(reminderDispatcher);
   await Workmanager().registerPeriodicTask(
@@ -49,24 +51,27 @@ Future<void> initReminders() async {
 }
 
 /// Cached so the background isolate can decide without RPC calls.
-Future<void> scheduleFrom({required int pulseDue, required int deadline}) async {
+Future<void> scheduleFrom({
+  required int pulseDue,
+  required int deadline,
+}) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setInt(_dueKey, pulseDue);
   await prefs.setInt(_deadlineKey, deadline);
 }
 
 Future<void> notifyPulseDue({bool overdue = false}) => _notifications.show(
-      id: 1,
-      title: overdue ? 'Deadman fires soon' : 'Time to pulse',
-      body: overdue
-          ? 'Your switch is in its grace period. Open Deadman and pulse now.'
-          : 'Tap to check in. Keep your streak alive.',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'pulse',
-          'Pulse reminders',
-          importance: Importance.high,
-          priority: Priority.high,
-        ),
-      ),
-    );
+  id: 1,
+  title: overdue ? 'Deadman fires soon' : 'Time to pulse',
+  body: overdue
+      ? 'Your switch is in its grace period. Open Deadman and pulse now.'
+      : 'Tap to check in. Keep your streak alive.',
+  notificationDetails: const NotificationDetails(
+    android: AndroidNotificationDetails(
+      'pulse',
+      'Pulse reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+    ),
+  ),
+);

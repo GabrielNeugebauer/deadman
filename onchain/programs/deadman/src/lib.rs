@@ -19,57 +19,39 @@ pub mod deadman {
     pub fn init_config(
         ctx: Context<InitConfig>,
         treasury: Pubkey,
-        skr_mint: Pubkey,
-        plus_price: u64,
-        fee_bps: u16,
+        fee_bps_public: u16,
+        fee_bps_private: u16,
     ) -> Result<()> {
-        instructions::config::handle_init_config(ctx, treasury, skr_mint, plus_price, fee_bps)
+        instructions::config::handle_init_config(ctx, treasury, fee_bps_public, fee_bps_private)
     }
 
     pub fn set_config(
         ctx: Context<SetConfig>,
         treasury: Pubkey,
-        skr_mint: Pubkey,
-        plus_price: u64,
-        fee_bps: u16,
+        fee_bps_public: u16,
+        fee_bps_private: u16,
     ) -> Result<()> {
-        instructions::config::handle_set_config(ctx, treasury, skr_mint, plus_price, fee_bps)
+        instructions::config::handle_set_config(ctx, treasury, fee_bps_public, fee_bps_private)
     }
 
     pub fn create_vault(
         ctx: Context<CreateVault>,
         guard: Pubkey,
         interval_secs: i64,
-        grace_secs: i64,
         lock_secs: i64,
-        heirs: Vec<HeirInput>,
+        rules: Vec<RuleInput>,
     ) -> Result<()> {
-        instructions::vault::handle_create_vault(
-            ctx,
-            guard,
-            interval_secs,
-            grace_secs,
-            lock_secs,
-            heirs,
-        )
+        instructions::vault::handle_create_vault(ctx, guard, interval_secs, lock_secs, rules)
     }
 
     pub fn update_policy(
         ctx: Context<OwnerAction>,
         interval_secs: i64,
-        grace_secs: i64,
         lock_secs: i64,
-        heirs: Vec<HeirInput>,
+        rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
     ) -> Result<()> {
-        instructions::vault::handle_update_policy(
-            ctx,
-            interval_secs,
-            grace_secs,
-            lock_secs,
-            heirs,
-            guardian,
-        )
+        instructions::vault::handle_update_policy(ctx, interval_secs, lock_secs, rules, guardian)
     }
 
     pub fn set_guard(ctx: Context<OwnerAction>, new_guard: Pubkey) -> Result<()> {
@@ -103,19 +85,14 @@ pub mod deadman {
         instructions::funds::handle_withdraw_token(ctx, amount)
     }
 
-    pub fn trigger(ctx: Context<Trigger>) -> Result<()> {
-        instructions::funds::handle_trigger(ctx)
+    pub fn execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+        instructions::funds::handle_execute_sol_rule(ctx, index)
     }
 
-    pub fn claim_sol(ctx: Context<ClaimSol>) -> Result<()> {
-        instructions::funds::handle_claim_sol(ctx)
-    }
-
-    pub fn claim_token<'info>(ctx: Context<'info, ClaimToken<'info>>) -> Result<()> {
-        instructions::funds::handle_claim_token(ctx)
-    }
-
-    pub fn subscribe(ctx: Context<Subscribe>, months: u8) -> Result<()> {
-        instructions::funds::handle_subscribe(ctx, months)
+    pub fn execute_token_rule<'info>(
+        ctx: Context<'info, ExecuteTokenRule<'info>>,
+        index: u8,
+    ) -> Result<()> {
+        instructions::funds::handle_execute_token_rule(ctx, index)
     }
 }

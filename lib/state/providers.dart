@@ -1,6 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../rails/cloak_route.dart';
+import '../rails/earn_jupiter.dart';
+import '../rails/rails.dart';
+import '../rails/zcash_route.dart';
 import '../solana/deadman_api.dart';
 import '../solana/deadman_client.dart';
 import '../wallet/mwa_wallet_bridge.dart';
@@ -14,6 +18,10 @@ final prefsProvider = Provider<SharedPreferences>(
 final secureStoreProvider = Provider((ref) => SecureStore());
 final walletProvider = Provider<WalletBridge>((ref) => MwaWalletBridge());
 final apiProvider = Provider<DeadmanApi>((ref) => DeadmanClient());
+final routesProvider = Provider<Map<Rail, PrivateRoute>>(
+  (ref) => {Rail.zcash: ZcashRoute(), Rail.cloak: CloakRoute()},
+);
+final earnProvider = Provider<EarnService>((ref) => JupiterEarn());
 
 int nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
@@ -29,10 +37,10 @@ class Session {
   final bool duress;
 
   Session copyWith({String? owner, bool? unlocked, bool? duress}) => Session(
-        owner: owner ?? this.owner,
-        unlocked: unlocked ?? this.unlocked,
-        duress: duress ?? this.duress,
-      );
+    owner: owner ?? this.owner,
+    unlocked: unlocked ?? this.unlocked,
+    duress: duress ?? this.duress,
+  );
 }
 
 class SessionController extends Notifier<Session> {
@@ -59,18 +67,28 @@ class SessionController extends Notifier<Session> {
   }
 }
 
-final sessionProvider =
-    NotifierProvider<SessionController, Session>(SessionController.new);
+final sessionProvider = NotifierProvider<SessionController, Session>(
+  SessionController.new,
+);
 
 final vaultProvider = FutureProvider<VaultState?>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return null;
   final vault = await ref.watch(apiProvider).fetchVault(owner);
-  if (vault != null) {
-    await scheduleFrom(pulseDue: vault.pulseDue, deadline: vault.deadline);
+  final next = vault?.nextRuleDue;
+  if (vault != null && next != null) {
+    await scheduleFrom(pulseDue: vault.pulseDue, deadline: next);
   }
   return vault;
 });
+
+final feesProvider = FutureProvider(
+  (ref) => ref.watch(apiProvider).fetchFees(),
+);
+
+final claimProfilesProvider = FutureProvider(
+  (ref) => ref.watch(secureStoreProvider).loadClaims(),
+);
 
 final walletBalanceProvider = FutureProvider<int>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
@@ -78,8 +96,24 @@ final walletBalanceProvider = FutureProvider<int>((ref) async {
   return ref.watch(apiProvider).balance(owner);
 });
 
+/// Vaults naming this wallet, or one of this device's claim keys.
 final watchedVaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return const [];
-  return ref.watch(apiProvider).fetchWatchedVaults(owner);
+  final api = ref.watch(apiProvider);
+  final claims = await ref.watch(claimProfilesProvider.future);
+  final seen = <String, VaultState>{};
+  for (final who in [owner, ...claims.map((c) => c.key.address)]) {
+    for (final v in await api.fetchWatchedVaults(who)) {
+      seen[v.address] = v;
+    }
+  }
+  return seen.values.toList();
+});
+
+/// Addresses this device answers for as a beneficiary.
+final myBeneficiaryKeysProvider = FutureProvider<Set<String>>((ref) async {
+  final owner = ref.watch(sessionProvider.select((s) => s.owner));
+  final claims = await ref.watch(claimProfilesProvider.future);
+  return {?owner, ...claims.map((c) => c.key.address)};
 });

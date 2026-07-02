@@ -1,22 +1,14 @@
 use {
     anchor_lang::{
-        prelude::{AccountMeta, Pubkey},
-        solana_program::{
-            clock::Clock, instruction::Instruction, system_instruction, system_program,
-        },
+        prelude::Pubkey,
+        solana_program::{clock::Clock, instruction::Instruction, system_program},
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    anchor_spl::{
-        associated_token::{self, get_associated_token_address_with_program_id},
-        token_2022::spl_token_2022::{
-            self,
-            extension::{transfer_fee::instruction::initialize_transfer_fee_config, ExtensionType},
-        },
-    },
-    deadman::{state::HeirInput, Config, Vault, VaultStatus, CLAIM_SEED, CONFIG_SEED, VAULT_SEED},
+    anchor_spl::associated_token::{self, get_associated_token_address_with_program_id},
+    deadman::{AmountMode, Config, Rail, RuleInput, Vault, CONFIG_SEED, VAULT_SEED},
     litesvm::LiteSVM,
     litesvm_token::{
-        get_spl_account, spl_token::state::Account as SplAccount, CreateAccount,
+        get_spl_account, spl_token::state::Account as SplAccount,
         CreateAssociatedTokenAccountIdempotent, CreateMint, MintTo, TOKEN_ID,
     },
     solana_keypair::Keypair,
@@ -28,10 +20,10 @@ use {
 const SOL: u64 = 1_000_000_000;
 const DAY: i64 = 86_400;
 const INTERVAL: i64 = 7 * DAY;
-const GRACE: i64 = DAY;
 const LOCK: i64 = 3 * DAY;
-const FEE_BPS: u16 = 50;
-const PLUS_PRICE: u64 = 100_000_000;
+const FEE_PUBLIC: u16 = 200;
+const FEE_PRIVATE: u16 = 500;
+const STIPEND: u64 = 3_000_000;
 
 struct Env {
     svm: LiteSVM,
@@ -39,9 +31,7 @@ struct Env {
     treasury: Keypair,
     owner: Keypair,
     guard: Keypair,
-    skr_mint: Pubkey,
-    /// Compute units of the last successful transaction.
-    last_cu: u64,
+    keeper: Keypair,
 }
 
 fn config_pda() -> Pubkey {
@@ -56,20 +46,41 @@ fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
     get_associated_token_address_with_program_id(owner, mint, &TOKEN_ID)
 }
 
-fn ata_with(owner: &Pubkey, mint: &Pubkey, program: &Pubkey) -> Pubkey {
-    get_associated_token_address_with_program_id(owner, mint, program)
-}
-
-fn claim_pda(vault: &Pubkey, mint: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[CLAIM_SEED, vault.as_ref(), mint.as_ref()], &deadman::id()).0
-}
-
 fn program_data_pda() -> Pubkey {
     Pubkey::find_program_address(
         &[deadman::id().as_ref()],
         &anchor_lang::solana_program::bpf_loader_upgradeable::ID,
     )
     .0
+}
+
+fn rule(
+    beneficiary: &Pubkey,
+    rail: Rail,
+    after: i64,
+    mint: Option<Pubkey>,
+    mode: AmountMode,
+    amount: u64,
+) -> RuleInput {
+    RuleInput {
+        beneficiary: *beneficiary,
+        rail,
+        after_secs: after,
+        mint,
+        mode,
+        amount,
+    }
+}
+
+fn all_to(beneficiary: &Pubkey) -> Vec<RuleInput> {
+    vec![rule(
+        beneficiary,
+        Rail::Solana,
+        10 * DAY,
+        None,
+        AmountMode::Percent,
+        10_000,
+    )]
 }
 
 impl Env {
@@ -85,22 +96,18 @@ impl Env {
         let treasury = Keypair::new();
         let owner = Keypair::new();
         let guard = Keypair::new();
-        for k in [&admin, &treasury, &owner, &guard] {
+        let keeper = Keypair::new();
+        for k in [&admin, &treasury, &owner, &guard, &keeper] {
             svm.airdrop(&k.pubkey(), 100 * SOL).unwrap();
         }
 
-        // LiteSVM deploys with no upgrade authority; set it to `admin` so
-        // init_config's upgrade-authority gate can be exercised.
+        // LiteSVM deploys with no upgrade authority; make `admin` the
+        // authority so init_config's gate can be exercised.
         let pd = program_data_pda();
         let mut acc = svm.get_account(&pd).unwrap();
         acc.data[12] = 1;
         acc.data[13..45].copy_from_slice(admin.pubkey().as_ref());
         svm.set_account(pd, acc).unwrap();
-
-        let skr_mint = CreateMint::new(&mut svm, &admin)
-            .decimals(6)
-            .send()
-            .unwrap();
 
         let mut env = Self {
             svm,
@@ -108,8 +115,7 @@ impl Env {
             treasury,
             owner,
             guard,
-            skr_mint,
-            last_cu: 0,
+            keeper,
         };
         env.set_time(1_800_000_000);
         env
@@ -130,24 +136,18 @@ impl Env {
         self.set_time(t);
     }
 
-    fn send(&mut self, ix: Instruction, signers: &[&Keypair]) -> Result<(), String> {
-        self.send_ixs(&[ix], signers)
-    }
-
-    fn send_ixs(&mut self, ixs: &[Instruction], signers: &[&Keypair]) -> Result<(), String> {
+    fn send(&mut self, ix: Instruction, signers: &[&Keypair]) -> Result<u64, String> {
         self.svm.expire_blockhash();
         let msg = Message::new_with_blockhash(
-            ixs,
+            &[ix],
             Some(&signers[0].pubkey()),
             &self.svm.latest_blockhash(),
         );
         let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
-        let meta = self
-            .svm
+        self.svm
             .send_transaction(tx)
-            .map_err(|e| format!("{:?}\n{}", e.err, e.meta.logs.join("\n")))?;
-        self.last_cu = meta.compute_units_consumed;
-        Ok(())
+            .map(|m| m.compute_units_consumed)
+            .map_err(|e| format!("{:?}\n{}", e.err, e.meta.logs.join("\n")))
     }
 
     fn vault(&self) -> Vault {
@@ -166,79 +166,46 @@ impl Env {
         get_spl_account::<SplAccount>(&self.svm, k).unwrap().amount
     }
 
-    fn init_config(&mut self, signer: &Keypair) -> Result<(), String> {
-        let treasury = self.treasury.pubkey();
-        self.init_config_with(signer, treasury, FEE_BPS)
+    fn withdrawable(&self) -> u64 {
+        let v = vault_pda(&self.owner.pubkey());
+        let acc = self.svm.get_account(&v).unwrap();
+        acc.lamports - self.svm.minimum_balance_for_rent_exemption(acc.data.len())
     }
 
-    fn init_config_with(
-        &mut self,
-        signer: &Keypair,
-        treasury: Pubkey,
-        fee_bps: u16,
-    ) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
+    fn config_ix(&self, signer: &Pubkey, public: u16, private: u16) -> Instruction {
+        Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::InitConfig {
-                treasury,
-                skr_mint: self.skr_mint,
-                plus_price: PLUS_PRICE,
-                fee_bps,
+                treasury: self.treasury.pubkey(),
+                fee_bps_public: public,
+                fee_bps_private: private,
             }
             .data(),
             deadman::accounts::InitConfig {
-                admin: signer.pubkey(),
+                admin: *signer,
                 config: config_pda(),
                 program: deadman::id(),
                 program_data: program_data_pda(),
                 system_program: system_program::ID,
             }
             .to_account_metas(None),
-        );
-        let signer = signer.insecure_clone();
-        self.send(ix, &[&signer])
+        )
     }
 
-    fn set_config(
-        &mut self,
-        signer: &Keypair,
-        treasury: Pubkey,
-        plus_price: u64,
-        fee_bps: u16,
-    ) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
-            deadman::id(),
-            &deadman::instruction::SetConfig {
-                treasury,
-                skr_mint: self.skr_mint,
-                plus_price,
-                fee_bps,
-            }
-            .data(),
-            deadman::accounts::SetConfig {
-                admin: signer.pubkey(),
-                config: config_pda(),
-            }
-            .to_account_metas(None),
-        );
-        let signer = signer.insecure_clone();
-        self.send(ix, &[&signer])
+    fn init_config(&mut self) {
+        let admin = self.admin.insecure_clone();
+        let ix = self.config_ix(&admin.pubkey(), FEE_PUBLIC, FEE_PRIVATE);
+        self.send(ix, &[&admin]).unwrap();
     }
 
-    fn config(&self) -> Config {
-        let acc = self.svm.get_account(&config_pda()).unwrap();
-        Config::try_deserialize(&mut acc.data.as_slice()).unwrap()
-    }
-
-    fn create_vault(&mut self, heirs: Vec<HeirInput>) -> Result<(), String> {
+    fn create_vault(&mut self, rules: Vec<RuleInput>) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::CreateVault {
                 guard: self.guard.pubkey(),
                 interval_secs: INTERVAL,
-                grace_secs: GRACE,
                 lock_secs: LOCK,
-                heirs,
+                rules,
             }
             .data(),
             deadman::accounts::CreateVault {
@@ -276,21 +243,20 @@ impl Env {
 
     fn update_policy(
         &mut self,
-        heirs: Vec<HeirInput>,
+        rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let ix = self.owner_ix(deadman::instruction::UpdatePolicy {
             interval_secs: INTERVAL,
-            grace_secs: GRACE,
             lock_secs: LOCK,
-            heirs,
+            rules,
             guardian,
         });
         let owner = self.owner.insecure_clone();
         self.send(ix, &[&owner])
     }
 
-    fn pulse(&mut self, signer: &Keypair) -> Result<(), String> {
+    fn pulse(&mut self, signer: &Keypair) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::Pulse {}.data(),
@@ -304,7 +270,7 @@ impl Env {
         self.send(ix, &[&signer])
     }
 
-    fn lockdown(&mut self, signer: &Keypair) -> Result<(), String> {
+    fn lockdown(&mut self, signer: &Keypair) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::Lockdown {}.data(),
@@ -318,7 +284,7 @@ impl Env {
         self.send(ix, &[&signer])
     }
 
-    fn withdraw_sol(&mut self, amount: u64) -> Result<(), String> {
+    fn withdraw_sol(&mut self, amount: u64) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::WithdrawSol { amount }.data(),
@@ -332,197 +298,73 @@ impl Env {
         self.send(ix, &[&owner])
     }
 
-    fn trigger(&mut self, caller: &Keypair) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
-            deadman::id(),
-            &deadman::instruction::Trigger {}.data(),
-            deadman::accounts::Trigger {
-                caller: caller.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
-            }
-            .to_account_metas(None),
-        );
-        let caller = caller.insecure_clone();
-        self.send(ix, &[&caller])
-    }
-
-    fn claim_sol(&mut self, heir: &Keypair) -> Result<(), String> {
+    fn execute_sol(&mut self, index: u8, beneficiary: &Pubkey) -> Result<u64, String> {
         let treasury = self.treasury.pubkey();
-        self.claim_sol_to(heir, treasury)
+        self.execute_sol_with(index, beneficiary, &treasury)
     }
 
-    fn claim_sol_to(&mut self, heir: &Keypair, treasury: Pubkey) -> Result<(), String> {
+    fn execute_sol_with(
+        &mut self,
+        index: u8,
+        beneficiary: &Pubkey,
+        treasury: &Pubkey,
+    ) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
-            &deadman::instruction::ClaimSol {}.data(),
-            deadman::accounts::ClaimSol {
-                heir: heir.pubkey(),
+            &deadman::instruction::ExecuteSolRule { index }.data(),
+            deadman::accounts::ExecuteSolRule {
+                executor: self.keeper.pubkey(),
                 vault: vault_pda(&self.owner.pubkey()),
                 config: config_pda(),
-                treasury,
+                beneficiary: *beneficiary,
+                treasury: *treasury,
             }
             .to_account_metas(None),
         );
-        let heir = heir.insecure_clone();
-        self.send(ix, &[&heir])
+        let keeper = self.keeper.insecure_clone();
+        self.send(ix, &[&keeper])
     }
 
-    fn claim_token(&mut self, heir: &Keypair, mint: &Pubkey) -> Result<(), String> {
-        let vault_token = ata(&vault_pda(&self.owner.pubkey()), mint);
-        self.claim_token_with(heir, mint, &TOKEN_ID, vault_token, &[])
-    }
-
-    fn claim_token_with(
+    fn execute_token(
         &mut self,
-        heir: &Keypair,
+        index: u8,
+        beneficiary: &Pubkey,
         mint: &Pubkey,
-        program: &Pubkey,
-        vault_token: Pubkey,
-        extra: &[AccountMeta],
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let vault = vault_pda(&self.owner.pubkey());
-        let mut ix = Instruction::new_with_bytes(
+        let ix = Instruction::new_with_bytes(
             deadman::id(),
-            &deadman::instruction::ClaimToken {}.data(),
-            deadman::accounts::ClaimToken {
-                heir: heir.pubkey(),
+            &deadman::instruction::ExecuteTokenRule { index }.data(),
+            deadman::accounts::ExecuteTokenRule {
+                executor: self.keeper.pubkey(),
                 vault,
                 config: config_pda(),
                 mint: *mint,
-                vault_token,
-                heir_token: ata_with(&heir.pubkey(), mint, program),
-                treasury_token: ata_with(&self.treasury.pubkey(), mint, program),
-                claim: claim_pda(&vault, mint),
-                token_program: *program,
+                vault_token: ata(&vault, mint),
+                beneficiary: *beneficiary,
+                beneficiary_token: ata(beneficiary, mint),
+                treasury_token: ata(&self.treasury.pubkey(), mint),
+                token_program: TOKEN_ID,
                 associated_token_program: associated_token::ID,
                 system_program: system_program::ID,
             }
             .to_account_metas(None),
         );
-        ix.accounts.extend_from_slice(extra);
-        let heir = heir.insecure_clone();
-        self.send(ix, &[&heir])
+        let keeper = self.keeper.insecure_clone();
+        self.send(ix, &[&keeper])
     }
 
-    fn withdraw_token(
-        &mut self,
-        signer: &Keypair,
-        mint: &Pubkey,
-        program: &Pubkey,
-        amount: u64,
-    ) -> Result<(), String> {
+    fn withdraw_token(&mut self, mint: &Pubkey, amount: u64) -> Result<u64, String> {
         let vault = vault_pda(&self.owner.pubkey());
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::WithdrawToken { amount }.data(),
             deadman::accounts::WithdrawToken {
-                owner: signer.pubkey(),
+                owner: self.owner.pubkey(),
                 vault,
                 mint: *mint,
-                vault_token: ata_with(&vault, mint, program),
-                owner_token: ata_with(&signer.pubkey(), mint, program),
-                token_program: *program,
-            }
-            .to_account_metas(None),
-        );
-        let signer = signer.insecure_clone();
-        self.send(ix, &[&signer])
-    }
-
-    fn close_vault(&mut self) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
-            deadman::id(),
-            &deadman::instruction::CloseVault {}.data(),
-            deadman::accounts::CloseVault {
-                owner: self.owner.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
-            }
-            .to_account_metas(None),
-        );
-        let owner = self.owner.insecure_clone();
-        self.send(ix, &[&owner])
-    }
-
-    fn unlock(&mut self, guardian: &Keypair) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
-            deadman::id(),
-            &deadman::instruction::Unlock {}.data(),
-            deadman::accounts::Unlock {
-                owner: self.owner.pubkey(),
-                guardian: guardian.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
-            }
-            .to_account_metas(None),
-        );
-        let owner = self.owner.insecure_clone();
-        let guardian = guardian.insecure_clone();
-        self.send(ix, &[&owner, &guardian])
-    }
-
-    fn set_guard(&mut self, new_guard: Pubkey) -> Result<(), String> {
-        let ix = self.owner_ix(deadman::instruction::SetGuard { new_guard });
-        let owner = self.owner.insecure_clone();
-        self.send(ix, &[&owner])
-    }
-
-    fn new_mint(&mut self) -> Pubkey {
-        let admin = self.admin.insecure_clone();
-        CreateMint::new(&mut self.svm, &admin)
-            .decimals(6)
-            .send()
-            .unwrap()
-    }
-
-    /// Token-2022 mint with a transfer-fee extension; `admin` is mint authority.
-    fn new_fee_mint_2022(&mut self, fee_bps: u16) -> Pubkey {
-        let admin = self.admin.insecure_clone();
-        let mint = Keypair::new();
-        let program = spl_token_2022::ID;
-        let len = ExtensionType::try_calculate_account_len::<spl_token_2022::state::Mint>(&[
-            ExtensionType::TransferFeeConfig,
-        ])
-        .unwrap();
-        let ixs = [
-            system_instruction::create_account(
-                &admin.pubkey(),
-                &mint.pubkey(),
-                self.svm.minimum_balance_for_rent_exemption(len),
-                len as u64,
-                &program,
-            ),
-            initialize_transfer_fee_config(
-                &program,
-                &mint.pubkey(),
-                Some(&admin.pubkey()),
-                Some(&admin.pubkey()),
-                fee_bps,
-                u64::MAX,
-            )
-            .unwrap(),
-            spl_token_2022::instruction::initialize_mint2(
-                &program,
-                &mint.pubkey(),
-                &admin.pubkey(),
-                None,
-                6,
-            )
-            .unwrap(),
-        ];
-        self.send_ixs(&ixs, &[&admin, &mint]).unwrap();
-        mint.pubkey()
-    }
-
-    fn subscribe(&mut self, months: u8) -> Result<(), String> {
-        let ix = Instruction::new_with_bytes(
-            deadman::id(),
-            &deadman::instruction::Subscribe { months }.data(),
-            deadman::accounts::Subscribe {
-                owner: self.owner.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
-                config: config_pda(),
-                skr_mint: self.skr_mint,
-                owner_skr: ata(&self.owner.pubkey(), &self.skr_mint),
-                treasury_skr: ata(&self.treasury.pubkey(), &self.skr_mint),
+                vault_token: ata(&vault, mint),
+                owner_token: ata(&self.owner.pubkey(), mint),
                 token_program: TOKEN_ID,
             }
             .to_account_metas(None),
@@ -531,111 +373,106 @@ impl Env {
         self.send(ix, &[&owner])
     }
 
-    /// Creates `owner`'s and `treasury`'s ATAs for `mint` and funds `owner`.
-    fn fund_tokens(&mut self, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Pubkey {
-        self.fund_tokens_with(mint, owner, amount, &TOKEN_ID)
-    }
-
-    fn fund_tokens_with(
-        &mut self,
-        mint: &Pubkey,
-        owner: &Pubkey,
-        amount: u64,
-        program: &Pubkey,
-    ) -> Pubkey {
+    /// New mint with the vault funded and owner/treasury ATAs created.
+    fn token_setup(&mut self, vault_amount: u64) -> Pubkey {
         let admin = self.admin.insecure_clone();
-        self.svm.expire_blockhash();
-        let account = CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, mint)
-            .owner(owner)
-            .token_program_id(program)
+        let mint = CreateMint::new(&mut self.svm, &admin)
+            .decimals(6)
             .send()
             .unwrap();
-        CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, mint)
-            .owner(&self.treasury.pubkey())
-            .token_program_id(program)
-            .send()
-            .unwrap();
-        if amount > 0 {
-            let ix = spl_token_2022::instruction::mint_to(
-                program,
-                mint,
-                &account,
-                &admin.pubkey(),
-                &[],
-                amount,
-            )
-            .unwrap();
-            self.send(ix, &[&admin]).unwrap();
+        let vault = vault_pda(&self.owner.pubkey());
+        for owner in [vault, self.owner.pubkey(), self.treasury.pubkey()] {
+            CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, &mint)
+                .owner(&owner)
+                .send()
+                .unwrap();
         }
-        account
-    }
-
-    fn give_plus(&mut self) {
-        let mint = self.skr_mint;
-        let owner = self.owner.pubkey();
-        self.fund_tokens(&mint, &owner, 10 * PLUS_PRICE);
-        self.subscribe(1).unwrap();
-    }
-}
-
-fn expect_err(res: Result<(), String>, code: &str) {
-    let err = res.expect_err("transaction should fail");
-    assert!(err.contains(code), "expected {code}, got:\n{err}");
-}
-
-fn heir(k: &Keypair, bps: u16) -> HeirInput {
-    HeirInput {
-        wallet: k.pubkey(),
-        bps,
+        MintTo::new(
+            &mut self.svm,
+            &admin,
+            &mint,
+            &ata(&vault, &mint),
+            vault_amount,
+        )
+        .send()
+        .unwrap();
+        mint
     }
 }
 
-fn ready() -> (Env, Keypair) {
+fn ready(rules: Vec<RuleInput>) -> Env {
     let mut env = Env::new();
-    let admin = env.admin.insecure_clone();
-    env.init_config(&admin).unwrap();
-    let h = Keypair::new();
-    env.svm.airdrop(&h.pubkey(), SOL).unwrap();
-    env.create_vault(vec![heir(&h, 10_000)]).unwrap();
-    (env, h)
+    env.init_config();
+    env.create_vault(rules).unwrap();
+    env
+}
+
+fn fee(gross: u64, bps: u16) -> u64 {
+    gross * u64::from(bps) / 10_000
 }
 
 #[test]
-fn config_requires_upgrade_authority() {
+fn config_requires_upgrade_authority_and_caps_fees() {
     let mut env = Env::new();
     let intruder = Keypair::new();
     env.svm.airdrop(&intruder.pubkey(), SOL).unwrap();
-    assert!(env.init_config(&intruder).is_err());
+    let ix = env.config_ix(&intruder.pubkey(), FEE_PUBLIC, FEE_PRIVATE);
+    assert!(env.send(ix, &[&intruder]).is_err());
 
     let admin = env.admin.insecure_clone();
-    env.init_config(&admin).unwrap();
+    let ix = env.config_ix(&admin.pubkey(), 200, 501);
+    assert!(env.send(ix, &[&admin]).is_err(), "5% cap");
+
+    env.init_config();
     let acc = env.svm.get_account(&config_pda()).unwrap();
     let config = Config::try_deserialize(&mut acc.data.as_slice()).unwrap();
-    assert_eq!(config.admin, admin.pubkey());
-    assert_eq!(config.fee_bps, FEE_BPS);
+    assert_eq!(
+        (config.fee_bps_public, config.fee_bps_private),
+        (FEE_PUBLIC, FEE_PRIVATE)
+    );
+
+    let set = |treasury: Pubkey, signer: Pubkey, public: u16| {
+        Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::SetConfig {
+                treasury,
+                fee_bps_public: public,
+                fee_bps_private: FEE_PRIVATE,
+            }
+            .data(),
+            deadman::accounts::SetConfig {
+                admin: signer,
+                config: config_pda(),
+            }
+            .to_account_metas(None),
+        )
+    };
+    let treasury = env.treasury.pubkey();
+    let bad = set(treasury, intruder.pubkey(), 100);
+    assert!(env.send(bad, &[&intruder]).is_err());
+    let zero_treasury = set(Pubkey::default(), admin.pubkey(), 100);
+    assert!(env.send(zero_treasury, &[&admin]).is_err());
+    let good = set(treasury, admin.pubkey(), 100);
+    env.send(good, &[&admin]).unwrap();
 }
 
 #[test]
 fn guard_pulses_and_streak_tracks_days() {
-    let (mut env, _) = ready();
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
     assert_eq!(env.vault().streak, 1);
 
     env.advance(DAY);
     let guard = env.guard.insecure_clone();
     env.pulse(&guard).unwrap();
     assert_eq!(env.vault().streak, 2);
-
     env.advance(60);
     env.pulse(&guard).unwrap();
     assert_eq!(env.vault().streak, 2, "same-day pulse keeps streak");
-
     env.advance(3 * DAY);
     env.pulse(&guard).unwrap();
     let v = env.vault();
-    assert_eq!(v.streak, 1, "missed days reset streak");
-    assert_eq!(v.best_streak, 2);
-    assert_eq!(v.total_pulses, 4);
-    assert_eq!(v.last_pulse, env.now());
+    assert_eq!((v.streak, v.best_streak, v.total_pulses), (1, 2, 4));
 
     let stranger = Keypair::new();
     env.svm.airdrop(&stranger.pubkey(), SOL).unwrap();
@@ -643,41 +480,347 @@ fn guard_pulses_and_streak_tracks_days() {
 }
 
 #[test]
-fn duress_lockdown_freezes_funds_but_not_guard_rotation() {
-    let (mut env, h) = ready();
+fn rule_validation() {
+    let mut env = Env::new();
+    env.init_config();
+    let a = Keypair::new().pubkey();
+    let owner = env.owner.pubkey();
+    let guard = env.guard.pubkey();
+    let pct = |b: &Pubkey, after: i64, bps: u64| {
+        rule(b, Rail::Solana, after, None, AmountMode::Percent, bps)
+    };
+    let cases: Vec<(&str, Vec<RuleInput>)> = vec![
+        ("empty", vec![]),
+        (
+            "unsorted",
+            vec![pct(&a, 20 * DAY, 5_000), pct(&a, 10 * DAY, 5_000)],
+        ),
+        ("percent over 100%", vec![pct(&a, 10 * DAY, 10_001)]),
+        (
+            "zero fixed",
+            vec![rule(&a, Rail::Solana, 10 * DAY, None, AmountMode::Fixed, 0)],
+        ),
+        ("before check-in is due", vec![pct(&a, INTERVAL, 10_000)]),
+        ("owner as beneficiary", vec![pct(&owner, 10 * DAY, 10_000)]),
+        ("guard as beneficiary", vec![pct(&guard, 10 * DAY, 10_000)]),
+        (
+            "too many",
+            (0..9).map(|i| pct(&a, 10 * DAY + i, 1)).collect(),
+        ),
+    ];
+    for (name, rules) in cases {
+        assert!(
+            env.create_vault(rules).is_err(),
+            "{name} should be rejected"
+        );
+    }
+    let eight = (0..8)
+        .map(|i| rule(&a, Rail::Zcash, 10 * DAY + i, None, AmountMode::Fixed, 1))
+        .collect();
+    env.create_vault(eight).unwrap();
+}
+
+#[test]
+fn tiered_sol_rules_pay_in_order_with_per_rail_fees() {
+    let (a, b, c) = (Keypair::new(), Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            2 * SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Zcash,
+            20 * DAY,
+            None,
+            AmountMode::Percent,
+            5_000,
+        ),
+        rule(
+            &c.pubkey(),
+            Rail::Cloak,
+            30 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(10 * SOL);
+
+    env.advance(10 * DAY);
+    assert!(
+        env.execute_sol(0, &a.pubkey()).is_err(),
+        "due time is exclusive"
+    );
+    env.advance(1);
+    assert!(env.execute_sol(1, &b.pubkey()).is_err(), "rule 1 not due");
+    assert!(
+        env.execute_sol(0, &b.pubkey()).is_err(),
+        "wrong beneficiary"
+    );
+    let rogue_treasury = Keypair::new().pubkey();
+    assert!(env
+        .execute_sol_with(0, &a.pubkey(), &rogue_treasury)
+        .is_err());
+
+    let t0 = env.lamports(&env.treasury.pubkey());
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    assert_eq!(
+        env.lamports(&a.pubkey()),
+        2 * SOL - fee(2 * SOL, FEE_PUBLIC)
+    );
+    assert_eq!(
+        env.lamports(&env.treasury.pubkey()) - t0,
+        fee(2 * SOL, FEE_PUBLIC)
+    );
+    assert!(
+        env.execute_sol(0, &a.pubkey()).is_err(),
+        "no double execution"
+    );
+
+    env.advance(10 * DAY);
+    let gross = env.withdrawable() / 2;
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), gross - fee(gross, FEE_PRIVATE));
+
+    env.advance(10 * DAY);
+    let rest = env.withdrawable();
+    env.execute_sol(2, &c.pubkey()).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), rest - fee(rest, FEE_PRIVATE));
+    assert_eq!(env.withdrawable(), 0);
+    let v = env.vault();
+    assert!(v.rules.iter().all(|r| r.executed_at > 0));
+    assert_eq!(v.rules[2].paid, rest - fee(rest, FEE_PRIVATE));
+}
+
+#[test]
+fn per_asset_order_is_enforced() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Percent,
+            5_000,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(4 * SOL);
+    env.advance(10 * DAY + 1);
+    assert!(env.execute_sol(1, &b.pubkey()).is_err(), "rule 0 first");
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+}
+
+#[test]
+fn pulse_resets_pending_rules_after_partial_release() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(5 * SOL);
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &a.pubkey()).unwrap();
+
+    // The owner was only on a long trip: one pulse stops the second tier.
+    let guard = env.guard.insecure_clone();
+    env.pulse(&guard).unwrap();
+    env.advance(15 * DAY);
+    assert!(env.execute_sol(1, &b.pubkey()).is_err());
+    env.withdraw_sol(SOL).unwrap();
+}
+
+#[test]
+fn dust_to_fresh_account_is_skipped_not_blocking() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            1_000,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(SOL);
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].paid, 0);
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert!(env.lamports(&b.pubkey()) > SOL / 2);
+}
+
+#[test]
+fn token_rules_pay_with_fee_and_independent_order() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&a.pubkey()));
+    let usdc = env.token_setup(1_000_000_000);
+    env.update_policy(
+        vec![
+            rule(
+                &a.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                Some(usdc),
+                AmountMode::Fixed,
+                100_000_000,
+            ),
+            rule(
+                &b.pubkey(),
+                Rail::Cloak,
+                10 * DAY,
+                Some(usdc),
+                AmountMode::Percent,
+                10_000,
+            ),
+            rule(
+                &a.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                None,
+                AmountMode::Percent,
+                10_000,
+            ),
+        ],
+        None,
+    )
+    .unwrap();
+    env.deposit_sol(SOL);
+    env.advance(10 * DAY + 1);
+
+    // The SOL rule is not blocked by pending token rules.
+    env.execute_sol(2, &a.pubkey()).unwrap();
+    assert!(
+        env.execute_token(1, &b.pubkey(), &usdc).is_err(),
+        "rule 0 first"
+    );
+    assert!(
+        env.execute_sol(0, &a.pubkey()).is_err(),
+        "token rule via SOL instruction"
+    );
+    env.execute_token(0, &a.pubkey(), &usdc).unwrap();
+    assert_eq!(
+        env.token_balance(&ata(&a.pubkey(), &usdc)),
+        100_000_000 - fee(100_000_000, FEE_PUBLIC)
+    );
+
+    // The vault has no spare SOL left, so no stipend is sent.
+    env.execute_token(1, &b.pubkey(), &usdc).unwrap();
+    let gross = 900_000_000;
+    assert_eq!(
+        env.token_balance(&ata(&b.pubkey(), &usdc)),
+        gross - fee(gross, FEE_PRIVATE)
+    );
+    assert_eq!(
+        env.token_balance(&ata(&env.treasury.pubkey(), &usdc)),
+        fee(100_000_000, FEE_PUBLIC) + fee(gross, FEE_PRIVATE)
+    );
+    assert_eq!(env.lamports(&b.pubkey()), 0);
+}
+
+#[test]
+fn private_token_rule_sends_gas_stipend() {
+    let c = Keypair::new();
+    let mut env = ready(all_to(&Keypair::new().pubkey()));
+    let usdc = env.token_setup(50_000_000);
+    env.update_policy(
+        vec![rule(
+            &c.pubkey(),
+            Rail::Zcash,
+            10 * DAY,
+            Some(usdc),
+            AmountMode::Percent,
+            10_000,
+        )],
+        None,
+    )
+    .unwrap();
+    env.deposit_sol(SOL);
+    env.advance(10 * DAY + 1);
+    env.execute_token(0, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), STIPEND);
+}
+
+#[test]
+fn duress_lockdown_freezes_funds_and_policy() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
     env.deposit_sol(5 * SOL);
     env.withdraw_sol(SOL).unwrap();
 
     let guard = env.guard.insecure_clone();
     env.lockdown(&guard).unwrap();
-    assert_eq!(env.vault().locked_until, env.now() + LOCK);
-
-    assert!(env.withdraw_sol(SOL).is_err(), "withdraw blocked");
-    let new_heir = Keypair::new();
+    assert!(env.withdraw_sol(SOL).is_err());
+    let attacker = Keypair::new().pubkey();
     assert!(
-        env.update_policy(vec![heir(&new_heir, 10_000)], None)
-            .is_err(),
-        "coercer cannot redirect inheritance"
+        env.update_policy(all_to(&attacker), None).is_err(),
+        "coercer cannot redirect"
     );
 
-    // A stolen guard key can be rotated out during lockdown.
     let new_guard = Keypair::new();
     let ix = env.owner_ix(deadman::instruction::SetGuard {
         new_guard: new_guard.pubkey(),
     });
     let owner = env.owner.insecure_clone();
     env.send(ix, &[&owner]).unwrap();
-    assert_eq!(env.vault().guard, new_guard.pubkey());
     assert!(env.lockdown(&guard).is_err(), "old guard revoked");
 
     env.advance(LOCK + 1);
     env.withdraw_sol(SOL).unwrap();
-    env.update_policy(vec![heir(&h, 10_000)], None).unwrap();
+}
+
+#[test]
+fn lockdown_does_not_stop_inheritance() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(2 * SOL);
+    let guard = env.guard.insecure_clone();
+    env.lockdown(&guard).unwrap();
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &b.pubkey()).unwrap();
 }
 
 #[test]
 fn guard_cannot_move_funds() {
-    let (mut env, _) = ready();
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
     env.deposit_sol(2 * SOL);
     let guard = env.guard.insecure_clone();
     let ix = Instruction::new_with_bytes(
@@ -693,51 +836,35 @@ fn guard_cannot_move_funds() {
 }
 
 #[test]
-fn free_plan_limits_and_plus_unlocks_guardian() {
-    let (mut env, h) = ready();
-    let h2 = Keypair::new();
+fn guardian_lockdown_is_rate_limited_and_removable() {
+    let b = Keypair::new();
     let guardian = Keypair::new();
-    assert!(env
-        .update_policy(vec![heir(&h, 5_000), heir(&h2, 5_000)], None)
-        .is_err());
-    assert!(env
-        .update_policy(vec![heir(&h, 10_000)], Some(guardian.pubkey()))
-        .is_err());
+    let mut env = ready(all_to(&b.pubkey()));
+    env.svm.airdrop(&guardian.pubkey(), SOL).unwrap();
+    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
+        .unwrap();
 
-    env.give_plus();
-    let treasury_skr = ata(&env.treasury.pubkey(), &env.skr_mint);
-    assert_eq!(env.token_balance(&treasury_skr), PLUS_PRICE);
+    env.lockdown(&guardian).unwrap();
+    env.advance(LOCK + 1);
+    assert!(env.lockdown(&guardian).is_err(), "cooldown after expiry");
 
-    assert!(
-        env.update_policy(vec![heir(&h, 6_000), heir(&h2, 5_000)], None)
-            .is_err(),
-        "bps must sum to 10000"
-    );
-    assert!(
-        env.update_policy(vec![heir(&h, 5_000), heir(&h, 5_000)], None)
-            .is_err(),
-        "duplicate heirs rejected"
-    );
-    env.update_policy(
-        vec![heir(&h, 6_000), heir(&h2, 4_000)],
-        Some(guardian.pubkey()),
-    )
-    .unwrap();
-    assert_eq!(env.vault().heirs.len(), 2);
+    // The owner uses the unlocked window to remove the guardian.
+    env.update_policy(all_to(&b.pubkey()), None).unwrap();
+    env.advance(LOCK);
+    assert!(env.lockdown(&guardian).is_err(), "no longer guardian");
 }
 
 #[test]
-fn guardian_can_lock_and_cosign_early_unlock() {
-    let (mut env, h) = ready();
-    env.give_plus();
+fn guardian_cosigns_early_unlock() {
+    let b = Keypair::new();
     let guardian = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
     env.svm.airdrop(&guardian.pubkey(), SOL).unwrap();
-    env.update_policy(vec![heir(&h, 10_000)], Some(guardian.pubkey()))
+    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
         .unwrap();
     env.deposit_sol(SOL);
-
-    env.lockdown(&guardian).unwrap();
-    assert!(env.withdraw_sol(SOL / 2).is_err());
+    let guard = env.guard.insecure_clone();
+    env.lockdown(&guard).unwrap();
 
     let ix = Instruction::new_with_bytes(
         deadman::id(),
@@ -755,403 +882,68 @@ fn guardian_can_lock_and_cosign_early_unlock() {
 }
 
 #[test]
-fn switch_fires_only_after_deadline_and_pays_heirs() {
-    let (mut env, h) = ready();
-    env.give_plus();
-    let h2 = Keypair::new();
-    env.svm.airdrop(&h2.pubkey(), SOL).unwrap();
-    env.update_policy(vec![heir(&h, 7_500), heir(&h2, 2_500)], None)
-        .unwrap();
-    env.deposit_sol(10 * SOL);
-
-    env.advance(INTERVAL + GRACE);
-    assert!(env.trigger(&h).is_err(), "deadline is exclusive");
-    env.advance(1);
-    env.trigger(&h).unwrap();
-
-    let v = env.vault();
-    assert_eq!(v.status, VaultStatus::Triggered);
-    assert!(v.sol_at_trigger >= 10 * SOL);
-    assert!(
-        env.withdraw_sol(SOL).is_err(),
-        "owner locked out after trigger"
-    );
-    let guard = env.guard.insecure_clone();
-    assert!(env.pulse(&guard).is_err(), "cannot pulse a fired switch");
-
-    let snapshot = v.sol_at_trigger;
-    let treasury_before = env.lamports(&env.treasury.pubkey());
-    let h_before = env.lamports(&h.pubkey());
-    env.claim_sol(&h).unwrap();
-    let gross = snapshot * 7_500 / 10_000;
-    let fee = gross * u64::from(FEE_BPS) / 10_000;
-    assert_eq!(env.lamports(&h.pubkey()) - h_before, gross - fee - 5_000);
-    assert_eq!(env.lamports(&env.treasury.pubkey()) - treasury_before, fee);
-    assert!(env.claim_sol(&h).is_err(), "no double claim");
-
-    env.claim_sol(&h2).unwrap();
-    let stranger = Keypair::new();
-    env.svm.airdrop(&stranger.pubkey(), SOL).unwrap();
-    assert!(env.claim_sol(&stranger).is_err());
-
-    // Rent reserve plus rounding dust stays behind.
-    let rent_floor = env.svm.minimum_balance_for_rent_exemption(
-        env.svm
-            .get_account(&vault_pda(&env.owner.pubkey()))
-            .unwrap()
-            .data
-            .len(),
-    );
-    assert!(env.lamports(&vault_pda(&env.owner.pubkey())) >= rent_floor);
-}
-
-#[test]
-fn pulse_keeps_switch_from_firing() {
-    let (mut env, h) = ready();
-    env.advance(INTERVAL);
-    let guard = env.guard.insecure_clone();
-    env.pulse(&guard).unwrap();
-    env.advance(INTERVAL);
-    assert!(env.trigger(&h).is_err());
-}
-
-#[test]
-fn heirs_claim_tokens_pro_rata() {
-    let (mut env, h) = ready();
-    env.give_plus();
-    let h2 = Keypair::new();
-    env.svm.airdrop(&h2.pubkey(), SOL).unwrap();
-    env.update_policy(vec![heir(&h, 5_000), heir(&h2, 5_000)], None)
-        .unwrap();
-
-    let admin = env.admin.insecure_clone();
-    let usdc = CreateMint::new(&mut env.svm, &admin)
-        .decimals(6)
-        .send()
-        .unwrap();
-    let vault = vault_pda(&env.owner.pubkey());
-    let vault_usdc = env.fund_tokens(&usdc, &vault, 1_000_000_000);
-
-    env.advance(INTERVAL + GRACE + 1);
-    assert!(env.claim_token(&h, &usdc).is_err(), "not triggered yet");
-    env.trigger(&h2).unwrap();
-
-    env.claim_token(&h, &usdc).unwrap();
-    assert!(env.claim_token(&h, &usdc).is_err());
-    env.claim_token(&h2, &usdc).unwrap();
-
-    let gross = 500_000_000u64;
-    let fee = gross * u64::from(FEE_BPS) / 10_000;
-    assert_eq!(env.token_balance(&ata(&h.pubkey(), &usdc)), gross - fee);
-    assert_eq!(env.token_balance(&ata(&h2.pubkey(), &usdc)), gross - fee);
-    assert_eq!(
-        env.token_balance(&ata(&env.treasury.pubkey(), &usdc)),
-        2 * fee
-    );
-    assert_eq!(env.token_balance(&vault_usdc), 0);
-}
-
-#[test]
-fn set_config_requires_admin_and_validates() {
-    let mut env = Env::new();
-    let admin = env.admin.insecure_clone();
-    expect_err(
-        env.init_config_with(&admin, Pubkey::default(), FEE_BPS),
-        "InvalidConfig",
-    );
-    assert!(env
-        .init_config_with(&admin, env.treasury.pubkey(), 101)
-        .is_err());
-    env.init_config(&admin).unwrap();
-
-    let intruder = Keypair::new();
-    env.svm.airdrop(&intruder.pubkey(), SOL).unwrap();
-    let rogue = intruder.pubkey();
-    expect_err(env.set_config(&intruder, rogue, 0, 100), "Unauthorized");
-    expect_err(env.set_config(&admin, rogue, 1, 101), "FeeTooHigh");
-    expect_err(
-        env.set_config(&admin, Pubkey::default(), 1, 10),
-        "InvalidConfig",
-    );
-
-    let new_treasury = Keypair::new().pubkey();
-    env.set_config(&admin, new_treasury, 7, 100).unwrap();
-    let c = env.config();
-    assert_eq!(c.treasury, new_treasury);
-    assert_eq!(c.plus_price, 7);
-    assert_eq!(c.fee_bps, 100);
-    assert_eq!(c.admin, admin.pubkey());
-}
-
-#[test]
-fn subscribe_enforces_month_bounds_and_stacks() {
-    let (mut env, _) = ready();
-    let mint = env.skr_mint;
-    let owner = env.owner.pubkey();
-    env.fund_tokens(&mint, &owner, 20 * PLUS_PRICE);
-
-    expect_err(env.subscribe(0), "InvalidMonths");
-    expect_err(env.subscribe(13), "InvalidMonths");
-
-    let now = env.now();
-    env.subscribe(12).unwrap();
-    assert_eq!(env.vault().plus_until, now + 12 * 30 * DAY);
-    env.advance(DAY);
-    env.subscribe(1).unwrap();
-    assert_eq!(env.vault().plus_until, now + 13 * 30 * DAY, "stacks");
-    assert_eq!(
-        env.token_balance(&ata(&env.treasury.pubkey(), &mint)),
-        13 * PLUS_PRICE
-    );
-}
-
-#[test]
 fn withdraw_token_owner_only_and_frozen_by_lockdown() {
-    let (mut env, _) = ready();
-    let usdc = env.new_mint();
-    let vault = vault_pda(&env.owner.pubkey());
-    let vault_usdc = env.fund_tokens(&usdc, &vault, 1_000);
-    let owner = env.owner.pubkey();
-    env.fund_tokens(&usdc, &owner, 0);
-    let guard = env.guard.insecure_clone();
-    env.fund_tokens(&usdc, &guard.pubkey(), 0);
-
-    assert!(
-        env.withdraw_token(&guard, &usdc, &TOKEN_ID, 100).is_err(),
-        "guard cannot pull tokens"
-    );
-    let o = env.owner.insecure_clone();
-    env.withdraw_token(&o, &usdc, &TOKEN_ID, 400).unwrap();
-    assert_eq!(env.token_balance(&ata(&owner, &usdc)), 400);
-    expect_err(
-        env.withdraw_token(&o, &usdc, &TOKEN_ID, 601),
-        "InsufficientFunds",
-    );
-
-    env.lockdown(&guard).unwrap();
-    expect_err(env.withdraw_token(&o, &usdc, &TOKEN_ID, 100), "VaultLocked");
-    env.advance(LOCK + 1);
-    env.withdraw_token(&o, &usdc, &TOKEN_ID, 600).unwrap();
-    assert_eq!(env.token_balance(&vault_usdc), 0);
-}
-
-#[test]
-fn close_vault_rules_and_stranded_tokens_are_recoverable() {
-    let (mut env, h) = ready();
-    env.deposit_sol(3 * SOL);
-    let usdc = env.new_mint();
-    let vault = vault_pda(&env.owner.pubkey());
-    let vault_usdc = env.fund_tokens(&usdc, &vault, 500);
-    let owner = env.owner.pubkey();
-    env.fund_tokens(&usdc, &owner, 0);
-
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = env.token_setup(500);
+    env.withdraw_token(&usdc, 200).unwrap();
+    assert_eq!(env.token_balance(&ata(&env.owner.pubkey(), &usdc)), 200);
+    assert!(env.withdraw_token(&usdc, 301).is_err());
     let guard = env.guard.insecure_clone();
     env.lockdown(&guard).unwrap();
-    expect_err(env.close_vault(), "VaultLocked");
-    env.advance(LOCK + 1);
-
-    let vault_lamports = env.lamports(&vault);
-    let owner_before = env.lamports(&owner);
-    env.close_vault().unwrap();
-    assert!(env.svm.get_account(&vault).is_none_or(|a| a.lamports == 0));
-    assert_eq!(env.lamports(&owner), owner_before + vault_lamports - 5_000);
-
-    // Tokens left in the vault ATA survive the close; re-creating the vault
-    // at the same PDA gives the owner back control of them.
-    assert_eq!(env.token_balance(&vault_usdc), 500);
-    env.create_vault(vec![heir(&h, 10_000)]).unwrap();
-    let o = env.owner.insecure_clone();
-    env.withdraw_token(&o, &usdc, &TOKEN_ID, 500).unwrap();
-    assert_eq!(env.token_balance(&ata(&owner, &usdc)), 500);
-
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    expect_err(env.close_vault(), "VaultNotActive");
+    assert!(env.withdraw_token(&usdc, 100).is_err());
 }
 
 #[test]
-fn claim_sol_rejects_wrong_treasury() {
-    let (mut env, h) = ready();
-    env.deposit_sol(SOL);
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    let rogue = h.pubkey();
-    expect_err(env.claim_sol_to(&h, rogue), "Unauthorized");
-    assert!(!env.vault().heirs[0].claimed_sol);
-    env.claim_sol(&h).unwrap();
-}
-
-#[test]
-fn claim_token_rejects_non_ata_vault_account() {
-    let (mut env, h) = ready();
-    let usdc = env.new_mint();
-    let vault = vault_pda(&env.owner.pubkey());
-    let vault_ata = env.fund_tokens(&usdc, &vault, 1_000);
-
-    let admin = env.admin.insecure_clone();
-    let side = CreateAccount::new(&mut env.svm, &admin, &usdc)
-        .owner(&vault)
-        .send()
-        .unwrap();
-    MintTo::new(&mut env.svm, &admin, &usdc, &side, 9_000)
-        .send()
-        .unwrap();
-
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    expect_err(
-        env.claim_token_with(&h, &usdc, &TOKEN_ID, side, &[]),
-        "ConstraintAssociated",
-    );
-    assert_eq!(env.token_balance(&side), 9_000);
-
-    // Extra remaining accounts (transfer-hook slots) are harmless for plain SPL.
-    let extra = [AccountMeta::new_readonly(Keypair::new().pubkey(), false)];
-    env.claim_token_with(&h, &usdc, &TOKEN_ID, vault_ata, &extra)
-        .unwrap();
-    assert_eq!(env.token_balance(&vault_ata), 0);
-}
-
-#[test]
-fn guardian_lockdown_lapses_with_plus() {
-    let (mut env, h) = ready();
-    env.give_plus();
-    let guardian = Keypair::new();
-    env.svm.airdrop(&guardian.pubkey(), SOL).unwrap();
-    env.update_policy(vec![heir(&h, 10_000)], Some(guardian.pubkey()))
-        .unwrap();
-
-    env.lockdown(&guardian).unwrap();
-    env.unlock(&guardian).unwrap();
-
+fn close_vault_blocked_while_locked() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
     let guard = env.guard.insecure_clone();
-    env.advance(31 * DAY);
-    env.pulse(&guard).unwrap();
-    expect_err(env.lockdown(&guardian), "PlusRequired");
     env.lockdown(&guard).unwrap();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::CloseVault {}.data(),
+        deadman::accounts::CloseVault {
+            owner: env.owner.pubkey(),
+            vault: vault_pda(&env.owner.pubkey()),
+        }
+        .to_account_metas(None),
+    );
     let owner = env.owner.insecure_clone();
-    env.lockdown(&owner).unwrap();
-}
-
-#[test]
-fn sol_fee_waived_when_treasury_cannot_hold_it() {
-    let (mut env, h) = ready();
-    env.deposit_sol(SOL / 10);
-    let treasury = env.treasury.pubkey();
-    env.svm.set_account(treasury, Default::default()).unwrap();
-
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    let snapshot = env.vault().sol_at_trigger;
-    let before = env.lamports(&h.pubkey());
-    env.claim_sol(&h).unwrap();
-    assert_eq!(env.lamports(&h.pubkey()) - before, snapshot - 5_000);
-    assert_eq!(env.lamports(&treasury), 0);
-}
-
-#[test]
-fn token2022_transfer_fee_mint_withdraw_and_claim() {
-    let (mut env, h) = ready();
-    let program = spl_token_2022::ID;
-    let mint = env.new_fee_mint_2022(100);
-    let vault = vault_pda(&env.owner.pubkey());
-    let vault_token = env.fund_tokens_with(&mint, &vault, 1_100_000, &program);
-    let owner = env.owner.pubkey();
-    env.fund_tokens_with(&mint, &owner, 0, &program);
-
-    let o = env.owner.insecure_clone();
-    env.withdraw_token(&o, &mint, &program, 100_000).unwrap();
-    assert_eq!(
-        env.token_balance(&ata_with(&owner, &mint, &program)),
-        99_000,
-        "1% transfer fee withheld"
-    );
-    assert_eq!(env.token_balance(&vault_token), 1_000_000);
-
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    env.claim_token_with(&h, &mint, &program, vault_token, &[])
-        .unwrap();
-
-    let fee = 1_000_000 * u64::from(FEE_BPS) / 10_000;
-    let net = 1_000_000 - fee;
-    assert_eq!(env.token_balance(&vault_token), 0, "vault debited exactly");
-    assert_eq!(
-        env.token_balance(&ata_with(&h.pubkey(), &mint, &program)),
-        net - net / 100
-    );
-    assert_eq!(
-        env.token_balance(&ata_with(&env.treasury.pubkey(), &mint, &program)),
-        fee - fee / 100
-    );
+    assert!(env.send(ix.clone(), &[&owner]).is_err());
+    env.advance(LOCK + 1);
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&vault_pda(&env.owner.pubkey())), 0);
 }
 
 #[test]
 fn compute_unit_profile() {
+    let (a, b) = (Keypair::new(), Keypair::new());
     let mut env = Env::new();
-    let mut rows: Vec<(&str, u64)> = Vec::new();
-    let admin = env.admin.insecure_clone();
-    env.init_config(&admin).unwrap();
-    rows.push(("init_config", env.last_cu));
-    let t = env.treasury.pubkey();
-    env.set_config(&admin, t, PLUS_PRICE, FEE_BPS).unwrap();
-    rows.push(("set_config", env.last_cu));
-
-    let h = Keypair::new();
-    let h2 = Keypair::new();
-    let guardian = Keypair::new();
-    for k in [&h, &h2, &guardian] {
-        env.svm.airdrop(&k.pubkey(), SOL).unwrap();
-    }
-    env.create_vault(vec![heir(&h, 10_000)]).unwrap();
-    rows.push(("create_vault", env.last_cu));
-    env.give_plus();
-    rows.push(("subscribe", env.last_cu));
-    env.update_policy(
-        vec![heir(&h, 5_000), heir(&h2, 5_000)],
-        Some(guardian.pubkey()),
-    )
-    .unwrap();
-    rows.push(("update_policy (2 heirs)", env.last_cu));
+    env.init_config();
+    let rules: Vec<RuleInput> = (0..8)
+        .map(|i| {
+            rule(
+                &a.pubkey(),
+                Rail::Solana,
+                10 * DAY + i,
+                None,
+                AmountMode::Percent,
+                1_000,
+            )
+        })
+        .collect();
+    let create = env.create_vault(rules.clone()).unwrap();
+    env.deposit_sol(10 * SOL);
     let guard = env.guard.insecure_clone();
-    env.pulse(&guard).unwrap();
-    rows.push(("pulse", env.last_cu));
-    env.lockdown(&guardian).unwrap();
-    rows.push(("lockdown", env.last_cu));
-    env.unlock(&guardian).unwrap();
-    rows.push(("unlock", env.last_cu));
-    env.set_guard(guard.pubkey()).unwrap();
-    rows.push(("set_guard", env.last_cu));
-
-    env.deposit_sol(5 * SOL);
-    env.withdraw_sol(SOL).unwrap();
-    rows.push(("withdraw_sol", env.last_cu));
-    let usdc = env.new_mint();
-    let vault = vault_pda(&env.owner.pubkey());
-    env.fund_tokens(&usdc, &vault, 1_000_000);
-    let owner = env.owner.pubkey();
-    env.fund_tokens(&usdc, &owner, 0);
-    let o = env.owner.insecure_clone();
-    env.withdraw_token(&o, &usdc, &TOKEN_ID, 1_000).unwrap();
-    rows.push(("withdraw_token", env.last_cu));
-
-    env.advance(INTERVAL + GRACE + 1);
-    env.trigger(&h).unwrap();
-    rows.push(("trigger", env.last_cu));
-    env.claim_sol(&h).unwrap();
-    rows.push(("claim_sol", env.last_cu));
-    env.claim_token(&h, &usdc).unwrap();
-    rows.push(("claim_token (first: init claim + ATA)", env.last_cu));
-    env.claim_token(&h2, &usdc).unwrap();
-    rows.push(("claim_token (second heir, init ATA)", env.last_cu));
-
-    let (mut env2, _) = ready();
-    env2.close_vault().unwrap();
-    rows.push(("close_vault", env2.last_cu));
-
-    println!("\n| instruction | CU |\n|---|---|");
-    for (name, cu) in &rows {
-        println!("| {name} | {cu} |");
-        assert!(*cu > 0 && *cu < 200_000);
-    }
+    let pulse = env.pulse(&guard).unwrap();
+    let update = env.update_policy(rules, Some(b.pubkey())).unwrap();
+    let lock = env.lockdown(&guard).unwrap();
+    env.advance(10 * DAY + 10);
+    let exec = env.execute_sol(0, &a.pubkey()).unwrap();
+    println!(
+        "CU create_vault(8 rules)={create} pulse={pulse} update_policy(8)={update} \
+         lockdown={lock} execute_sol_rule={exec}"
+    );
+    assert!(exec < 30_000);
 }

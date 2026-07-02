@@ -1,10 +1,18 @@
 use anchor_lang::prelude::*;
 
+use crate::state::Rail;
+
 #[event]
 pub struct VaultCreated {
     pub vault: Pubkey,
     pub owner: Pubkey,
-    pub deadline: i64,
+    pub rules: u8,
+}
+
+#[event]
+pub struct PolicyUpdated {
+    pub vault: Pubkey,
+    pub rules: u8,
 }
 
 #[event]
@@ -29,25 +37,13 @@ pub struct Unlocked {
 }
 
 #[event]
-pub struct Triggered {
+pub struct RuleExecuted {
     pub vault: Pubkey,
-    pub by: Pubkey,
-    pub sol_at_trigger: u64,
-    pub at: i64,
-}
-
-#[event]
-pub struct Claimed {
-    pub vault: Pubkey,
-    pub heir: Pubkey,
+    pub index: u8,
+    pub beneficiary: Pubkey,
+    pub rail: Rail,
     pub mint: Option<Pubkey>,
     pub amount: u64,
     pub fee: u64,
-}
-
-#[event]
-pub struct Subscribed {
-    pub vault: Pubkey,
-    pub months: u8,
-    pub plus_until: i64,
+    pub by: Pubkey,
 }

@@ -2,20 +2,19 @@ use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
 use anchor_spl::{
     associated_token::AssociatedToken,
     token_2022::spl_token_2022,
-    token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked},
+    token_interface::{Mint, TokenAccount, TokenInterface},
 };
 
 use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{split_share, Config, TokenClaim, Vault, VaultStatus},
+    state::{rule_gross, split_fee, Config, Vault},
 };
 
-fn withdrawable_lamports(vault: &Account<Vault>) -> Result<u64> {
-    let info = vault.to_account_info();
-    let rent = Rent::get()?.minimum_balance(info.data_len());
-    Ok(info.lamports().saturating_sub(rent))
+fn withdrawable_lamports(vault: &AccountInfo) -> Result<u64> {
+    let rent = Rent::get()?.minimum_balance(vault.data_len());
+    Ok(vault.lamports().saturating_sub(rent))
 }
 
 /// Vault-signed `transfer_checked`. `extra` (the instruction's remaining
@@ -76,10 +75,9 @@ pub struct WithdrawSol<'info> {
 pub fn handle_withdraw_sol(ctx: Context<WithdrawSol>, amount: u64) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
-    vault.require_active()?;
     vault.require_unlocked(now)?;
     require!(
-        amount <= withdrawable_lamports(vault)?,
+        amount <= withdrawable_lamports(&vault.to_account_info())?,
         DeadmanError::InsufficientFunds
     );
     vault.sub_lamports(amount)?;
@@ -123,7 +121,6 @@ pub fn handle_withdraw_token<'info>(
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let a = &ctx.accounts;
-    a.vault.require_active()?;
     a.vault.require_unlocked(now)?;
     require!(
         amount <= a.vault_token.amount,
@@ -142,39 +139,9 @@ pub fn handle_withdraw_token<'info>(
 }
 
 #[derive(Accounts)]
-pub struct Trigger<'info> {
-    pub caller: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [VAULT_SEED, vault.owner.as_ref()],
-        bump = vault.bump
-    )]
-    pub vault: Box<Account<'info, Vault>>,
-}
-
-/// Permissionless: anyone (usually an heir) may fire an expired switch.
-pub fn handle_trigger(ctx: Context<Trigger>) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
-    let sol_at_trigger = withdrawable_lamports(&ctx.accounts.vault)?;
-    let vault = &mut ctx.accounts.vault;
-    vault.require_active()?;
-    require!(now > vault.deadline()?, DeadmanError::StillAlive);
-    vault.status = VaultStatus::Triggered;
-    vault.triggered_at = now;
-    vault.sol_at_trigger = sol_at_trigger;
-    emit!(Triggered {
-        vault: vault.key(),
-        by: ctx.accounts.caller.key(),
-        sol_at_trigger,
-        at: now,
-    });
-    Ok(())
-}
-
-#[derive(Accounts)]
-pub struct ClaimSol<'info> {
-    #[account(mut)]
-    pub heir: Signer<'info>,
+pub struct ExecuteSolRule<'info> {
+    /// Anyone: the beneficiary, a keeper, or the protocol's own bot.
+    pub executor: Signer<'info>,
     #[account(
         mut,
         seeds = [VAULT_SEED, vault.owner.as_ref()],
@@ -183,55 +150,79 @@ pub struct ClaimSol<'info> {
     pub vault: Box<Account<'info, Vault>>,
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
+    /// CHECK: lamport destination; must equal the rule's beneficiary.
+    #[account(mut)]
+    pub beneficiary: UncheckedAccount<'info>,
     /// CHECK: lamport destination only; pinned to the configured treasury.
     #[account(mut, address = config.treasury @ DeadmanError::Unauthorized)]
     pub treasury: UncheckedAccount<'info>,
 }
 
-pub fn handle_claim_sol(ctx: Context<ClaimSol>) -> Result<()> {
-    let fee_bps = ctx.accounts.config.fee_bps;
-    let heir_key = ctx.accounts.heir.key();
-    let vault = &mut ctx.accounts.vault;
-    require!(
-        vault.status == VaultStatus::Triggered,
-        DeadmanError::VaultNotTriggered
+/// Permissionless: pays a due SOL rule. Destinations are fixed in the rule,
+/// so who executes it does not matter.
+pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    let i = usize::from(index);
+    let vault_info = ctx.accounts.vault.to_account_info();
+    ctx.accounts.vault.check_executable(i, None, now)?;
+    let rule = ctx.accounts.vault.rules[i];
+    require_keys_eq!(
+        ctx.accounts.beneficiary.key(),
+        rule.beneficiary,
+        DeadmanError::Unauthorized
     );
-    let idx = vault.heir_index(&heir_key)?;
-    require!(!vault.heirs[idx].claimed_sol, DeadmanError::AlreadyClaimed);
-    vault.heirs[idx].claimed_sol = true;
 
-    let (mut net, mut fee) = split_share(vault.sol_at_trigger, vault.heirs[idx].bps, fee_bps)?;
-    let total = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
-    // A fee that would leave the treasury below rent exemption would fail the
-    // whole claim; waive it to the heir instead of blocking the inheritance.
+    let available = withdrawable_lamports(&vault_info)?;
+    let gross = rule_gross(&rule, available)?;
+    let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail))?;
+
+    let rent = Rent::get()?;
     let treasury = &ctx.accounts.treasury;
     if fee > 0
-        && treasury.lamports().saturating_add(fee)
-            < Rent::get()?.minimum_balance(treasury.data_len())
+        && treasury.lamports().saturating_add(fee) < rent.minimum_balance(treasury.data_len())
     {
-        net = total;
+        net = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
         fee = 0;
     }
-    vault.sub_lamports(total)?;
-    ctx.accounts.heir.add_lamports(net)?;
-    if fee > 0 {
-        ctx.accounts.treasury.add_lamports(fee)?;
+    // A brand-new account cannot be funded below rent exemption; leave the
+    // dust in the vault rather than failing and blocking later rules.
+    let beneficiary = &ctx.accounts.beneficiary;
+    if net > 0
+        && beneficiary.lamports().saturating_add(net) < rent.minimum_balance(beneficiary.data_len())
+    {
+        net = 0;
+        fee = 0;
     }
-    emit!(Claimed {
+
+    let total = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
+    ctx.accounts.vault.sub_lamports(total)?;
+    beneficiary.add_lamports(net)?;
+    if fee > 0 {
+        treasury.add_lamports(fee)?;
+    }
+
+    let vault = &mut ctx.accounts.vault;
+    vault.rules[i].executed_at = now;
+    vault.rules[i].paid = net;
+    emit!(RuleExecuted {
         vault: vault.key(),
-        heir: heir_key,
+        index,
+        beneficiary: rule.beneficiary,
+        rail: rule.rail,
         mint: None,
         amount: net,
         fee,
+        by: ctx.accounts.executor.key(),
     });
     Ok(())
 }
 
 #[derive(Accounts)]
-pub struct ClaimToken<'info> {
+pub struct ExecuteTokenRule<'info> {
     #[account(mut)]
-    pub heir: Signer<'info>,
+    pub executor: Signer<'info>,
     #[account(
+        mut,
         seeds = [VAULT_SEED, vault.owner.as_ref()],
         bump = vault.bump
     )]
@@ -247,14 +238,17 @@ pub struct ClaimToken<'info> {
         associated_token::token_program = token_program
     )]
     pub vault_token: Box<InterfaceAccount<'info, TokenAccount>>,
+    /// CHECK: must equal the rule's beneficiary; receives the gas stipend.
+    #[account(mut)]
+    pub beneficiary: UncheckedAccount<'info>,
     #[account(
         init_if_needed,
-        payer = heir,
+        payer = executor,
         associated_token::mint = mint,
-        associated_token::authority = heir,
+        associated_token::authority = beneficiary,
         associated_token::token_program = token_program
     )]
-    pub heir_token: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub beneficiary_token: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         token::mint = mint,
@@ -262,50 +256,35 @@ pub struct ClaimToken<'info> {
         token::token_program = token_program
     )]
     pub treasury_token: Box<InterfaceAccount<'info, TokenAccount>>,
-    #[account(
-        init_if_needed,
-        payer = heir,
-        space = 8 + TokenClaim::INIT_SPACE,
-        seeds = [CLAIM_SEED, vault.key().as_ref(), mint.key().as_ref()],
-        bump
-    )]
-    pub claim: Box<Account<'info, TokenClaim>>,
     pub token_program: Interface<'info, TokenInterface>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_claim_token<'info>(ctx: Context<'info, ClaimToken<'info>>) -> Result<()> {
+/// Permissionless: pays a due token rule. Private rails also receive a small
+/// SOL stipend so a fresh claim key can pay to route the tokens onward.
+pub fn handle_execute_token_rule<'info>(
+    ctx: Context<'info, ExecuteTokenRule<'info>>,
+    index: u8,
+) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    let i = usize::from(index);
     let a = &ctx.accounts;
-    require!(
-        a.vault.status == VaultStatus::Triggered,
-        DeadmanError::VaultNotTriggered
+    a.vault.check_executable(i, Some(a.mint.key()), now)?;
+    let rule = a.vault.rules[i];
+    require_keys_eq!(
+        a.beneficiary.key(),
+        rule.beneficiary,
+        DeadmanError::Unauthorized
     );
-    let idx = a.vault.heir_index(&a.heir.key())?;
-    let bit = 1u8 << idx;
 
-    let claim = &mut ctx.accounts.claim;
-    if !claim.initialized {
-        claim.vault = ctx.accounts.vault.key();
-        claim.mint = ctx.accounts.mint.key();
-        claim.amount_at_snapshot = ctx.accounts.vault_token.amount;
-        claim.initialized = true;
-        claim.bump = ctx.bumps.claim;
-    }
-    require!(claim.claimed_mask & bit == 0, DeadmanError::AlreadyClaimed);
-    claim.claimed_mask |= bit;
-
-    let a = &ctx.accounts;
-    let (net, fee) = split_share(
-        a.claim.amount_at_snapshot,
-        a.vault.heirs[idx].bps,
-        a.config.fee_bps,
-    )?;
+    let gross = rule_gross(&rule, a.vault_token.amount)?;
+    let (net, fee) = split_fee(gross, a.config.fee_bps(rule.rail))?;
     vault_transfer(
         &a.token_program,
         &a.vault_token,
         &a.mint,
-        a.heir_token.to_account_info(),
+        a.beneficiary_token.to_account_info(),
         &a.vault,
         ctx.remaining_accounts,
         net,
@@ -319,92 +298,32 @@ pub fn handle_claim_token<'info>(ctx: Context<'info, ClaimToken<'info>>) -> Resu
         ctx.remaining_accounts,
         fee,
     )?;
-    emit!(Claimed {
-        vault: a.vault.key(),
-        heir: a.heir.key(),
-        mint: Some(a.mint.key()),
-        amount: net,
-        fee,
-    });
-    Ok(())
-}
 
-#[derive(Accounts)]
-pub struct Subscribe<'info> {
-    #[account(mut)]
-    pub owner: Signer<'info>,
-    #[account(
-        mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
-        bump = vault.bump,
-        has_one = owner @ DeadmanError::Unauthorized
-    )]
-    pub vault: Box<Account<'info, Vault>>,
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
-    #[account(
-        address = config.skr_mint @ DeadmanError::Unauthorized,
-        mint::token_program = token_program
-    )]
-    pub skr_mint: Box<InterfaceAccount<'info, Mint>>,
-    #[account(
-        mut,
-        token::mint = skr_mint,
-        token::authority = owner,
-        token::token_program = token_program
-    )]
-    pub owner_skr: Box<InterfaceAccount<'info, TokenAccount>>,
-    #[account(
-        mut,
-        token::mint = skr_mint,
-        token::authority = config.treasury,
-        token::token_program = token_program
-    )]
-    pub treasury_skr: Box<InterfaceAccount<'info, TokenAccount>>,
-    pub token_program: Interface<'info, TokenInterface>,
-}
-
-/// Deadman Plus, paid in SKR: up to 4 heirs and a guardian.
-pub fn handle_subscribe(ctx: Context<Subscribe>, months: u8) -> Result<()> {
-    require!(
-        (1..=MAX_SUBSCRIBE_MONTHS).contains(&months),
-        DeadmanError::InvalidMonths
-    );
-    let now = Clock::get()?.unix_timestamp;
-    let a = &ctx.accounts;
-    a.vault.require_active()?;
-    let cost = a
-        .config
-        .plus_price
-        .checked_mul(u64::from(months))
-        .ok_or(DeadmanError::MathOverflow)?;
-    token_interface::transfer_checked(
-        CpiContext::new(
-            a.token_program.key(),
-            TransferChecked {
-                from: a.owner_skr.to_account_info(),
-                mint: a.skr_mint.to_account_info(),
-                to: a.treasury_skr.to_account_info(),
-                authority: a.owner.to_account_info(),
-            },
-        ),
-        cost,
-        a.skr_mint.decimals,
-    )?;
+    let stipend = if rule.rail.is_private()
+        && a.beneficiary.lamports() < PRIVATE_GAS_STIPEND
+        && withdrawable_lamports(&a.vault.to_account_info())? >= PRIVATE_GAS_STIPEND
+    {
+        PRIVATE_GAS_STIPEND
+    } else {
+        0
+    };
+    if stipend > 0 {
+        ctx.accounts.vault.sub_lamports(stipend)?;
+        ctx.accounts.beneficiary.add_lamports(stipend)?;
+    }
 
     let vault = &mut ctx.accounts.vault;
-    let extension = SECS_PER_MONTH
-        .checked_mul(i64::from(months))
-        .ok_or(DeadmanError::MathOverflow)?;
-    vault.plus_until = vault
-        .plus_until
-        .max(now)
-        .checked_add(extension)
-        .ok_or(DeadmanError::MathOverflow)?;
-    emit!(Subscribed {
+    vault.rules[i].executed_at = now;
+    vault.rules[i].paid = net;
+    emit!(RuleExecuted {
         vault: vault.key(),
-        months,
-        plus_until: vault.plus_until,
+        index,
+        beneficiary: rule.beneficiary,
+        rail: rule.rail,
+        mint: Some(ctx.accounts.mint.key()),
+        amount: net,
+        fee,
+        by: ctx.accounts.executor.key(),
     });
     Ok(())
 }

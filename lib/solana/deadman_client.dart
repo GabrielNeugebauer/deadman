@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:solana/dto.dart'
@@ -9,6 +11,7 @@ import 'package:solana/dto.dart'
         Encoding,
         FutureContextResultExt,
         ProgramDataFilter;
+import 'package:http/http.dart' show ClientException;
 import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 
@@ -17,7 +20,7 @@ import 'codec.dart';
 import 'deadman_api.dart';
 
 /// Failed RPC call or transaction. [name] is set for Deadman program errors
-/// (e.g. `StillAlive`, `VaultLocked`) and [message] is then user-readable.
+/// (e.g. `RuleNotDue`, `VaultLocked`) and [message] is then user-readable.
 class DeadmanException implements Exception {
   const DeadmanException(
     this.message, {
@@ -53,6 +56,16 @@ class DeadmanException implements Exception {
     );
   }
 
+  /// A Deadman program error raised client-side, before sending.
+  factory DeadmanException.program(int code) {
+    final known = programErrors[code];
+    return DeadmanException(
+      known?.$2 ?? 'Program error $code',
+      code: code,
+      name: known?.$1,
+    );
+  }
+
   final String message;
 
   /// `Custom` instruction error code, if any (Deadman errors are 6000+).
@@ -60,35 +73,40 @@ class DeadmanException implements Exception {
   final String? name;
   final List<String> logs;
 
+  /// From `onchain/target/idl/deadman.json`.
   static const programErrors = <int, (String, String)>{
     6000: ('Unauthorized', 'Signer is not allowed to perform this action'),
-    6001: ('FeeTooHigh', 'Fee exceeds the 1% cap'),
-    6002: ('InvalidDuration', 'Interval, grace or lock duration out of range'),
+    6001: ('FeeTooHigh', 'Fee exceeds the 5% cap'),
+    6002: ('InvalidDuration', 'Interval or lock duration out of range'),
     6003: (
-      'InvalidHeirs',
-      'Heirs must be unique, non-empty and sum to 10000 bps',
+      'InvalidRules',
+      'Rules must be 1-8, sorted by delay, with valid amounts and beneficiaries',
     ),
-    6004: ('TooManyHeirs', 'Too many heirs for this plan'),
-    6005: ('PlusRequired', 'A guardian requires Deadman Plus'),
-    6006: (
+    6004: (
       'InvalidGuardian',
-      'Guardian cannot be the owner, the guard key or an heir',
+      'Guardian cannot be the owner, the guard key or a beneficiary',
     ),
-    6007: ('VaultLocked', 'Vault is locked down'),
-    6008: ('VaultNotActive', 'Vault is not active'),
-    6009: ('VaultNotTriggered', 'Vault has not been triggered'),
-    6010: ('StillAlive', 'The owner is still within the heartbeat window'),
-    6011: ('NotAnHeir', 'Signer is not an heir of this vault'),
-    6012: ('AlreadyClaimed', 'Share already claimed'),
-    6013: ('InsufficientFunds', 'Amount exceeds the withdrawable balance'),
-    6014: ('InvalidMonths', 'Subscription months out of range'),
-    6015: (
+    6005: (
       'InvalidGuard',
-      'Guard key must differ from the owner, heirs and guardian',
+      'Guard key must differ from the owner, beneficiaries and guardian',
     ),
-    6016: ('NoGuardian', 'Vault has no guardian'),
-    6017: ('MathOverflow', 'Arithmetic overflow'),
-    6018: ('InvalidConfig', 'Treasury and SKR mint must be set'),
+    6006: ('VaultLocked', 'Vault is locked down'),
+    6007: (
+      'RuleNotDue',
+      "The owner is still within this rule's inactivity window",
+    ),
+    6008: ('RuleAlreadyExecuted', 'Rule already executed'),
+    6009: (
+      'RuleOutOfOrder',
+      'An earlier rule for the same asset must execute first',
+    ),
+    6010: ('WrongAsset', 'Rule asset does not match this instruction or mint'),
+    6011: ('InvalidRuleIndex', 'Rule index out of range'),
+    6012: ('InsufficientFunds', 'Amount exceeds the withdrawable balance'),
+    6013: ('NoGuardian', 'Vault has no guardian'),
+    6014: ('GuardianCooldown', 'Guardian lockdown is cooling down'),
+    6015: ('InvalidConfig', 'Treasury must be set'),
+    6016: ('MathOverflow', 'Arithmetic overflow'),
   };
 
   static int? _customCode(Object? err) {
@@ -117,77 +135,76 @@ class DeadmanClient implements DeadmanApi {
   static const commitment = Commitment.confirmed;
   static const confirmTimeout = Duration(seconds: 60);
   static const _pollInterval = Duration(milliseconds: 800);
+  static const blockhashRetries = 8;
 
   final SolanaClient _client;
-  final _program = Ed25519HDPublicKey.fromBase58(AppConfig.programId);
-  final _vaultAddresses = <String, String>{};
   final _rent = <int, int>{};
 
   RpcClient get _rpc => _client.rpcClient;
 
   @override
-  String vaultAddressFor(String owner) =>
-      _vaultAddresses[owner] ??= vaultPda(owner).address;
+  String vaultAddressFor(String owner) => vaultPda(owner).address;
 
   @override
   Future<VaultState?> fetchVault(String owner) async {
     final address = vaultAddressFor(owner);
-    final account = await _rpc
-        .getAccountInfo(
-          address,
-          commitment: commitment,
-          encoding: Encoding.base64,
-        )
-        .value;
+    final account = await _account(address);
     return account == null ? null : _decodeVault(address, account);
   }
 
   @override
-  Future<List<VaultState>> fetchWatchedVaults(String wallet) async {
-    // Scans every Vault and filters client-side; fine on devnet, needs an
-    // indexer on mainnet (heirs sit after a variable-length Option).
-    final accounts = await _rpc.getProgramAccounts(
-      AppConfig.programId,
-      commitment: commitment,
-      encoding: Encoding.base64,
-      filters: [ProgramDataFilter.memcmp(offset: 0, bytes: Disc.vaultAccount)],
+  Future<List<VaultState>> fetchAllVaults() async {
+    // Scans every Vault; fine on devnet, needs an indexer on mainnet
+    // (rules sit after a variable-length Option, so memcmp can't target them).
+    final accounts = await _net(
+      () => _rpc.getProgramAccounts(
+        AppConfig.programId,
+        commitment: commitment,
+        encoding: Encoding.base64,
+        filters: [
+          ProgramDataFilter.memcmp(offset: 0, bytes: Disc.vaultAccount),
+        ],
+      ),
     );
     final vaults = <VaultState>[];
     for (final pa in accounts) {
-      final VaultState? v;
       try {
-        v = await _decodeVault(pa.pubkey, pa.account);
+        final v = await _decodeVault(pa.pubkey, pa.account);
+        if (v != null) vaults.add(v);
       } on FormatException {
         continue;
-      }
-      if (v != null &&
-          (v.guardian == wallet || v.heirs.any((h) => h.wallet == wallet))) {
-        vaults.add(v);
       }
     }
     return vaults;
   }
 
   @override
-  Future<int> balance(String address) =>
-      _rpc.getBalance(address, commitment: commitment).value;
+  Future<List<VaultState>> fetchWatchedVaults(String wallet) async => [
+    for (final v in await fetchAllVaults())
+      if (v.guardian == wallet || v.rules.any((r) => r.beneficiary == wallet))
+        v,
+  ];
 
-  /// On-chain Config (treasury, SKR mint, Plus price, fee).
+  /// On-chain Config (admin and fee schedule).
   Future<DeadmanConfig> fetchConfig() async {
-    final account = await _rpc
-        .getAccountInfo(
-          configPda().address,
-          commitment: commitment,
-          encoding: Encoding.base64,
-        )
-        .value;
-    final data = account?.data;
-    if (account == null ||
-        account.owner != AppConfig.programId ||
-        data is! BinaryAccountData) {
+    final data = _programData(await _account(configPda().address));
+    if (data == null) {
       throw const DeadmanException('Deadman config account not found');
     }
-    return decodeConfig(data.data);
+    return decodeConfig(data);
+  }
+
+  @override
+  Future<FeeSchedule> fetchFees() async => (await fetchConfig()).fees;
+
+  @override
+  Future<int> balance(String address) =>
+      _net(() => _rpc.getBalance(address, commitment: commitment).value);
+
+  @override
+  Future<int> tokenBalance(String owner, String mint) async {
+    final data = (await _account(ataAddress(owner, mint)))?.data;
+    return data is BinaryAccountData ? decodeTokenAmount(data.data) : 0;
   }
 
   @override
@@ -195,12 +212,21 @@ class DeadmanClient implements DeadmanApi {
     required String owner,
     required String guard,
     required int intervalSecs,
-    required int graceSecs,
     required int lockSecs,
-    required List<Heir> heirs,
+    required List<RuleSpec> rules,
     int depositLamports = 0,
-  }) {
-    _checkLamports(depositLamports);
+  }) async {
+    _checkAmount(depositLamports);
+    if (guard == owner || guard == defaultPubkey) {
+      throw DeadmanException.program(6005);
+    }
+    _checkPolicy(
+      owner: owner,
+      guard: guard,
+      intervalSecs: intervalSecs,
+      lockSecs: lockSecs,
+      rules: rules,
+    );
     final vault = vaultAddressFor(owner);
     return _build(owner, [
       SystemInstruction.transfer(
@@ -208,14 +234,17 @@ class DeadmanClient implements DeadmanApi {
         recipientAccount: _pk(guard),
         lamports: AppConfig.guardFundingLamports,
       ),
-      _ix(
-        [_w(owner, signer: true), _w(vault), _r(SystemProgram.programId)],
+      deadmanIx(
+        [
+          AccountMeta.writeable(pubKey: _pk(owner), isSigner: true),
+          AccountMeta.writeable(pubKey: _pk(vault), isSigner: false),
+          AccountMeta.readonly(pubKey: _pk(systemProgramId), isSigner: false),
+        ],
         encodeCreateVault(
           guard: guard,
           intervalSecs: intervalSecs,
-          graceSecs: graceSecs,
           lockSecs: lockSecs,
-          heirs: heirs,
+          rules: rules,
         ),
       ),
       if (depositLamports > 0)
@@ -231,8 +260,8 @@ class DeadmanClient implements DeadmanApi {
   Future<Uint8List> buildDeposit({
     required String owner,
     required int lamports,
-  }) {
-    _checkLamports(lamports);
+  }) async {
+    _checkAmount(lamports);
     return _build(owner, [
       SystemInstruction.transfer(
         fundingAccount: _pk(owner),
@@ -243,120 +272,131 @@ class DeadmanClient implements DeadmanApi {
   }
 
   @override
+  Future<Uint8List> buildDepositToken({
+    required String owner,
+    required String mint,
+    required int amount,
+  }) async {
+    _checkAmount(amount);
+    final decimals = await _mintDecimals(mint);
+    return _build(
+      owner,
+      depositTokenIxs(
+        owner: owner,
+        mint: mint,
+        amount: amount,
+        decimals: decimals,
+      ),
+    );
+  }
+
+  @override
   Future<Uint8List> buildWithdrawSol({
     required String owner,
     required int lamports,
-  }) {
-    _checkLamports(lamports);
-    return _ownerAction(owner, encodeWithdrawSol(lamports));
+  }) async {
+    _checkAmount(lamports);
+    return _build(owner, [ownerActionIx(owner, encodeWithdrawSol(lamports))]);
+  }
+
+  @override
+  Future<Uint8List> buildWithdrawToken({
+    required String owner,
+    required String mint,
+    required int amount,
+  }) async {
+    _checkAmount(amount);
+    return _build(
+      owner,
+      withdrawTokenIxs(owner: owner, mint: mint, amount: amount),
+    );
   }
 
   @override
   Future<Uint8List> buildUpdatePolicy({
     required String owner,
     required int intervalSecs,
-    required int graceSecs,
     required int lockSecs,
-    required List<Heir> heirs,
+    required List<RuleSpec> rules,
     String? guardian,
-  }) => _ownerAction(
-    owner,
-    encodeUpdatePolicy(
+  }) async {
+    _checkPolicy(
+      owner: owner,
       intervalSecs: intervalSecs,
-      graceSecs: graceSecs,
       lockSecs: lockSecs,
-      heirs: heirs,
+      rules: rules,
       guardian: guardian,
-    ),
-  );
+    );
+    return _build(owner, [
+      ownerActionIx(
+        owner,
+        encodeUpdatePolicy(
+          intervalSecs: intervalSecs,
+          lockSecs: lockSecs,
+          rules: rules,
+          guardian: guardian,
+        ),
+      ),
+    ]);
+  }
 
   @override
   Future<Uint8List> buildSetGuard({
     required String owner,
     required String newGuard,
-  }) => _ownerAction(owner, encodeSetGuard(newGuard));
+  }) => _build(owner, [ownerActionIx(owner, encodeSetGuard(newGuard))]);
 
   @override
-  Future<Uint8List> buildSubscribe({
-    required String owner,
-    required int months,
-  }) async {
-    if (months < 1 || months > 12) {
-      throw ArgumentError.value(months, 'months', 'must be 1..12');
-    }
-    final config = await fetchConfig();
-    final mint = AppConfig.skrMint.isNotEmpty
-        ? AppConfig.skrMint
-        : config.skrMint;
-    final ownerSkr = await findAssociatedTokenAddress(
-      owner: _pk(owner),
-      mint: _pk(mint),
-    );
-    final treasurySkr = await findAssociatedTokenAddress(
-      owner: _pk(config.treasury),
-      mint: _pk(mint),
-    );
-    return _build(owner, [
-      _ix([
-        _w(owner, signer: true),
-        _w(vaultAddressFor(owner)),
-        _r(configPda().address),
-        _r(mint),
-        AccountMeta.writeable(pubKey: ownerSkr, isSigner: false),
-        AccountMeta.writeable(pubKey: treasurySkr, isSigner: false),
-        _r(TokenProgram.programId),
-      ], encodeSubscribe(months)),
-    ]);
-  }
+  Future<Uint8List> buildPulseByOwner({required String owner}) => _build(
+    owner,
+    [pulseOrLockdownIx(signer: owner, vaultOwner: owner, lockdown: false)],
+  );
 
   @override
-  Future<Uint8List> buildPulseByOwner({required String owner}) =>
-      _build(owner, [
-        _ix([_r(owner, signer: true), _w(vaultAddressFor(owner))], Disc.pulse),
-      ]);
-
-  @override
-  Future<Uint8List> buildTrigger({
-    required String caller,
+  Future<Uint8List> buildExecuteRule({
+    required String executor,
     required String vaultOwner,
-  }) => _build(caller, [
-    _ix([
-      _r(caller, signer: true),
-      _w(vaultAddressFor(vaultOwner)),
-    ], Disc.trigger),
-  ]);
-
-  @override
-  Future<Uint8List> buildClaimSol({
-    required String heir,
-    required String vaultOwner,
-  }) async {
-    final config = await fetchConfig();
-    return _build(heir, [
-      _ix([
-        _w(heir, signer: true),
-        _w(vaultAddressFor(vaultOwner)),
-        _r(configPda().address),
-        _w(config.treasury),
-      ], Disc.claimSol),
-    ]);
-  }
+    required int index,
+  }) async =>
+      _build(executor, await _executeRuleIxs(executor, vaultOwner, index));
 
   @override
   Future<Uint8List> buildCloseVault({required String owner}) =>
-      _ownerAction(owner, Disc.closeVault);
+      _build(owner, [ownerActionIx(owner, Disc.closeVault)]);
 
   @override
   Future<String> pulseWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
-  }) => _sendWithGuard(guard, vaultOwner, Disc.pulse);
+  }) => _sendWithKey(guard, [
+    pulseOrLockdownIx(
+      signer: guard.address,
+      vaultOwner: vaultOwner,
+      lockdown: false,
+    ),
+  ]);
 
   @override
   Future<String> lockdownWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
-  }) => _sendWithGuard(guard, vaultOwner, Disc.lockdown);
+  }) => _sendWithKey(guard, [
+    pulseOrLockdownIx(
+      signer: guard.address,
+      vaultOwner: vaultOwner,
+      lockdown: true,
+    ),
+  ]);
+
+  @override
+  Future<String> executeRuleWithKey(
+    Ed25519HDKeyPair executor, {
+    required String vaultOwner,
+    required int index,
+  }) async => _sendWithKey(
+    executor,
+    await _executeRuleIxs(executor.address, vaultOwner, index),
+  );
 
   @override
   Future<List<String>> sendSigned(List<Uint8List> signedTransactions) async {
@@ -367,36 +407,92 @@ class DeadmanClient implements DeadmanApi {
     return signatures;
   }
 
-  Future<VaultState?> _decodeVault(String address, Account account) async {
-    final data = account.data;
-    if (account.owner != AppConfig.programId ||
-        data is! BinaryAccountData ||
-        !hasDiscriminator(data.data, Disc.vaultAccount)) {
+  Future<List<Instruction>> _executeRuleIxs(
+    String executor,
+    String vaultOwner,
+    int index,
+  ) async {
+    final vault = await fetchVault(vaultOwner);
+    if (vault == null) throw const DeadmanException('Vault not found');
+    if (index < 0 || index >= vault.rules.length) {
+      throw DeadmanException.program(6011);
+    }
+    final rule = vault.rules[index];
+    if (rule.executed) throw DeadmanException.program(6008);
+    final mint = rule.mint;
+    if (mint != null) await _mintDecimals(mint);
+    final fees = await fetchFees();
+    return executeRuleIxs(
+      executor: executor,
+      vaultOwner: vaultOwner,
+      rule: rule,
+      index: index,
+      treasury: fees.treasury,
+    );
+  }
+
+  Future<Account?> _account(String address) => _net(
+    () => _rpc
+        .getAccountInfo(
+          address,
+          commitment: commitment,
+          encoding: Encoding.base64,
+        )
+        .value,
+  );
+
+  /// Data of an account owned by the Deadman program, or null.
+  static List<int>? _programData(Account? account) {
+    final data = account?.data;
+    if (account == null ||
+        account.owner != AppConfig.programId ||
+        data is! BinaryAccountData) {
       return null;
     }
-    final len = data.data.length;
-    final rent = _rent[len] ??= await _rpc.getMinimumBalanceForRentExemption(
-      len,
-      commitment: commitment,
+    return data.data;
+  }
+
+  /// Also rejects Token-2022 mints, which this client does not support yet.
+  Future<int> _mintDecimals(String mint) async {
+    final account = await _account(mint);
+    final data = account?.data;
+    if (account == null || data is! BinaryAccountData) {
+      throw DeadmanException('Mint $mint not found');
+    }
+    if (account.owner != tokenProgramId) {
+      throw DeadmanException(
+        account.owner == token2022ProgramId
+            ? 'Token-2022 mints are not supported yet'
+            : 'Account $mint is not an SPL token mint',
+      );
+    }
+    return decodeMintDecimals(data.data);
+  }
+
+  Future<VaultState?> _decodeVault(String address, Account account) async {
+    final data = _programData(account);
+    if (data == null || !hasDiscriminator(data, Disc.vaultAccount)) {
+      return null;
+    }
+    final len = data.length;
+    final rent = _rent[len] ??= await _net(
+      () => _rpc.getMinimumBalanceForRentExemption(len, commitment: commitment),
     );
     return decodeVault(
-      data.data,
+      data,
       address: address,
       lamports: account.lamports,
       rentExemptMinimum: rent,
     );
   }
 
-  Future<Uint8List> _ownerAction(String owner, List<int> data) =>
-      _build(owner, [
-        _ix([_w(owner, signer: true), _w(vaultAddressFor(owner))], data),
-      ]);
-
   Future<Uint8List> _build(
     String feePayer,
     List<Instruction> instructions,
   ) async {
-    final bh = await _rpc.getLatestBlockhash(commitment: commitment).value;
+    final bh = await _net(
+      () => _rpc.getLatestBlockhash(commitment: commitment).value,
+    );
     return serializeUnsigned(
       instructions,
       feePayer: feePayer,
@@ -404,30 +500,62 @@ class DeadmanClient implements DeadmanApi {
     );
   }
 
-  Future<String> _sendWithGuard(
-    Ed25519HDKeyPair guard,
-    String vaultOwner,
-    List<int> data,
+  Future<String> _sendWithKey(
+    Ed25519HDKeyPair signer,
+    List<Instruction> instructions,
   ) async {
-    final ix = _ix([
-      AccountMeta.readonly(pubKey: guard.publicKey, isSigner: true),
-      _w(vaultAddressFor(vaultOwner)),
-    ], data);
-    final bh = await _rpc.getLatestBlockhash(commitment: commitment).value;
-    final tx = await signTransaction(bh, Message.only(ix), [guard]);
+    final bh = await _net(
+      () => _rpc.getLatestBlockhash(commitment: commitment).value,
+    );
+    final tx = await signTransaction(bh, Message(instructions: instructions), [
+      signer,
+    ]);
     final signature = await _send(tx.encode());
     await _confirm([signature]);
     return signature;
   }
 
+  /// Retries transient network failures. Android can drop sockets while the
+  /// wallet app is in front; resending the same signed transaction is safe
+  /// because the network rejects duplicate signatures.
+  static Future<T> _net<T>(Future<T> Function() call) async {
+    for (var attempt = 1; ; attempt++) {
+      try {
+        return await call();
+      } on Object catch (e) {
+        final transient =
+            e is SocketException ||
+            e is ClientException ||
+            e is TimeoutException ||
+            e is RpcTimeoutException;
+        if (!transient || attempt >= 4) rethrow;
+        await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+      }
+    }
+  }
+
+  /// Public RPC pools are load-balanced and nodes lag each other, so a fresh
+  /// blockhash can be unknown to the node that simulates the send. Give it a
+  /// few seconds before concluding the transaction really expired.
   Future<String> _send(String base64Tx) async {
-    try {
-      return await _rpc.sendTransaction(
-        base64Tx,
-        preflightCommitment: commitment,
-      );
-    } on JsonRpcException catch (e) {
-      throw DeadmanException.fromRpc(e);
+    for (var attempt = 1; ; attempt++) {
+      try {
+        return await _net(
+          () => _rpc.sendTransaction(base64Tx, preflightCommitment: commitment),
+        );
+      } on JsonRpcException catch (e) {
+        final data = e.data;
+        final unknownBlockhash =
+            data is Map && data['err'] == 'BlockhashNotFound';
+        if (!unknownBlockhash) throw DeadmanException.fromRpc(e);
+        if (attempt >= blockhashRetries) {
+          throw const DeadmanException(
+            'The approval expired before reaching the network. Tap again and approve.',
+            name: 'BlockhashExpired',
+          );
+        }
+        await Future<void>.delayed(_pollInterval * 2);
+      }
     }
   }
 
@@ -435,7 +563,9 @@ class DeadmanClient implements DeadmanApi {
     final deadline = DateTime.now().add(confirmTimeout);
     final pending = [...signatures];
     while (pending.isNotEmpty) {
-      final statuses = await _rpc.getSignatureStatuses(pending).value;
+      final statuses = await _net(
+        () => _rpc.getSignatureStatuses(pending).value,
+      );
       final done = <String>[];
       for (var i = 0; i < pending.length; i++) {
         final s = statuses[i];
@@ -454,24 +584,31 @@ class DeadmanClient implements DeadmanApi {
     }
   }
 
-  Instruction _ix(List<AccountMeta> accounts, List<int> data) => Instruction(
-    programId: _program,
-    accounts: accounts,
-    data: ByteArray(data),
-  );
-
   static Ed25519HDPublicKey _pk(String address) =>
       Ed25519HDPublicKey.fromBase58(address);
 
-  static AccountMeta _w(String address, {bool signer = false}) =>
-      AccountMeta.writeable(pubKey: _pk(address), isSigner: signer);
+  static void _checkPolicy({
+    required String owner,
+    String? guard,
+    required int intervalSecs,
+    required int lockSecs,
+    required List<RuleSpec> rules,
+    String? guardian,
+  }) {
+    final code = policyError(
+      owner: owner,
+      guard: guard,
+      intervalSecs: intervalSecs,
+      lockSecs: lockSecs,
+      rules: rules,
+      guardian: guardian,
+    );
+    if (code != null) throw DeadmanException.program(code);
+  }
 
-  static AccountMeta _r(String address, {bool signer = false}) =>
-      AccountMeta.readonly(pubKey: _pk(address), isSigner: signer);
-
-  static void _checkLamports(int lamports) {
-    if (lamports < 0) {
-      throw ArgumentError.value(lamports, 'lamports', 'must be >= 0');
+  static void _checkAmount(int amount) {
+    if (amount < 0) {
+      throw ArgumentError.value(amount, 'amount', 'must be >= 0');
     }
   }
 }

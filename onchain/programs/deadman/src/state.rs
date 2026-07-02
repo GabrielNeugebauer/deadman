@@ -7,30 +7,69 @@ use crate::{constants::*, error::DeadmanError};
 pub struct Config {
     pub admin: Pubkey,
     pub treasury: Pubkey,
-    pub skr_mint: Pubkey,
-    /// Deadman Plus price per 30 days, in SKR base units.
-    pub plus_price: u64,
-    pub fee_bps: u16,
+    /// Payout fee for the plain Solana rail.
+    pub fee_bps_public: u16,
+    /// Payout fee for private rails (Cloak, Zcash).
+    pub fee_bps_private: u16,
     pub bump: u8,
 }
 
+impl Config {
+    pub fn fee_bps(&self, rail: Rail) -> u16 {
+        match rail {
+            Rail::Solana => self.fee_bps_public,
+            Rail::Cloak | Rail::Zcash => self.fee_bps_private,
+        }
+    }
+}
+
+/// Delivery rail. On-chain every rail pays a Solana key; for private rails
+/// that key is a fresh claim key whose app routes the funds onward.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
-pub struct HeirInput {
-    pub wallet: Pubkey,
-    pub bps: u16,
+pub enum Rail {
+    Solana,
+    Cloak,
+    Zcash,
+}
+
+impl Rail {
+    pub fn is_private(self) -> bool {
+        self != Rail::Solana
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
-pub struct Heir {
-    pub wallet: Pubkey,
-    pub bps: u16,
-    pub claimed_sol: bool,
+pub enum AmountMode {
+    /// `amount` in lamports or token base units (capped at the balance).
+    Fixed,
+    /// `amount` in bps of the asset's balance when the rule executes.
+    Percent,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
-pub enum VaultStatus {
-    Active,
-    Triggered,
+pub struct RuleInput {
+    pub beneficiary: Pubkey,
+    pub rail: Rail,
+    /// Seconds of owner silence (since the last pulse) before this rule fires.
+    pub after_secs: i64,
+    /// `None` = SOL.
+    pub mint: Option<Pubkey>,
+    pub mode: AmountMode,
+    pub amount: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub struct Rule {
+    pub beneficiary: Pubkey,
+    pub rail: Rail,
+    pub after_secs: i64,
+    pub mint: Option<Pubkey>,
+    pub mode: AmountMode,
+    pub amount: u64,
+    /// 0 while pending.
+    pub executed_at: i64,
+    /// Net amount the beneficiary received.
+    pub paid: u64,
 }
 
 #[account]
@@ -39,47 +78,26 @@ pub struct Vault {
     pub owner: Pubkey,
     /// Device key: may only pulse and lock down, never move funds.
     pub guard: Pubkey,
-    /// Optional trusted contact (Plus): may lock down, co-signs early unlock.
+    /// Trusted contact: may lock down (rate-limited) and co-sign early unlock.
     pub guardian: Option<Pubkey>,
+    /// Check-in cadence; drives reminders and the minimum rule delay.
     pub interval_secs: i64,
-    pub grace_secs: i64,
     pub lock_secs: i64,
     pub last_pulse: i64,
     pub locked_until: i64,
-    pub plus_until: i64,
-    pub triggered_at: i64,
-    pub sol_at_trigger: u64,
+    /// Earliest time the guardian may lock down again.
+    pub guardian_ready_at: i64,
     pub total_pulses: u64,
     pub streak: u32,
     pub best_streak: u32,
-    pub status: VaultStatus,
-    #[max_len(MAX_HEIRS)]
-    pub heirs: Vec<Heir>,
+    #[max_len(MAX_RULES)]
+    pub rules: Vec<Rule>,
     pub bump: u8,
 }
 
 impl Vault {
-    pub fn deadline(&self) -> Result<i64> {
-        self.last_pulse
-            .checked_add(self.interval_secs)
-            .and_then(|t| t.checked_add(self.grace_secs))
-            .ok_or_else(|| error!(DeadmanError::MathOverflow))
-    }
-
     pub fn is_locked(&self, now: i64) -> bool {
         now < self.locked_until
-    }
-
-    pub fn is_plus(&self, now: i64) -> bool {
-        now < self.plus_until
-    }
-
-    pub fn require_active(&self) -> Result<()> {
-        require!(
-            self.status == VaultStatus::Active,
-            DeadmanError::VaultNotActive
-        );
-        Ok(())
     }
 
     pub fn require_unlocked(&self, now: i64) -> Result<()> {
@@ -87,7 +105,13 @@ impl Vault {
         Ok(())
     }
 
-    /// Resets the switch and advances the daily streak.
+    pub fn rule_due_at(&self, index: usize) -> Result<i64> {
+        self.last_pulse
+            .checked_add(self.rules[index].after_secs)
+            .ok_or_else(|| error!(DeadmanError::MathOverflow))
+    }
+
+    /// Resets every pending rule's clock and advances the daily streak.
     pub fn record_pulse(&mut self, now: i64) -> Result<()> {
         let day = now / SECS_PER_DAY;
         let last_day = self.last_pulse / SECS_PER_DAY;
@@ -110,107 +134,110 @@ impl Vault {
         Ok(())
     }
 
-    pub fn heir_index(&self, wallet: &Pubkey) -> Result<usize> {
-        self.heirs
-            .iter()
-            .position(|h| h.wallet == *wallet)
-            .ok_or_else(|| error!(DeadmanError::NotAnHeir))
+    /// Checks that rule `index` may execute now for `mint`, enforcing the
+    /// per-asset order so percentages apply to a deterministic balance.
+    pub fn check_executable(&self, index: usize, mint: Option<Pubkey>, now: i64) -> Result<()> {
+        require!(index < self.rules.len(), DeadmanError::InvalidRuleIndex);
+        let rule = &self.rules[index];
+        require!(rule.mint == mint, DeadmanError::WrongAsset);
+        require!(rule.executed_at == 0, DeadmanError::RuleAlreadyExecuted);
+        require!(now > self.rule_due_at(index)?, DeadmanError::RuleNotDue);
+        require!(
+            self.rules[..index]
+                .iter()
+                .all(|r| r.mint != mint || r.executed_at != 0),
+            DeadmanError::RuleOutOfOrder
+        );
+        Ok(())
     }
 
-    /// Validates and applies the full vault policy. Caller enforces auth.
-    #[allow(clippy::too_many_arguments)]
+    /// Validates and installs the full policy. Caller enforces auth.
     pub fn apply_policy(
         &mut self,
-        now: i64,
         interval_secs: i64,
-        grace_secs: i64,
         lock_secs: i64,
-        heirs: &[HeirInput],
+        rules: &[RuleInput],
         guardian: Option<Pubkey>,
     ) -> Result<()> {
         require!(
             (MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&interval_secs)
-                && (MIN_GRACE_SECS..=MAX_GRACE_SECS).contains(&grace_secs)
                 && (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs),
             DeadmanError::InvalidDuration
         );
-
-        let max_heirs = if self.is_plus(now) {
-            MAX_HEIRS
-        } else {
-            FREE_MAX_HEIRS
-        };
-        require!(!heirs.is_empty(), DeadmanError::InvalidHeirs);
-        require!(heirs.len() <= max_heirs, DeadmanError::TooManyHeirs);
-
-        let mut total: u64 = 0;
-        for (i, h) in heirs.iter().enumerate() {
+        require!(
+            !rules.is_empty() && rules.len() <= MAX_RULES,
+            DeadmanError::InvalidRules
+        );
+        let min_delay = interval_secs
+            .checked_add(MIN_RULE_MARGIN_SECS)
+            .ok_or(DeadmanError::MathOverflow)?;
+        for (i, r) in rules.iter().enumerate() {
+            let amount_ok = match r.mode {
+                AmountMode::Fixed => r.amount > 0,
+                AmountMode::Percent => (1..=BPS_DENOMINATOR).contains(&r.amount),
+            };
             require!(
-                h.bps > 0
-                    && h.wallet != Pubkey::default()
-                    && h.wallet != self.owner
-                    && h.wallet != self.guard
-                    && !heirs[..i].iter().any(|o| o.wallet == h.wallet),
-                DeadmanError::InvalidHeirs
+                amount_ok
+                    && (min_delay..=MAX_RULE_DELAY_SECS).contains(&r.after_secs)
+                    && (i == 0 || rules[i - 1].after_secs <= r.after_secs)
+                    && r.beneficiary != Pubkey::default()
+                    && r.beneficiary != self.owner
+                    && r.beneficiary != self.guard
+                    && r.mint != Some(Pubkey::default()),
+                DeadmanError::InvalidRules
             );
-            total = total
-                .checked_add(u64::from(h.bps))
-                .ok_or(DeadmanError::MathOverflow)?;
         }
-        require!(total == BPS_DENOMINATOR, DeadmanError::InvalidHeirs);
-
         if let Some(g) = guardian {
-            require!(self.is_plus(now), DeadmanError::PlusRequired);
             require!(
                 g != Pubkey::default()
                     && g != self.owner
                     && g != self.guard
-                    && !heirs.iter().any(|h| h.wallet == g),
+                    && !rules.iter().any(|r| r.beneficiary == g),
                 DeadmanError::InvalidGuardian
             );
         }
 
         self.interval_secs = interval_secs;
-        self.grace_secs = grace_secs;
         self.lock_secs = lock_secs;
         self.guardian = guardian;
-        self.heirs = heirs
+        self.rules = rules
             .iter()
-            .map(|h| Heir {
-                wallet: h.wallet,
-                bps: h.bps,
-                claimed_sol: false,
+            .map(|r| Rule {
+                beneficiary: r.beneficiary,
+                rail: r.rail,
+                after_secs: r.after_secs,
+                mint: r.mint,
+                mode: r.mode,
+                amount: r.amount,
+                executed_at: 0,
+                paid: 0,
             })
             .collect();
         Ok(())
     }
 }
 
-/// Per-mint claim ledger, snapshotted at the first claim after trigger.
-#[account]
-#[derive(InitSpace)]
-pub struct TokenClaim {
-    pub vault: Pubkey,
-    pub mint: Pubkey,
-    pub amount_at_snapshot: u64,
-    pub claimed_mask: u8,
-    pub initialized: bool,
-    pub bump: u8,
+/// Gross payout for a rule given the asset's current available balance.
+pub fn rule_gross(rule: &Rule, available: u64) -> Result<u64> {
+    Ok(match rule.mode {
+        AmountMode::Fixed => rule.amount.min(available),
+        AmountMode::Percent => {
+            let v = u128::from(available)
+                .checked_mul(u128::from(rule.amount))
+                .and_then(|v| v.checked_div(u128::from(BPS_DENOMINATOR)))
+                .ok_or(DeadmanError::MathOverflow)?;
+            u64::try_from(v).map_err(|_| DeadmanError::MathOverflow)?
+        }
+    })
 }
 
-/// `amount * bps / 10_000`, then the protocol fee on that share.
-pub fn split_share(amount: u64, bps: u16, fee_bps: u16) -> Result<(u64, u64)> {
-    let gross = u128::from(amount)
-        .checked_mul(u128::from(bps))
-        .and_then(|v| v.checked_div(u128::from(BPS_DENOMINATOR)))
-        .ok_or(DeadmanError::MathOverflow)?;
-    let fee = gross
+/// Splits `gross` into (net, fee) at `fee_bps`.
+pub fn split_fee(gross: u64, fee_bps: u16) -> Result<(u64, u64)> {
+    let fee = u128::from(gross)
         .checked_mul(u128::from(fee_bps))
         .and_then(|v| v.checked_div(u128::from(BPS_DENOMINATOR)))
         .ok_or(DeadmanError::MathOverflow)?;
+    let fee = u64::try_from(fee).map_err(|_| DeadmanError::MathOverflow)?;
     let net = gross.checked_sub(fee).ok_or(DeadmanError::MathOverflow)?;
-    Ok((
-        u64::try_from(net).map_err(|_| DeadmanError::MathOverflow)?,
-        u64::try_from(fee).map_err(|_| DeadmanError::MathOverflow)?,
-    ))
+    Ok((net, fee))
 }

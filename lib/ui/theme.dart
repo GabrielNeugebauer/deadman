@@ -28,18 +28,25 @@ ThemeData buildTheme() {
       error: DmColors.danger,
     ),
   );
-  final body = GoogleFonts.interTextTheme(base.textTheme).apply(
-    bodyColor: DmColors.text,
-    displayColor: DmColors.text,
-  );
+  final body = GoogleFonts.interTextTheme(base.textTheme)
+      .apply(bodyColor: DmColors.text, displayColor: DmColors.text);
   return base.copyWith(
     textTheme: body.copyWith(
       displayLarge: GoogleFonts.spaceGrotesk(
-          fontSize: 44, fontWeight: FontWeight.w700, color: DmColors.text),
+        fontSize: 44,
+        fontWeight: FontWeight.w700,
+        color: DmColors.text,
+      ),
       headlineMedium: GoogleFonts.spaceGrotesk(
-          fontSize: 28, fontWeight: FontWeight.w700, color: DmColors.text),
+        fontSize: 28,
+        fontWeight: FontWeight.w700,
+        color: DmColors.text,
+      ),
       titleLarge: GoogleFonts.spaceGrotesk(
-          fontSize: 20, fontWeight: FontWeight.w600, color: DmColors.text),
+        fontSize: 20,
+        fontWeight: FontWeight.w600,
+        color: DmColors.text,
+      ),
     ),
     cardTheme: const CardThemeData(
       color: DmColors.surface,

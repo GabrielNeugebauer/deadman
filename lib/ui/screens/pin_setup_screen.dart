@@ -42,7 +42,9 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
           toast(context, 'Duress PIN must differ from your PIN', error: true);
           return false;
         }
-        await ref.read(secureStoreProvider).setPins(pin: _pin, duressPin: value);
+        await ref
+            .read(secureStoreProvider)
+            .setPins(pin: _pin, duressPin: value);
         ref.read(sessionProvider.notifier).unlock(duress: false);
         widget.onDone();
         return true;
@@ -53,13 +55,21 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final (title, body, color) = switch (_step) {
-      _Step.pin => ('Choose your PIN', 'Six digits to open Deadman.', DmColors.alive),
-      _Step.confirm => ('Confirm your PIN', 'Enter it once more.', DmColors.alive),
+      _Step.pin => (
+        'Choose your PIN',
+        'Six digits to open Deadman.',
+        DmColors.alive,
+      ),
+      _Step.confirm => (
+        'Confirm your PIN',
+        'Enter it once more.',
+        DmColors.alive,
+      ),
       _Step.duress => (
-          'Choose a duress PIN',
-          'If someone forces you to open the app, enter this instead. Everything looks normal, but your vault is silently locked down and withdrawals stall.',
-          DmColors.warn,
-        ),
+        'Choose a duress PIN',
+        'If someone forces you to open the app, enter this instead. Everything looks normal, but your vault is silently locked down and withdrawals stall.',
+        DmColors.warn,
+      ),
     };
     return Scaffold(
       body: SafeArea(
@@ -68,14 +78,24 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
           child: Column(
             children: [
               const Spacer(),
-              Icon(_step == _Step.duress ? Icons.front_hand_outlined : Icons.pin_outlined,
-                  color: color, size: 36),
+              Icon(
+                _step == _Step.duress
+                    ? Icons.front_hand_outlined
+                    : Icons.pin_outlined,
+                color: color,
+                size: 36,
+              ),
               const SizedBox(height: 16),
               Text(title, style: t.headlineMedium, textAlign: TextAlign.center),
               const SizedBox(height: 10),
-              Text(body,
-                  textAlign: TextAlign.center,
-                  style: t.bodyMedium?.copyWith(color: DmColors.muted, height: 1.4)),
+              Text(
+                body,
+                textAlign: TextAlign.center,
+                style: t.bodyMedium?.copyWith(
+                  color: DmColors.muted,
+                  height: 1.4,
+                ),
+              ),
               const SizedBox(height: 32),
               PinPad(key: ValueKey(_step), onComplete: _onPin),
               const Spacer(),
