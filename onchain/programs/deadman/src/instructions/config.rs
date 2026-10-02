@@ -27,29 +27,27 @@ pub struct InitConfig<'info> {
     pub system_program: Program<'info, System>,
 }
 
-fn validate_config(treasury: &Pubkey, skr_mint: &Pubkey, fee_bps: u16) -> Result<()> {
-    require!(fee_bps <= MAX_FEE_BPS, DeadmanError::FeeTooHigh);
+fn validate_config(treasury: &Pubkey, fee_bps_public: u16, fee_bps_private: u16) -> Result<()> {
     require!(
-        *treasury != Pubkey::default() && *skr_mint != Pubkey::default(),
-        DeadmanError::InvalidConfig
+        fee_bps_public <= MAX_FEE_BPS && fee_bps_private <= MAX_FEE_BPS,
+        DeadmanError::FeeTooHigh
     );
+    require!(*treasury != Pubkey::default(), DeadmanError::InvalidConfig);
     Ok(())
 }
 
 pub fn handle_init_config(
     ctx: Context<InitConfig>,
     treasury: Pubkey,
-    skr_mint: Pubkey,
-    plus_price: u64,
-    fee_bps: u16,
+    fee_bps_public: u16,
+    fee_bps_private: u16,
 ) -> Result<()> {
-    validate_config(&treasury, &skr_mint, fee_bps)?;
+    validate_config(&treasury, fee_bps_public, fee_bps_private)?;
     ctx.accounts.config.set_inner(Config {
         admin: ctx.accounts.admin.key(),
         treasury,
-        skr_mint,
-        plus_price,
-        fee_bps,
+        fee_bps_public,
+        fee_bps_private,
         bump: ctx.bumps.config,
     });
     Ok(())
@@ -70,15 +68,13 @@ pub struct SetConfig<'info> {
 pub fn handle_set_config(
     ctx: Context<SetConfig>,
     treasury: Pubkey,
-    skr_mint: Pubkey,
-    plus_price: u64,
-    fee_bps: u16,
+    fee_bps_public: u16,
+    fee_bps_private: u16,
 ) -> Result<()> {
-    validate_config(&treasury, &skr_mint, fee_bps)?;
+    validate_config(&treasury, fee_bps_public, fee_bps_private)?;
     let config = &mut ctx.accounts.config;
     config.treasury = treasury;
-    config.skr_mint = skr_mint;
-    config.plus_price = plus_price;
-    config.fee_bps = fee_bps;
+    config.fee_bps_public = fee_bps_public;
+    config.fee_bps_private = fee_bps_private;
     Ok(())
 }

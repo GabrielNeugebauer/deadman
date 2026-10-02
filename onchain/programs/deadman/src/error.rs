@@ -4,40 +4,36 @@ use anchor_lang::prelude::*;
 pub enum DeadmanError {
     #[msg("Signer is not allowed to perform this action")]
     Unauthorized,
-    #[msg("Fee exceeds the 1% cap")]
+    #[msg("Fee exceeds the 5% cap")]
     FeeTooHigh,
-    #[msg("Interval, grace or lock duration out of range")]
+    #[msg("Interval or lock duration out of range")]
     InvalidDuration,
-    #[msg("Heirs must be unique, non-empty and sum to 10000 bps")]
-    InvalidHeirs,
-    #[msg("Too many heirs for this plan")]
-    TooManyHeirs,
-    #[msg("A guardian requires Deadman Plus")]
-    PlusRequired,
-    #[msg("Guardian cannot be the owner, the guard key or an heir")]
+    #[msg("Rules must be 1-8, sorted by delay, with valid amounts and beneficiaries")]
+    InvalidRules,
+    #[msg("Guardian cannot be the owner, the guard key or a beneficiary")]
     InvalidGuardian,
+    #[msg("Guard key must differ from the owner, beneficiaries and guardian")]
+    InvalidGuard,
     #[msg("Vault is locked down")]
     VaultLocked,
-    #[msg("Vault is not active")]
-    VaultNotActive,
-    #[msg("Vault has not been triggered")]
-    VaultNotTriggered,
-    #[msg("The owner is still within the heartbeat window")]
-    StillAlive,
-    #[msg("Signer is not an heir of this vault")]
-    NotAnHeir,
-    #[msg("Share already claimed")]
-    AlreadyClaimed,
+    #[msg("The owner is still within this rule's inactivity window")]
+    RuleNotDue,
+    #[msg("Rule already executed")]
+    RuleAlreadyExecuted,
+    #[msg("An earlier rule for the same asset must execute first")]
+    RuleOutOfOrder,
+    #[msg("Rule asset does not match this instruction or mint")]
+    WrongAsset,
+    #[msg("Rule index out of range")]
+    InvalidRuleIndex,
     #[msg("Amount exceeds the withdrawable balance")]
     InsufficientFunds,
-    #[msg("Subscription months out of range")]
-    InvalidMonths,
-    #[msg("Guard key must differ from the owner, heirs and guardian")]
-    InvalidGuard,
     #[msg("Vault has no guardian")]
     NoGuardian,
+    #[msg("Guardian lockdown is cooling down")]
+    GuardianCooldown,
+    #[msg("Treasury must be set")]
+    InvalidConfig,
     #[msg("Arithmetic overflow")]
     MathOverflow,
-    #[msg("Treasury and SKR mint must be set")]
-    InvalidConfig,
 }

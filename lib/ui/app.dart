@@ -15,14 +15,16 @@ class DeadmanApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'Deadman',
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(),
-        home: const _Gate(),
-      );
+    title: 'Deadman',
+    debugShowCheckedModeBanner: false,
+    theme: buildTheme(),
+    home: const _Gate(),
+  );
 }
 
-final _hasPinsProvider = FutureProvider((ref) => ref.watch(secureStoreProvider).hasPins());
+final _hasPinsProvider = FutureProvider(
+  (ref) => ref.watch(secureStoreProvider).hasPins(),
+);
 
 class _Gate extends ConsumerWidget {
   const _Gate();
@@ -33,10 +35,13 @@ class _Gate extends ConsumerWidget {
     if (session.owner == null) return const WelcomeScreen();
     final hasPins = ref.watch(_hasPinsProvider);
     return hasPins.when(
-      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      loading: () =>
+          const Scaffold(body: Center(child: CircularProgressIndicator())),
       error: (e, _) => Scaffold(body: Center(child: Text('$e'))),
       data: (has) {
-        if (!has) return PinSetupScreen(onDone: () => ref.invalidate(_hasPinsProvider));
+        if (!has) {
+          return PinSetupScreen(onDone: () => ref.invalidate(_hasPinsProvider));
+        }
         if (!session.unlocked) return const LockScreen();
         return const _Shell();
       },
@@ -56,18 +61,27 @@ class _ShellState extends State<_Shell> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: IndexedStack(
-          index: _index,
-          children: const [PulseTab(), CircleTab(), SettingsTab()],
+    body: IndexedStack(
+      index: _index,
+      children: const [PulseTab(), CircleTab(), SettingsTab()],
+    ),
+    bottomNavigationBar: NavigationBar(
+      selectedIndex: _index,
+      onDestinationSelected: (i) => setState(() => _index = i),
+      destinations: const [
+        NavigationDestination(
+          icon: Icon(Icons.monitor_heart_outlined),
+          label: 'Pulse',
         ),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: _index,
-          onDestinationSelected: (i) => setState(() => _index = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.monitor_heart_outlined), label: 'Pulse'),
-            NavigationDestination(icon: Icon(Icons.diversity_3_outlined), label: 'Circle'),
-            NavigationDestination(icon: Icon(Icons.shield_outlined), label: 'Security'),
-          ],
+        NavigationDestination(
+          icon: Icon(Icons.diversity_3_outlined),
+          label: 'Circle',
         ),
-      );
+        NavigationDestination(
+          icon: Icon(Icons.shield_outlined),
+          label: 'Security',
+        ),
+      ],
+    ),
+  );
 }

@@ -31,19 +31,27 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.monitor_heart_outlined, color: DmColors.alive, size: 40),
+              const Icon(
+                Icons.monitor_heart_outlined,
+                color: DmColors.alive,
+                size: 40,
+              ),
               const SizedBox(height: 28),
               Text('Deadman', style: t.displayLarge),
               const SizedBox(height: 12),
               Text(
                 'The safety net for your self-custody. If you go silent, get coerced, or lose your phone, your crypto still ends up where you decided.',
-                style: t.bodyLarge?.copyWith(color: DmColors.muted, height: 1.45),
+                style: t.bodyLarge?.copyWith(
+                  color: DmColors.muted,
+                  height: 1.45,
+                ),
               ),
               const SizedBox(height: 36),
               const _Threat(
                 icon: Icons.hourglass_bottom,
                 title: 'Silence',
-                body: 'Miss your check-ins and your vault passes to your heirs.',
+                body:
+                    'Miss your check-ins and your vault passes to your heirs.',
                 color: DmColors.alive,
               ),
               const _Threat(
@@ -62,14 +70,19 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
               FilledButton.icon(
                 onPressed: _busy ? null : _connect,
                 icon: _busy
-                    ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     : const Icon(Icons.lock_outline),
                 label: const Text('Connect Seed Vault wallet'),
               ),
               const SizedBox(height: 12),
               Center(
-                child: Text('Devnet preview · unaudited',
-                    style: t.bodySmall?.copyWith(color: DmColors.muted)),
+                child: Text(
+                  'Devnet preview · unaudited',
+                  style: t.bodySmall?.copyWith(color: DmColors.muted),
+                ),
               ),
             ],
           ),
@@ -80,7 +93,12 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
 }
 
 class _Threat extends StatelessWidget {
-  const _Threat({required this.icon, required this.title, required this.body, required this.color});
+  const _Threat({
+    required this.icon,
+    required this.title,
+    required this.body,
+    required this.color,
+  });
 
   final IconData icon;
   final String title;
@@ -107,9 +125,18 @@ class _Threat extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text(body, style: const TextStyle(color: DmColors.muted, height: 1.35)),
+                Text(
+                  body,
+                  style: const TextStyle(color: DmColors.muted, height: 1.35),
+                ),
               ],
             ),
           ),

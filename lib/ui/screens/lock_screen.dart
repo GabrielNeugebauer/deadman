@@ -37,7 +37,11 @@ class LockScreen extends ConsumerWidget {
         child: Column(
           children: [
             const Spacer(),
-            const Icon(Icons.monitor_heart_outlined, color: DmColors.alive, size: 36),
+            const Icon(
+              Icons.monitor_heart_outlined,
+              color: DmColors.alive,
+              size: 36,
+            ),
             const SizedBox(height: 16),
             Text('Enter PIN', style: t.headlineMedium),
             const SizedBox(height: 32),

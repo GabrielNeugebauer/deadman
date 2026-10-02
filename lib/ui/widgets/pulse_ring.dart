@@ -75,5 +75,6 @@ class _RingPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_RingPainter old) => old.progress != progress || old.color != color;
+  bool shouldRepaint(_RingPainter old) =>
+      old.progress != progress || old.color != color;
 }

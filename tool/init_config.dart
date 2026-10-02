@@ -2,7 +2,7 @@
 // program's upgrade authority.
 //
 // dart run tool/init_config.dart --keypair <path> --treasury <addr>
-//   --skr-mint <addr> [--price 100000000] [--fee-bps 50] [--rpc <url>]
+//   [--fee-public 200] [--fee-private 500] [--rpc <url>]
 import 'dart:convert';
 import 'dart:io';
 
@@ -20,18 +20,22 @@ Future<void> main(List<String> argv) async {
   }
   final keypairPath = args['keypair'];
   final treasury = args['treasury'];
-  final skrMint = args['skr-mint'];
-  if (keypairPath == null || treasury == null || skrMint == null) {
-    stderr.writeln('usage: --keypair <path> --treasury <addr> --skr-mint <addr> '
-        '[--price <base units>] [--fee-bps <0-100>] [--rpc <url>]');
+  if (keypairPath == null || treasury == null) {
+    stderr.writeln(
+      'usage: --keypair <path> --treasury <addr> '
+      '[--fee-public <0-500>] [--fee-private <0-500>] [--rpc <url>]',
+    );
     exit(64);
   }
-  final price = int.parse(args['price'] ?? '100000000');
-  final feeBps = int.parse(args['fee-bps'] ?? '50');
+  final feePublic = int.parse(args['fee-public'] ?? '200');
+  final feePrivate = int.parse(args['fee-private'] ?? '500');
   final rpc = args['rpc'] ?? 'https://api.devnet.solana.com';
 
-  final secret = (jsonDecode(File(keypairPath).readAsStringSync()) as List).cast<int>();
-  final admin = await Ed25519HDKeyPair.fromPrivateKeyBytes(privateKey: secret.sublist(0, 32));
+  final secret = (jsonDecode(File(keypairPath).readAsStringSync()) as List)
+      .cast<int>();
+  final admin = await Ed25519HDKeyPair.fromPrivateKeyBytes(
+    privateKey: secret.sublist(0, 32),
+  );
 
   final program = Ed25519HDPublicKey.fromBase58(programId);
   final config = await Ed25519HDPublicKey.findProgramAddress(
@@ -43,13 +47,15 @@ Future<void> main(List<String> argv) async {
     programId: Ed25519HDPublicKey.fromBase58(loaderUpgradeable),
   );
 
-  final discriminator = sha256.convert(utf8.encode('global:init_config')).bytes.sublist(0, 8);
+  final discriminator = sha256
+      .convert(utf8.encode('global:init_config'))
+      .bytes
+      .sublist(0, 8);
   final data = ByteArray.merge([
     ByteArray(discriminator),
     ByteArray(Ed25519HDPublicKey.fromBase58(treasury).bytes),
-    ByteArray(Ed25519HDPublicKey.fromBase58(skrMint).bytes),
-    ByteArray.u64(price),
-    ByteArray.u16(feeBps),
+    ByteArray.u16(feePublic),
+    ByteArray.u16(feePrivate),
   ]);
 
   final ix = Instruction(

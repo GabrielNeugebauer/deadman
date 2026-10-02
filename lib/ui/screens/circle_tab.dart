@@ -6,10 +6,12 @@ import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/providers.dart';
 import '../format.dart';
+import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/feedback.dart';
 
-/// Family Circle: vaults where this wallet is an heir or the guardian.
+/// Family Circle: vaults naming this wallet (or this device's claim keys)
+/// as a beneficiary or guardian.
 class CircleTab extends ConsumerWidget {
   const CircleTab({super.key});
 
@@ -18,6 +20,7 @@ class CircleTab extends ConsumerWidget {
     final t = Theme.of(context).textTheme;
     final me = ref.watch(sessionProvider.select((s) => s.owner)) ?? '';
     final watched = ref.watch(watchedVaultsProvider);
+    final keys = ref.watch(myBeneficiaryKeysProvider).value ?? {me};
     return SafeArea(
       child: RefreshIndicator(
         onRefresh: () async => ref.invalidate(watchedVaultsProvider),
@@ -26,15 +29,22 @@ class CircleTab extends ConsumerWidget {
           children: [
             Text('Family Circle', style: t.headlineMedium),
             const SizedBox(height: 6),
-            const Text('People who named you as heir or guardian.',
-                style: TextStyle(color: DmColors.muted)),
+            const Text(
+              'People who named you in their release plan.',
+              style: TextStyle(color: DmColors.muted),
+            ),
             const SizedBox(height: 20),
             ...watched.when(
               loading: () => [const Center(child: CircularProgressIndicator())],
-              error: (e, _) => [Text('$e', style: const TextStyle(color: DmColors.danger))],
+              error: (e, _) => [
+                Text('$e', style: const TextStyle(color: DmColors.danger)),
+              ],
               data: (list) => list.isEmpty
                   ? [_Empty(address: me)]
-                  : [for (final v in list) _PersonCard(vault: v, me: me)],
+                  : [
+                      for (final v in list)
+                        _PersonCard(vault: v, me: me, keys: keys),
+                    ],
             ),
           ],
         ),
@@ -44,10 +54,15 @@ class CircleTab extends ConsumerWidget {
 }
 
 class _PersonCard extends ConsumerStatefulWidget {
-  const _PersonCard({required this.vault, required this.me});
+  const _PersonCard({
+    required this.vault,
+    required this.me,
+    required this.keys,
+  });
 
   final VaultState vault;
   final String me;
+  final Set<String> keys;
 
   @override
   ConsumerState<_PersonCard> createState() => _PersonCardState();
@@ -66,19 +81,22 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
   Widget build(BuildContext context) {
     final v = widget.vault;
     final now = nowSecs();
-    final heir = v.heirs.where((h) => h.wallet == widget.me).firstOrNull;
     final isGuardian = v.guardian == widget.me;
-    final triggered = v.status == VaultStatus.triggered;
+    final mine = [
+      for (final (i, r) in v.rules.indexed)
+        if (widget.keys.contains(r.beneficiary)) (i, r),
+    ];
+    final next = v.nextRuleDue;
 
-    final (status, color) = triggered
-        ? ('Switch fired', DmColors.danger)
-        : v.canTrigger(now)
-            ? ('Silent past deadline', DmColors.danger)
-            : now > v.pulseDue
-                ? ('In grace period', DmColors.warn)
-                : v.isLocked(now)
-                    ? ('Locked down', DmColors.warn)
-                    : ('Alive', DmColors.alive);
+    final (status, color) = next == null
+        ? ('Plan fully released', DmColors.muted)
+        : now > next
+        ? ('Silent past a release tier', DmColors.danger)
+        : now > v.pulseDue
+        ? ('Missed a check-in', DmColors.warn)
+        : v.isLocked(now)
+        ? ('Locked down', DmColors.warn)
+        : ('Alive', DmColors.alive);
 
     final actions = ref.read(actionsProvider);
     return Padding(
@@ -94,40 +112,94 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                   Container(
                     width: 10,
                     height: 10,
-                    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                   const SizedBox(width: 10),
-                  Text(short(v.owner),
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 16)),
-                  const Spacer(),
                   Text(
-                    [if (heir != null) 'heir ${heir.bps / 100}%', if (isGuardian) 'guardian']
-                        .join(' · '),
-                    style: const TextStyle(color: DmColors.muted),
+                    short(v.owner),
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 16,
+                    ),
                   ),
+                  const Spacer(),
+                  if (isGuardian)
+                    const Text(
+                      'guardian',
+                      style: TextStyle(color: DmColors.plus),
+                    ),
                 ],
               ),
               const SizedBox(height: 10),
-              Text(status, style: TextStyle(color: color, fontWeight: FontWeight.w600)),
+              Text(
+                status,
+                style: TextStyle(color: color, fontWeight: FontWeight.w600),
+              ),
               const SizedBox(height: 4),
               Text(
                 'Last pulse ${ago(v.lastPulse, now)} · ${v.streak}-day streak',
                 style: const TextStyle(color: DmColors.muted),
               ),
-              if (triggered && heir != null && !heir.claimedSol) ...[
-                const SizedBox(height: 14),
-                FilledButton(
-                  onPressed: _busy ? null : () => _run(() => actions.claim(v.owner), 'Share claimed'),
-                  child: Text('Claim ${sol(v.solAtTrigger * heir.bps ~/ 10000)} SOL'),
+              for (final (i, r) in mine) ...[
+                const Divider(height: 24, color: DmColors.line),
+                Row(
+                  children: [
+                    Expanded(child: Text(amountLabel(r))),
+                    RailBadge(r.rail),
+                  ],
                 ),
-              ],
-              if (!triggered && v.canTrigger(now)) ...[
-                const SizedBox(height: 14),
-                FilledButton(
-                  style: FilledButton.styleFrom(backgroundColor: DmColors.danger),
-                  onPressed: _busy ? null : () => _run(() => actions.trigger(v.owner), 'Switch triggered'),
-                  child: const Text('Trigger switch'),
+                const SizedBox(height: 4),
+                Text(
+                  r.executed
+                      ? 'Released ${ago(r.executedAt, now)}: ${r.mint == null ? '${sol(r.paid)} SOL' : '${r.paid} units'}'
+                      : v.ruleDueAt(i) > now
+                      ? 'Releases after ${span(v.ruleDueAt(i) - now)} more silence'
+                      : 'Due now',
+                  style: const TextStyle(color: DmColors.muted, fontSize: 13),
                 ),
+                if (v.canExecute(i, now)) ...[
+                  const SizedBox(height: 10),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: DmColors.danger,
+                    ),
+                    onPressed: _busy
+                        ? null
+                        : () => _run(
+                            () => actions.executeRule(v.owner, i),
+                            'Tier released',
+                          ),
+                    child: const Text('Release this tier'),
+                  ),
+                  if (r.rail != Rail.solana)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 6),
+                      child: Text(
+                        'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
+                        style: TextStyle(
+                          color: DmColors.muted,
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                ],
+                if (r.executed && r.rail != Rail.solana && r.mint == null) ...[
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: _busy
+                        ? null
+                        : () => _run(
+                            () async => actions.routePrivately(r.rail),
+                            'Routing to your ${r.rail.label} address',
+                          ),
+                    icon: Icon(r.rail.icon),
+                    label: Text('Route privately via ${r.rail.label}'),
+                  ),
+                ],
               ],
             ],
           ),
@@ -144,28 +216,34 @@ class _Empty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Card(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Icon(Icons.diversity_3, color: DmColors.plus, size: 30),
-              const SizedBox(height: 12),
-              const Text('Nobody has named you yet.', style: TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 6),
-              const Text('Share your address with family so they can add you as heir or guardian.',
-                  style: TextStyle(color: DmColors.muted, height: 1.4)),
-              const SizedBox(height: 14),
-              OutlinedButton.icon(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: address));
-                  toast(context, 'Address copied');
-                },
-                icon: const Icon(Icons.copy, size: 18),
-                label: Text(short(address)),
-              ),
-            ],
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.diversity_3, color: DmColors.plus, size: 30),
+          const SizedBox(height: 12),
+          const Text(
+            'Nobody has named you yet.',
+            style: TextStyle(fontWeight: FontWeight.w600),
           ),
-        ),
-      );
+          const SizedBox(height: 6),
+          const Text(
+            'Share your wallet address for plain Solana payouts, or a private claim code from '
+            'Security → Receive privately.',
+            style: TextStyle(color: DmColors.muted, height: 1.4),
+          ),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: address));
+              toast(context, 'Address copied');
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: Text(short(address)),
+          ),
+        ],
+      ),
+    ),
+  );
 }

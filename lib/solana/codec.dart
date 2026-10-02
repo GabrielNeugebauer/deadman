@@ -16,20 +16,51 @@ abstract final class Disc {
   static const setGuard = [250, 44, 173, 235, 219, 76, 36, 198];
   static const pulse = [192, 224, 96, 191, 190, 177, 63, 34];
   static const lockdown = [21, 66, 102, 35, 233, 188, 139, 9];
+  static const unlock = [101, 155, 40, 21, 158, 189, 56, 203];
   static const closeVault = [141, 103, 17, 126, 72, 75, 29, 29];
   static const withdrawSol = [145, 131, 74, 136, 65, 137, 42, 38];
-  static const trigger = [215, 172, 161, 36, 115, 157, 116, 147];
-  static const claimSol = [139, 113, 179, 189, 190, 30, 132, 195];
-  static const subscribe = [254, 28, 191, 138, 156, 179, 183, 53];
+  static const withdrawToken = [136, 235, 181, 5, 101, 109, 57, 81];
+  static const executeSolRule = [27, 74, 220, 147, 58, 73, 241, 103];
+  static const executeTokenRule = [172, 93, 237, 201, 225, 26, 97, 140];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
 }
 
+/// Mirrors `onchain/programs/deadman/src/constants.rs`.
+abstract final class Limits {
+  static const maxRules = 8;
+  static const bpsDenominator = 10000;
+  static const maxFeeBps = 500;
+  static const minIntervalSecs = 60;
+  static const maxIntervalSecs = 366 * 86400;
+  static const minRuleMarginSecs = 60;
+  static const maxRuleDelaySecs = 3 * 366 * 86400;
+  static const minLockSecs = 60;
+  static const maxLockSecs = 30 * 86400;
+  static const privateGasStipend = 3000000;
+}
+
+const systemProgramId = SystemProgram.programId;
+const tokenProgramId = TokenProgram.programId;
+const token2022ProgramId = Token2022Program.programId;
+const ataProgramId = AssociatedTokenAccountProgram.programId;
+
+/// All-zero key (`Pubkey::default()`).
+const defaultPubkey = '11111111111111111111111111111111';
+
 typedef Pda = ({String address, int bump});
 
-/// Synchronous `findProgramAddress` (the package version is async).
-Pda findPda(List<List<int>> seeds, {String programId = AppConfig.programId}) {
+final _pdaCache = <String, Pda>{};
+
+/// Synchronous, memoized `findProgramAddress` (the package version is async).
+Pda findPda(List<List<int>> seeds, {String programId = AppConfig.programId}) =>
+    _pdaCache['$programId:${seeds.map(base58encode).join(':')}'] ??= _findPda(
+      seeds,
+      programId,
+    );
+
+Pda _findPda(List<List<int>> seeds, String programId) {
   final pid = Ed25519HDPublicKey.fromBase58(programId).bytes;
   final prefix = [for (final s in seeds) ...s];
   const marker = 'ProgramDerivedAddress';
@@ -52,15 +83,31 @@ Pda vaultPda(String owner) =>
 
 Pda configPda() => findPda([utf8.encode('config')]);
 
+/// Classic SPL Token associated token account of [owner] for [mint].
+String ataAddress(String owner, String mint) => findPda([
+  Ed25519HDPublicKey.fromBase58(owner).bytes,
+  Ed25519HDPublicKey.fromBase58(tokenProgramId).bytes,
+  Ed25519HDPublicKey.fromBase58(mint).bytes,
+], programId: ataProgramId).address;
+
 class BorshWriter {
   final _b = BytesBuilder(copy: false);
 
   void bytes(List<int> v) => _b.add(v);
-  void u8(int v) => _b.addByte(v);
-  void u16(int v) => _num(2, (d) => d.setUint16(0, v, Endian.little));
-  void u32(int v) => _num(4, (d) => d.setUint32(0, v, Endian.little));
+  void u8(int v) => _b.addByte(_range(v, 0, 0xff, 'u8'));
+  void u16(int v) => _num(
+    2,
+    (d) => d.setUint16(0, _range(v, 0, 0xffff, 'u16'), Endian.little),
+  );
+  void u32(int v) => _num(
+    4,
+    (d) => d.setUint32(0, _range(v, 0, 0xffffffff, 'u32'), Endian.little),
+  );
   void i64(int v) => _num(8, (d) => d.setInt64(0, v, Endian.little));
-  void u64(int v) => _num(8, (d) => d.setUint64(0, v, Endian.little));
+
+  /// Dart ints are signed 64-bit, so only 0..2^63-1 is representable.
+  void u64(int v) =>
+      _num(8, (d) => d.setUint64(0, _range(v, 0, null, 'u64'), Endian.little));
   void pubkey(String v) => _b.add(Ed25519HDPublicKey.fromBase58(v).bytes);
 
   void optionPubkey(String? v) {
@@ -72,11 +119,16 @@ class BorshWriter {
     }
   }
 
-  void heirInputs(List<Heir> heirs) {
-    u32(heirs.length);
-    for (final h in heirs) {
-      pubkey(h.wallet);
-      u16(h.bps);
+  /// `Vec<RuleInput>`.
+  void ruleInputs(List<RuleSpec> rules) {
+    u32(rules.length);
+    for (final r in rules) {
+      pubkey(r.beneficiary);
+      u8(r.rail.index);
+      i64(r.afterSecs);
+      optionPubkey(r.mint);
+      u8(r.mode.index);
+      u64(r.amount);
     }
   }
 
@@ -86,6 +138,13 @@ class BorshWriter {
     final d = ByteData(len);
     set(d);
     _b.add(d.buffer.asUint8List());
+  }
+
+  static int _range(int v, int min, int? max, String type) {
+    if (v < min || (max != null && v > max)) {
+      throw ArgumentError.value(v, type, 'out of range');
+    }
+    return v;
   }
 }
 
@@ -97,7 +156,6 @@ class BorshReader {
   int offset = 0;
 
   int u8() => _d.getUint8(_take(1));
-  bool boolean() => u8() != 0;
   int u16() => _d.getUint16(_take(2), Endian.little);
   int u32() => _d.getUint32(_take(4), Endian.little);
   int i64() => _d.getInt64(_take(8), Endian.little);
@@ -114,6 +172,12 @@ class BorshReader {
     final t => throw FormatException('Bad Option tag $t'),
   };
 
+  T enumOf<T>(List<T> values, String name) {
+    final i = u8();
+    if (i >= values.length) throw FormatException('Bad $name $i');
+    return values[i];
+  }
+
   int _take(int n) {
     if (offset + n > _d.lengthInBytes) {
       throw const FormatException('Account data too short');
@@ -127,36 +191,30 @@ class BorshReader {
 Uint8List encodeCreateVault({
   required String guard,
   required int intervalSecs,
-  required int graceSecs,
   required int lockSecs,
-  required List<Heir> heirs,
-}) {
-  final w = BorshWriter()
-    ..bytes(Disc.createVault)
-    ..pubkey(guard)
-    ..i64(intervalSecs)
-    ..i64(graceSecs)
-    ..i64(lockSecs)
-    ..heirInputs(heirs);
-  return w.toBytes();
-}
+  required List<RuleSpec> rules,
+}) =>
+    (BorshWriter()
+          ..bytes(Disc.createVault)
+          ..pubkey(guard)
+          ..i64(intervalSecs)
+          ..i64(lockSecs)
+          ..ruleInputs(rules))
+        .toBytes();
 
 Uint8List encodeUpdatePolicy({
   required int intervalSecs,
-  required int graceSecs,
   required int lockSecs,
-  required List<Heir> heirs,
+  required List<RuleSpec> rules,
   String? guardian,
-}) {
-  final w = BorshWriter()
-    ..bytes(Disc.updatePolicy)
-    ..i64(intervalSecs)
-    ..i64(graceSecs)
-    ..i64(lockSecs)
-    ..heirInputs(heirs)
-    ..optionPubkey(guardian);
-  return w.toBytes();
-}
+}) =>
+    (BorshWriter()
+          ..bytes(Disc.updatePolicy)
+          ..i64(intervalSecs)
+          ..i64(lockSecs)
+          ..ruleInputs(rules)
+          ..optionPubkey(guardian))
+        .toBytes();
 
 Uint8List encodeSetGuard(String newGuard) =>
     (BorshWriter()
@@ -170,11 +228,63 @@ Uint8List encodeWithdrawSol(int lamports) =>
           ..u64(lamports))
         .toBytes();
 
-Uint8List encodeSubscribe(int months) =>
+Uint8List encodeWithdrawToken(int amount) =>
     (BorshWriter()
-          ..bytes(Disc.subscribe)
-          ..u8(months))
+          ..bytes(Disc.withdrawToken)
+          ..u64(amount))
         .toBytes();
+
+Uint8List encodeExecuteRule(int index, {required bool token}) =>
+    (BorshWriter()
+          ..bytes(token ? Disc.executeTokenRule : Disc.executeSolRule)
+          ..u8(index))
+        .toBytes();
+
+/// Mirrors `Vault::apply_policy` (and the guard checks of `create_vault`).
+/// Returns the program error code the chain would raise, or null if valid.
+/// Pass [guard] only when known; the chain also checks it on update.
+int? policyError({
+  required String owner,
+  String? guard,
+  required int intervalSecs,
+  required int lockSecs,
+  required List<RuleSpec> rules,
+  String? guardian,
+}) {
+  if (intervalSecs < Limits.minIntervalSecs ||
+      intervalSecs > Limits.maxIntervalSecs ||
+      lockSecs < Limits.minLockSecs ||
+      lockSecs > Limits.maxLockSecs) {
+    return 6002;
+  }
+  if (rules.isEmpty || rules.length > Limits.maxRules) return 6003;
+  final minDelay = intervalSecs + Limits.minRuleMarginSecs;
+  for (var i = 0; i < rules.length; i++) {
+    final r = rules[i];
+    final amountOk = switch (r.mode) {
+      AmountMode.fixed => r.amount > 0,
+      AmountMode.percent => r.amount >= 1 && r.amount <= Limits.bpsDenominator,
+    };
+    if (!amountOk ||
+        r.afterSecs < minDelay ||
+        r.afterSecs > Limits.maxRuleDelaySecs ||
+        (i > 0 && rules[i - 1].afterSecs > r.afterSecs) ||
+        r.beneficiary == defaultPubkey ||
+        r.beneficiary == owner ||
+        r.beneficiary == guard ||
+        r.mint == defaultPubkey) {
+      return 6003;
+    }
+  }
+  if (guardian != null &&
+      (guardian == defaultPubkey ||
+          guardian == owner ||
+          guardian == guard ||
+          rules.any((r) => r.beneficiary == guardian))) {
+    return 6004;
+  }
+  return null;
+}
 
 bool hasDiscriminator(List<int> data, List<int> disc) {
   if (data.length < disc.length) return false;
@@ -198,43 +308,43 @@ VaultState decodeVault(
   final guard = r.pubkey();
   final guardian = r.optionPubkey();
   final intervalSecs = r.i64();
-  final graceSecs = r.i64();
   final lockSecs = r.i64();
   final lastPulse = r.i64();
   final lockedUntil = r.i64();
-  final plusUntil = r.i64();
-  final triggeredAt = r.i64();
-  final solAtTrigger = r.u64();
+  final guardianReadyAt = r.i64();
   final totalPulses = r.u64();
   final streak = r.u32();
   final bestStreak = r.u32();
-  final status = switch (r.u8()) {
-    0 => VaultStatus.active,
-    1 => VaultStatus.triggered,
-    final s => throw FormatException('Bad VaultStatus $s'),
-  };
-  final heirs = List.generate(
-    r.u32(),
-    (_) => Heir(wallet: r.pubkey(), bps: r.u16(), claimedSol: r.boolean()),
+  final count = r.u32();
+  if (count > Limits.maxRules) throw FormatException('Bad rule count $count');
+  final rules = List.generate(
+    count,
+    (_) => RuleState(
+      beneficiary: r.pubkey(),
+      rail: r.enumOf(Rail.values, 'Rail'),
+      afterSecs: r.i64(),
+      mint: r.optionPubkey(),
+      mode: r.enumOf(AmountMode.values, 'AmountMode'),
+      amount: r.u64(),
+      executedAt: r.i64(),
+      paid: r.u64(),
+    ),
   );
+  r.u8(); // bump
   return VaultState(
     address: address,
     owner: owner,
     guard: guard,
     guardian: guardian,
     intervalSecs: intervalSecs,
-    graceSecs: graceSecs,
     lockSecs: lockSecs,
     lastPulse: lastPulse,
     lockedUntil: lockedUntil,
-    plusUntil: plusUntil,
-    triggeredAt: triggeredAt,
-    solAtTrigger: solAtTrigger,
+    guardianReadyAt: guardianReadyAt,
     totalPulses: totalPulses,
     streak: streak,
     bestStreak: bestStreak,
-    status: status,
-    heirs: heirs,
+    rules: rules,
     lamports: lamports,
     withdrawableLamports: lamports > rentExemptMinimum
         ? lamports - rentExemptMinimum
@@ -243,21 +353,10 @@ VaultState decodeVault(
 }
 
 class DeadmanConfig {
-  const DeadmanConfig({
-    required this.admin,
-    required this.treasury,
-    required this.skrMint,
-    required this.plusPrice,
-    required this.feeBps,
-  });
+  const DeadmanConfig({required this.admin, required this.fees});
 
   final String admin;
-  final String treasury;
-  final String skrMint;
-
-  /// SKR base units per 30 days.
-  final int plusPrice;
-  final int feeBps;
+  final FeeSchedule fees;
 }
 
 DeadmanConfig decodeConfig(List<int> data) {
@@ -267,11 +366,182 @@ DeadmanConfig decodeConfig(List<int> data) {
   final r = BorshReader(data)..offset = 8;
   return DeadmanConfig(
     admin: r.pubkey(),
-    treasury: r.pubkey(),
-    skrMint: r.pubkey(),
-    plusPrice: r.u64(),
-    feeBps: r.u16(),
+    fees: FeeSchedule(
+      treasury: r.pubkey(),
+      feeBpsPublic: r.u16(),
+      feeBpsPrivate: r.u16(),
+    ),
   );
+}
+
+/// `decimals` of an SPL mint account.
+int decodeMintDecimals(List<int> data) {
+  if (data.length < 82) throw const FormatException('Not a mint account');
+  return data[44];
+}
+
+/// `amount` of an SPL token account.
+int decodeTokenAmount(List<int> data) {
+  if (data.length < 165) {
+    throw const FormatException('Not a token account');
+  }
+  return (BorshReader(data)..offset = 64).u64();
+}
+
+Ed25519HDPublicKey _pk(String address) =>
+    Ed25519HDPublicKey.fromBase58(address);
+
+AccountMeta _w(String address, {bool signer = false}) =>
+    AccountMeta.writeable(pubKey: _pk(address), isSigner: signer);
+
+AccountMeta _r(String address, {bool signer = false}) =>
+    AccountMeta.readonly(pubKey: _pk(address), isSigner: signer);
+
+Instruction deadmanIx(List<AccountMeta> accounts, List<int> data) =>
+    Instruction(
+      programId: _pk(AppConfig.programId),
+      accounts: accounts,
+      data: ByteArray(data),
+    );
+
+/// Associated Token `CreateIdempotent` (instruction 1), classic SPL Token.
+Instruction createAtaIdempotentIx({
+  required String payer,
+  required String owner,
+  required String mint,
+}) => Instruction(
+  programId: _pk(ataProgramId),
+  accounts: [
+    _w(payer, signer: true),
+    _w(ataAddress(owner, mint)),
+    _r(owner),
+    _r(mint),
+    _r(systemProgramId),
+    _r(tokenProgramId),
+  ],
+  data: ByteArray(const [1]),
+);
+
+/// SPL Token `TransferChecked` (instruction 12).
+Instruction transferCheckedIx({
+  required String source,
+  required String mint,
+  required String destination,
+  required String authority,
+  required int amount,
+  required int decimals,
+}) => Instruction(
+  programId: _pk(tokenProgramId),
+  accounts: [
+    _w(source),
+    _r(mint),
+    _w(destination),
+    _r(authority, signer: true),
+  ],
+  data: ByteArray(
+    (BorshWriter()
+          ..u8(12)
+          ..u64(amount)
+          ..u8(decimals))
+        .toBytes(),
+  ),
+);
+
+Instruction ownerActionIx(String owner, List<int> data) =>
+    deadmanIx([_w(owner, signer: true), _w(vaultPda(owner).address)], data);
+
+/// Signer may be the owner or the guard (guardian too, for lockdown).
+Instruction pulseOrLockdownIx({
+  required String signer,
+  required String vaultOwner,
+  required bool lockdown,
+}) => deadmanIx([
+  _r(signer, signer: true),
+  _w(vaultPda(vaultOwner).address),
+], lockdown ? Disc.lockdown : Disc.pulse);
+
+List<Instruction> depositTokenIxs({
+  required String owner,
+  required String mint,
+  required int amount,
+  required int decimals,
+}) {
+  final vault = vaultPda(owner).address;
+  return [
+    createAtaIdempotentIx(payer: owner, owner: vault, mint: mint),
+    transferCheckedIx(
+      source: ataAddress(owner, mint),
+      mint: mint,
+      destination: ataAddress(vault, mint),
+      authority: owner,
+      amount: amount,
+      decimals: decimals,
+    ),
+  ];
+}
+
+/// Recreates the owner's ATA if it was closed, then withdraws.
+List<Instruction> withdrawTokenIxs({
+  required String owner,
+  required String mint,
+  required int amount,
+}) {
+  final vault = vaultPda(owner).address;
+  return [
+    createAtaIdempotentIx(payer: owner, owner: owner, mint: mint),
+    deadmanIx([
+      _w(owner, signer: true),
+      _w(vault),
+      _r(mint),
+      _w(ataAddress(vault, mint)),
+      _w(ataAddress(owner, mint)),
+      _r(tokenProgramId),
+    ], encodeWithdrawToken(amount)),
+  ];
+}
+
+/// `execute_sol_rule` or, for a token rule, a treasury ATA create followed by
+/// `execute_token_rule`. [treasury] comes from Config.
+///
+/// Token rules assume classic SPL Token mints. Token-2022 (different token
+/// program, ATA derivation and possibly transfer-hook remaining accounts) is
+/// not supported by this client yet.
+List<Instruction> executeRuleIxs({
+  required String executor,
+  required String vaultOwner,
+  required RuleSpec rule,
+  required int index,
+  required String treasury,
+}) {
+  final vault = vaultPda(vaultOwner).address;
+  final mint = rule.mint;
+  if (mint == null) {
+    return [
+      deadmanIx([
+        _r(executor, signer: true),
+        _w(vault),
+        _r(configPda().address),
+        _w(rule.beneficiary),
+        _w(treasury),
+      ], encodeExecuteRule(index, token: false)),
+    ];
+  }
+  return [
+    createAtaIdempotentIx(payer: executor, owner: treasury, mint: mint),
+    deadmanIx([
+      _w(executor, signer: true),
+      _w(vault),
+      _r(configPda().address),
+      _r(mint),
+      _w(ataAddress(vault, mint)),
+      _w(rule.beneficiary),
+      _w(ataAddress(rule.beneficiary, mint)),
+      _w(ataAddress(treasury, mint)),
+      _r(tokenProgramId),
+      _r(ataProgramId),
+      _r(systemProgramId),
+    ], encodeExecuteRule(index, token: true)),
+  ];
 }
 
 /// Legacy transaction with zeroed signature slots, ready for MWA signing.
