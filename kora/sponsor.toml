@@ -1,0 +1,115 @@
+# Deadman SPONSOR node (Kora 2.0.5), port 8080.
+# Free pricing: pays the network fee for guard-key `pulse` / `lockdown` only.
+# The fee payer may not move SOL or tokens, create accounts or approve anything.
+# Schema: crates/lib/src/config.rs at tag v2.0.5.
+
+[kora]
+rate_limit = 20                       # global requests/second for this node (not per wallet)
+max_request_body_size = 65536
+
+[kora.auth]
+# No auth on devnet. To require a key, set KORA_API_KEY in the node's environment
+# (it overrides api_key here); clients then send the `x-api-key` header.
+
+[kora.cache]
+enabled = false
+default_ttl = 300
+account_ttl = 60
+
+# Lifetime per-wallet cap, keyed on the first non-Kora signer (the guard key).
+# Needs Redis; the counter never expires. Fails closed if Redis is down.
+[kora.usage_limit]
+enabled = true
+cache_url = "redis://127.0.0.1:6379/0"
+max_transactions = 1000
+fallback_if_unavailable = false
+
+[kora.enabled_methods]
+liveness = true
+estimate_transaction_fee = true
+get_supported_tokens = true
+get_payer_signer = true
+sign_transaction = true
+sign_and_send_transaction = true
+transfer_transaction = false          # would let callers make the fee payer create ATAs
+get_blockhash = true
+get_config = true
+
+[validation]
+# Caps the network fee (base + priority) and any fee-payer outflow. Pulse/lockdown
+# have no outflow, so this only bounds the fee: 2 signatures + a small priority fee.
+max_allowed_lamports = 50000
+max_signatures = 2
+price_source = "Mock"                 # unused with Free pricing
+allow_durable_transactions = false
+
+# Checked against every instruction, including CPIs found by simulation.
+# Kora cannot filter by instruction discriminator, so any Deadman instruction that
+# needs no other program is sponsored; create_vault fails (its CPI hits System).
+allowed_programs = [
+    "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
+    "ComputeBudget111111111111111111111111111111",  # Compute Budget
+]
+# Kora refuses to start with an empty list. Only transferTransaction (disabled)
+# and getSupportedTokens read it; nothing is accepted as payment here.
+allowed_tokens = ["4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]
+allowed_spl_paid_tokens = []
+disallowed_accounts = []
+
+[validation.price]
+type = "free"
+
+[validation.fee_payer_policy.system]
+allow_transfer = false
+allow_assign = false
+allow_create_account = false
+allow_allocate = false
+
+[validation.fee_payer_policy.system.nonce]
+allow_initialize = false
+allow_advance = false
+allow_authorize = false
+allow_withdraw = false
+
+[validation.fee_payer_policy.spl_token]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+[validation.fee_payer_policy.token_2022]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+# Note: the key is `token_2022`; the sample kora.toml's `[validation.token2022]` is ignored.
+[validation.token_2022]
+blocked_mint_extensions = ["permanent_delegate", "transfer_hook"]
+blocked_account_extensions = []
+
+[metrics]
+enabled = true
+endpoint = "/metrics"
+port = 8080                           # same as the RPC port: served at :8080/metrics
+scrape_interval = 60
+
+[metrics.fee_payer_balance]
+enabled = true
+expiry_seconds = 30

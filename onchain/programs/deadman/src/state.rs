@@ -76,6 +76,8 @@ pub struct Rule {
 #[derive(InitSpace)]
 pub struct Vault {
     pub owner: Pubkey,
+    /// Owner-chosen id; one owner can hold many independent plans.
+    pub plan_id: u16,
     /// Device key: may only pulse and lock down, never move funds.
     pub guard: Pubkey,
     /// Trusted contact: may lock down (rate-limited) and co-sign early unlock.
@@ -92,12 +94,26 @@ pub struct Vault {
     pub best_streak: u32,
     #[max_len(MAX_RULES)]
     pub rules: Vec<Rule>,
+    /// Display name, e.g. "Kids" or "Emergency fund".
+    #[max_len(MAX_LABEL_LEN)]
+    pub label: String,
     pub bump: u8,
 }
 
 impl Vault {
     pub fn is_locked(&self, now: i64) -> bool {
         now < self.locked_until
+    }
+
+    /// Every tier has released.
+    pub fn is_completed(&self) -> bool {
+        self.rules.iter().all(|r| r.executed_at != 0)
+    }
+
+    pub fn set_label(&mut self, label: String) -> Result<()> {
+        require!(label.len() <= MAX_LABEL_LEN, DeadmanError::LabelTooLong);
+        self.label = label;
+        Ok(())
     }
 
     pub fn require_unlocked(&self, now: i64) -> Result<()> {

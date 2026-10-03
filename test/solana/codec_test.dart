@@ -35,21 +35,35 @@ void main() {
   );
 
   group('PDA', () {
-    test('vault PDA matches the async package derivation', () async {
-      final expected = await Ed25519HDPublicKey.findProgramAddress(
-        seeds: [utf8.encode('vault'), keyBytes(owner)],
-        programId: Ed25519HDPublicKey.fromBase58(AppConfig.programId),
-      );
-      final pda = vaultPda(owner);
-      expect(pda.address, expected.toBase58());
-      expect(DeadmanClient().vaultAddressFor(owner), expected.toBase58());
-      expect(identical(vaultPda(owner), pda), isTrue, reason: 'cached');
+    test('plan vault PDAs match the async package derivation', () async {
+      final client = DeadmanClient();
+      final seen = <String>{};
+      for (final planId in [0, 7, 0x0102]) {
+        final seed = [planId & 0xff, planId >> 8];
+        final expected = await Ed25519HDPublicKey.findProgramAddress(
+          seeds: [utf8.encode('vault'), keyBytes(owner), seed],
+          programId: Ed25519HDPublicKey.fromBase58(AppConfig.programId),
+        );
+        final pda = vaultPda(owner, planId);
+        expect(pda.address, expected.toBase58(), reason: 'plan $planId');
+        expect(client.vaultAddressFor(owner, planId), expected.toBase58());
+        expect(identical(vaultPda(owner, planId), pda), isTrue);
 
-      final check = await Ed25519HDPublicKey.createProgramAddress(
-        seeds: [...utf8.encode('vault'), ...keyBytes(owner), pda.bump],
-        programId: Ed25519HDPublicKey.fromBase58(AppConfig.programId),
-      );
-      expect(check.toBase58(), pda.address);
+        final check = await Ed25519HDPublicKey.createProgramAddress(
+          seeds: [
+            ...utf8.encode('vault'),
+            ...keyBytes(owner),
+            ...seed,
+            pda.bump,
+          ],
+          programId: Ed25519HDPublicKey.fromBase58(AppConfig.programId),
+        );
+        expect(check.toBase58(), pda.address);
+        seen.add(pda.address);
+      }
+      expect(seen, hasLength(3), reason: 'plans get distinct vaults');
+      expect(() => vaultPda(owner, 0x10000), throwsArgumentError);
+      expect(() => vaultPda(owner, -1), throwsArgumentError);
     });
 
     test('config PDA matches the async package derivation', () async {
@@ -63,7 +77,7 @@ void main() {
     test(
       'ATA matches the package derivation, including off-curve owners',
       () async {
-        for (final o in [alice, vaultPda(owner).address]) {
+        for (final o in [alice, vaultPda(owner, 0).address]) {
           final expected = await findAssociatedTokenAddress(
             owner: Ed25519HDPublicKey.fromBase58(o),
             mint: Ed25519HDPublicKey.fromBase58(usdc),
@@ -104,6 +118,32 @@ void main() {
       expect(Disc.configAccount, acc('Config'));
     });
 
+    test('create_vault and update_policy arg order matches the IDL', () {
+      List<String> args(String name) => [
+        for (final a
+            in (loadIdl()['instructions'] as List).firstWhere(
+                  (i) => i['name'] == name,
+                )['args']
+                as List)
+          a['name'] as String,
+      ];
+      expect(args('create_vault'), [
+        'plan_id',
+        'label',
+        'guard',
+        'interval_secs',
+        'lock_secs',
+        'rules',
+      ]);
+      expect(args('update_policy'), [
+        'label',
+        'interval_secs',
+        'lock_secs',
+        'rules',
+        'guardian',
+      ]);
+    });
+
     test('IDL enum variant order matches Rail and AmountMode', () {
       List<String> variants(String name) => [
         for (final v
@@ -137,6 +177,8 @@ void main() {
 
     test('create_vault with a Fixed SOL rule and a Percent token rule', () {
       final data = encodeCreateVault(
+        planId: 0x0107,
+        label: 'Kids',
         guard: guard,
         intervalSecs: 86400,
         lockSecs: 3600,
@@ -144,6 +186,9 @@ void main() {
       );
       expect(data, [
         29, 237, 247, 208, 193, 82, 54, 135, //
+        7, 1,
+        ...le(4, 4),
+        ...utf8.encode('Kids'),
         ...keyBytes(guard),
         ...le(8, 86400),
         ...le(8, 3600),
@@ -151,18 +196,23 @@ void main() {
         ...fixedSolBytes,
         ...percentMintBytes,
       ]);
-      expect(data.length, 8 + 32 + 16 + 4 + 51 + 83);
+      expect(data.length, 8 + 2 + 4 + 4 + 32 + 16 + 4 + 51 + 83);
     });
 
     test('update_policy with guardian Some', () {
       final data = encodeUpdatePolicy(
+        label: 'Fundo de emergência',
         intervalSecs: 60,
         lockSecs: 180,
         rules: [solFixed, tokenPercent],
         guardian: guardian,
       );
+      final label = utf8.encode('Fundo de emergência');
+      expect(label, hasLength(20), reason: 'ê is 2 bytes');
       expect(data, [
         212, 245, 246, 7, 163, 151, 18, 57, //
+        ...le(4, label.length),
+        ...label,
         ...le(8, 60),
         ...le(8, 180),
         ...le(4, 2),
@@ -175,12 +225,14 @@ void main() {
 
     test('update_policy with guardian None', () {
       final data = encodeUpdatePolicy(
+        label: '',
         intervalSecs: 60,
         lockSecs: 180,
         rules: [tokenPercent],
       );
       expect(data, [
         ...Disc.updatePolicy,
+        ...le(4, 0),
         ...le(8, 60),
         ...le(8, 180),
         ...le(4, 1),
@@ -203,6 +255,13 @@ void main() {
       expect(encodeExecuteRule(7, token: true), [...Disc.executeTokenRule, 7]);
       expect(() => encodeExecuteRule(256, token: false), throwsArgumentError);
       expect(() => encodeWithdrawSol(-1), throwsArgumentError);
+    });
+
+    test('labels are limited to 32 UTF-8 bytes', () {
+      expect(labelFits('a' * 32), isTrue);
+      expect(labelFits('a' * 33), isFalse);
+      expect(labelFits('é' * 16), isTrue);
+      expect(labelFits('é' * 17), isFalse, reason: '34 bytes, 17 chars');
     });
   });
 
@@ -272,10 +331,12 @@ void main() {
       ),
     ];
 
-    test('decodes 2 rules (one executed) with guardian', () {
+    test('decodes 2 rules (one executed) with guardian, plan id and label', () {
       final v = decodeVault(
         vaultBytes(
           owner: owner,
+          planId: 7,
+          label: 'Crianças',
           guard: guard,
           guardian: guardian,
           rules: rules,
@@ -285,6 +346,8 @@ void main() {
         rentExemptMinimum: 3194880,
       );
       expect(v.owner, owner);
+      expect(v.planId, 7);
+      expect(v.label, 'Crianças');
       expect(v.guard, guard);
       expect(v.guardian, guardian);
       expect(v.intervalSecs, 86400);
@@ -329,6 +392,8 @@ void main() {
         rentExemptMinimum: 200,
       );
       expect(v.guardian, isNull);
+      expect(v.planId, 0);
+      expect(v.label, '');
       expect(v.intervalSecs, 86400);
       expect(v.rules.map((r) => r.beneficiary), [alice, bob]);
       expect(v.withdrawableLamports, 0);
@@ -347,8 +412,8 @@ void main() {
             decodeVault(short, address: 'x', lamports: 0, rentExemptMinimum: 0),
         throwsFormatException,
       );
-      // Rail byte of rule 0: 8 + 32 + 32 + 1 + 5*8 + 8 + 4 + 4 + 4 + 32.
-      final badRail = bytes()..[165] = 3;
+      // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 5*8 + 8 + 4 + 4 + 4 + 32.
+      final badRail = bytes()..[167] = 3;
       expect(
         () => decodeVault(
           badRail,
@@ -393,6 +458,8 @@ void main() {
     VaultState vault(List<RuleState> rules) => VaultState(
       address: 'v',
       owner: owner,
+      planId: 0,
+      label: '',
       guard: guard,
       guardian: null,
       intervalSecs: 60,
@@ -427,12 +494,18 @@ void main() {
         isTrue,
       );
     });
+
+    test('completed once every rule has executed', () {
+      expect(v.completed, isFalse);
+      expect(vault([r(200, done: true), r(300, done: true)]).completed, isTrue);
+    });
   });
 
   group('instruction accounts', () {
     final treasury = key(7);
     final executor = key(8);
-    final vault = vaultPda(owner).address;
+    const planId = 3;
+    final vault = vaultPda(owner, planId).address;
 
     List<(String, bool, bool)> metas(Instruction ix) => [
       for (final a in ix.accounts)
@@ -443,6 +516,7 @@ void main() {
       final ixs = executeRuleIxs(
         executor: executor,
         vaultOwner: owner,
+        planId: planId,
         rule: solFixed,
         index: 0,
         treasury: treasury,
@@ -463,6 +537,7 @@ void main() {
       final ixs = executeRuleIxs(
         executor: executor,
         vaultOwner: owner,
+        planId: planId,
         rule: tokenPercent,
         index: 1,
         treasury: treasury,
@@ -509,6 +584,7 @@ void main() {
       final sol = executeRuleIxs(
         executor: executor,
         vaultOwner: owner,
+        planId: planId,
         rule: solFixed,
         index: 0,
         treasury: treasury,
@@ -516,16 +592,25 @@ void main() {
       final token = executeRuleIxs(
         executor: executor,
         vaultOwner: owner,
+        planId: planId,
         rule: tokenPercent,
         index: 1,
         treasury: treasury,
       ).last;
       final withdraw = withdrawTokenIxs(
         owner: owner,
+        planId: planId,
         mint: usdc,
         amount: 5,
       ).last;
       (bool, bool) f(AccountMeta a) => (a.isWriteable, a.isSigner);
+      final create = createVaultIx(
+        owner: owner,
+        payer: executor,
+        planId: planId,
+        data: const [],
+      );
+      expect(create.accounts.map(f), flags('create_vault'));
       expect(sol.accounts.map(f), flags('execute_sol_rule'));
       expect(token.accounts.map(f), flags('execute_token_rule'));
       expect(withdraw.accounts.map(f), flags('withdraw_token'));
@@ -534,6 +619,7 @@ void main() {
     test('deposit token: vault ATA create, then TransferChecked', () {
       final ixs = depositTokenIxs(
         owner: owner,
+        planId: planId,
         mint: usdc,
         amount: 2500000,
         decimals: 6,
@@ -557,8 +643,30 @@ void main() {
       expect(ixs[1].data.toList(), [12, ...le(8, 2500000), 6]);
     });
 
+    test('create_vault: read-only owner, separate rent payer', () {
+      final kora = key(9);
+      final ix = createVaultIx(
+        owner: owner,
+        payer: kora,
+        planId: planId,
+        data: Disc.createVault,
+      );
+      expect(ix.programId.toBase58(), AppConfig.programId);
+      expect(metas(ix), [
+        (owner, false, true),
+        (kora, true, true),
+        (vault, true, false),
+        (systemProgramId, false, false),
+      ]);
+    });
+
     test('withdraw token: owner ATA create, then withdraw_token', () {
-      final ixs = withdrawTokenIxs(owner: owner, mint: usdc, amount: 9);
+      final ixs = withdrawTokenIxs(
+        owner: owner,
+        planId: planId,
+        mint: usdc,
+        amount: 9,
+      );
       expect(ixs[0].accounts[1].pubKey.toBase58(), ataAddress(owner, usdc));
       expect(metas(ixs[1]), [
         (owner, true, true),
@@ -578,6 +686,7 @@ void main() {
       final ix = pulseOrLockdownIx(
         signer: owner,
         vaultOwner: owner,
+        planId: 0,
         lockdown: false,
       );
       final bytes = serializeUnsigned(
@@ -595,12 +704,54 @@ void main() {
       expect(msg.recentBlockhash, blockhash);
       expect(msg.instructions.single.data.toList(), Disc.pulse);
     });
+
+    test('external fee payer: two zeroed slots, payer first, then partial '
+        'signing fills only the signer slot', () async {
+      final kora = key(9);
+      final wallet = await Ed25519HDKeyPair.random();
+      final bytes = serializeUnsigned(
+        [
+          pulseOrLockdownIx(
+            signer: wallet.address,
+            vaultOwner: owner,
+            planId: 0,
+            lockdown: false,
+          ),
+        ],
+        feePayer: kora,
+        recentBlockhash: key(10),
+      );
+      expect(bytes[0], 2);
+      expect(bytes.sublist(1, 129), List.filled(128, 0));
+      final msg = SignedTx.fromBytes(bytes).compiledMessage;
+      expect(msg.accountKeys[0].toBase58(), kora);
+      expect(msg.accountKeys[1].toBase58(), wallet.address);
+
+      final signed = SignedTx.fromBytes(await partiallySign(bytes, wallet));
+      expect(signed.signatures[0].bytes, List.filled(64, 0));
+      expect(
+        await verifySignature(
+          message: msg.toByteArray().toList(),
+          signature: signed.signatures[1].bytes,
+          publicKey: wallet.publicKey,
+        ),
+        isTrue,
+      );
+      expect(
+        signed.compiledMessage.toByteArray().toList(),
+        msg.toByteArray().toList(),
+      );
+      await expectLater(
+        partiallySign(bytes, await Ed25519HDKeyPair.random()),
+        throwsArgumentError,
+      );
+    });
   });
 
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(17));
+      expect(errors, hasLength(19));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -649,6 +800,14 @@ void main() {
       expect(e.code, 1);
       expect(e.message, 'insufficient funds');
       expect(DeadmanException.program(6011).name, 'InvalidRuleIndex');
+      expect(
+        DeadmanException.program(DeadmanException.planCompleted).name,
+        'PlanCompleted',
+      );
+      expect(
+        DeadmanException.program(DeadmanException.labelTooLong).name,
+        'LabelTooLong',
+      );
     });
   });
 }

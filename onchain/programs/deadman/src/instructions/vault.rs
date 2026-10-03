@@ -8,14 +8,18 @@ use crate::{
 };
 
 #[derive(Accounts)]
+#[instruction(plan_id: u16)]
 pub struct CreateVault<'info> {
-    #[account(mut)]
     pub owner: Signer<'info>,
+    /// Funds the vault's rent: the owner, or a fee sponsor such as Kora
+    /// that charges the owner in USDC instead.
+    #[account(mut)]
+    pub payer: Signer<'info>,
     #[account(
         init,
-        payer = owner,
+        payer = payer,
         space = 8 + Vault::INIT_SPACE,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &plan_id.to_le_bytes()],
         bump
     )]
     pub vault: Account<'info, Vault>,
@@ -24,6 +28,8 @@ pub struct CreateVault<'info> {
 
 pub fn handle_create_vault(
     ctx: Context<CreateVault>,
+    plan_id: u16,
+    label: String,
     guard: Pubkey,
     interval_secs: i64,
     lock_secs: i64,
@@ -37,14 +43,17 @@ pub fn handle_create_vault(
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
     vault.owner = owner;
+    vault.plan_id = plan_id;
     vault.guard = guard;
     vault.bump = ctx.bumps.vault;
+    vault.set_label(label)?;
     vault.apply_policy(interval_secs, lock_secs, &rules, None)?;
     vault.record_pulse(now)?;
 
     emit!(VaultCreated {
         vault: vault.key(),
         owner,
+        plan_id,
         rules: vault.rules.len() as u8,
     });
     Ok(())
@@ -56,7 +65,7 @@ pub struct OwnerAction<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized
     )]
@@ -67,6 +76,7 @@ pub struct OwnerAction<'info> {
 /// coercer cannot redirect the payouts.
 pub fn handle_update_policy(
     ctx: Context<OwnerAction>,
+    label: String,
     interval_secs: i64,
     lock_secs: i64,
     rules: Vec<RuleInput>,
@@ -75,6 +85,7 @@ pub fn handle_update_policy(
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
     vault.require_unlocked(now)?;
+    vault.set_label(label)?;
     vault.apply_policy(interval_secs, lock_secs, &rules, guardian)?;
     vault.record_pulse(now)?;
     emit!(PolicyUpdated {
@@ -105,7 +116,7 @@ pub struct Pulse<'info> {
     pub signer: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.owner.as_ref()],
+        seeds = [VAULT_SEED, vault.owner.as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         constraint = signer.key() == vault.owner || signer.key() == vault.guard
             @ DeadmanError::Unauthorized
@@ -113,9 +124,11 @@ pub struct Pulse<'info> {
     pub vault: Account<'info, Vault>,
 }
 
+/// Check-ins can stop pending tiers, but a fully released plan is over.
 pub fn handle_pulse(ctx: Context<Pulse>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
+    require!(!vault.is_completed(), DeadmanError::PlanCompleted);
     vault.record_pulse(now)?;
     emit!(Pulsed {
         vault: vault.key(),
@@ -131,7 +144,7 @@ pub struct Lockdown<'info> {
     pub signer: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.owner.as_ref()],
+        seeds = [VAULT_SEED, vault.owner.as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         constraint = signer.key() == vault.owner
             || signer.key() == vault.guard
@@ -178,7 +191,7 @@ pub struct Unlock<'info> {
     pub guardian: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized
     )]
@@ -210,7 +223,7 @@ pub struct CloseVault<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized,
         close = owner

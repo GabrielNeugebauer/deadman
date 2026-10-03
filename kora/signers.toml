@@ -1,0 +1,11 @@
+# Kora 2.0.5 signer pool, shared by the sponsor and paymaster nodes.
+# The key itself lives in kora/.env (gitignored) as KORA_SIGNER_PRIVATE_KEY:
+# a base58 secret, a "[1,2,...]" u8 array, or a path to a keypair JSON file.
+
+[signer_pool]
+strategy = "round_robin"
+
+[[signers]]
+name = "deadman_fee_payer"
+type = "memory"
+private_key_env = "KORA_SIGNER_PRIVATE_KEY"

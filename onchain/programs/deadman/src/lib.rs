@@ -36,22 +36,40 @@ pub mod deadman {
 
     pub fn create_vault(
         ctx: Context<CreateVault>,
+        plan_id: u16,
+        label: String,
         guard: Pubkey,
         interval_secs: i64,
         lock_secs: i64,
         rules: Vec<RuleInput>,
     ) -> Result<()> {
-        instructions::vault::handle_create_vault(ctx, guard, interval_secs, lock_secs, rules)
+        instructions::vault::handle_create_vault(
+            ctx,
+            plan_id,
+            label,
+            guard,
+            interval_secs,
+            lock_secs,
+            rules,
+        )
     }
 
     pub fn update_policy(
         ctx: Context<OwnerAction>,
+        label: String,
         interval_secs: i64,
         lock_secs: i64,
         rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
     ) -> Result<()> {
-        instructions::vault::handle_update_policy(ctx, interval_secs, lock_secs, rules, guardian)
+        instructions::vault::handle_update_policy(
+            ctx,
+            label,
+            interval_secs,
+            lock_secs,
+            rules,
+            guardian,
+        )
     }
 
     pub fn set_guard(ctx: Context<OwnerAction>, new_guard: Pubkey) -> Result<()> {

@@ -26,6 +26,12 @@ class AppConfig {
   static const appIdentityUri = 'https://deadman.app';
   static const appIconPath = 'favicon.ico';
 
+  /// Kora node that sponsors guard-key transactions (pulse, lockdown) for
+  /// free, so the guard key never needs SOL. Empty = guard pays its own fee.
+  static const koraSponsorUrl = String.fromEnvironment('KORA_SPONSOR_URL');
+
+  static const koraApiKey = String.fromEnvironment('KORA_API_KEY');
+
   /// SOL sent to the device guard key at setup to pay pulse fees.
   static const guardFundingLamports = 10000000;
 }

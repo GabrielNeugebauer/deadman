@@ -119,7 +119,9 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                   ),
                   const SizedBox(width: 10),
                   Text(
-                    short(v.owner),
+                    v.label.isEmpty
+                        ? short(v.owner)
+                        : '${v.label} · ${short(v.owner)}',
                     style: const TextStyle(
                       fontFamily: 'monospace',
                       fontSize: 16,
@@ -169,7 +171,7 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     onPressed: _busy
                         ? null
                         : () => _run(
-                            () => actions.executeRule(v.owner, i),
+                            () => actions.executeRule(v, i),
                             'Tier released',
                           ),
                     child: const Text('Release this tier'),

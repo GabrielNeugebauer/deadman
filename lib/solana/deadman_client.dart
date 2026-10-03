@@ -16,6 +16,7 @@ import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 
 import '../core/config.dart';
+import '../kora/kora_client.dart';
 import 'codec.dart';
 import 'deadman_api.dart';
 
@@ -34,12 +35,23 @@ class DeadmanException implements Exception {
     final logs = data is Map && data['logs'] is List
         ? [for (final l in data['logs'] as List) '$l']
         : const <String>[];
-    return DeadmanException.fromTxError(
-      data is Map ? data['err'] : null,
-      logs: logs,
-      fallback: e.message,
-    );
+    final err = data is Map ? data['err'] : null;
+    final funding = _fundingErrors[err is Map ? err.keys.firstOrNull : err];
+    if (funding != null) {
+      return DeadmanException(funding, name: 'NoFunds', logs: logs);
+    }
+    return DeadmanException.fromTxError(err, logs: logs, fallback: e.message);
   }
+
+  /// Runtime errors that mean the paying account is empty or missing.
+  static const _fundingErrors = {
+    'AccountNotFound':
+        'The paying wallet has no SOL on this network. Fund it and try again.',
+    'InsufficientFundsForFee':
+        'The paying wallet does not have enough SOL for the network fee.',
+    'InsufficientFundsForRent':
+        'Not enough SOL to cover the account rent this action needs.',
+  };
 
   factory DeadmanException.fromTxError(
     Object? err, {
@@ -54,6 +66,40 @@ class DeadmanException implements Exception {
       name: known?.$1,
       logs: logs,
     );
+  }
+
+  /// Kora reports failures as text, e.g. `Invalid transaction: Transaction
+  /// simulation failed: Error processing Instruction 1: custom program
+  /// error: 0x1777`, so program errors are recovered from the message.
+  factory DeadmanException.fromKora(KoraException e) {
+    final m = e.message;
+    final custom = RegExp(
+      r'Instruction (\d+): custom program error: 0x([0-9a-fA-F]+)',
+    ).firstMatch(m);
+    if (custom != null) {
+      return DeadmanException.fromTxError({
+        'InstructionError': [
+          int.parse(custom.group(1)!),
+          {'Custom': int.parse(custom.group(2)!, radix: 16)},
+        ],
+      }, fallback: m);
+    }
+    if (e.httpStatus == 401) {
+      return const DeadmanException(
+        'The fee sponsor rejected this app. Check KORA_API_KEY.',
+        name: 'KoraUnauthorized',
+      );
+    }
+    if (RegExp(
+      'insufficient funds for rent',
+      caseSensitive: false,
+    ).hasMatch(m)) {
+      return DeadmanException(
+        _fundingErrors['InsufficientFundsForRent']!,
+        name: 'NoFunds',
+      );
+    }
+    return DeadmanException('Fee sponsor error: $m', name: 'KoraError');
   }
 
   /// A Deadman program error raised client-side, before sending.
@@ -105,9 +151,17 @@ class DeadmanException implements Exception {
     6012: ('InsufficientFunds', 'Amount exceeds the withdrawable balance'),
     6013: ('NoGuardian', 'Vault has no guardian'),
     6014: ('GuardianCooldown', 'Guardian lockdown is cooling down'),
-    6015: ('InvalidConfig', 'Treasury must be set'),
-    6016: ('MathOverflow', 'Arithmetic overflow'),
+    6015: (
+      'PlanCompleted',
+      'Every tier of this plan has released; check-ins are closed',
+    ),
+    6016: ('LabelTooLong', 'Plan label is too long'),
+    6017: ('InvalidConfig', 'Treasury must be set'),
+    6018: ('MathOverflow', 'Arithmetic overflow'),
   };
+
+  static const planCompleted = 6015;
+  static const labelTooLong = 6016;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -124,7 +178,16 @@ class DeadmanException implements Exception {
 }
 
 class DeadmanClient implements DeadmanApi {
+  /// Uses the Kora sponsor in [AppConfig] when its URL is set.
   DeadmanClient([SolanaClient? client])
+    : this.withKora(
+        client: client,
+        sponsor: KoraClient.fromConfig(AppConfig.koraSponsorUrl),
+      );
+
+  /// [sponsor] pays guard-key transactions (pulse, lockdown) for free.
+  /// Wallet-signed transactions always pay their own fees and rent in SOL.
+  DeadmanClient.withKora({SolanaClient? client, this.sponsor})
     : _client =
           client ??
           SolanaClient(
@@ -140,18 +203,30 @@ class DeadmanClient implements DeadmanApi {
   static const _vaultScanTtl = Duration(seconds: 30);
 
   final SolanaClient _client;
+  final KoraClient? sponsor;
   final _rent = <int, int>{};
+  final _decimals = <String, int>{};
 
   RpcClient get _rpc => _client.rpcClient;
 
   @override
-  String vaultAddressFor(String owner) => vaultPda(owner).address;
+  String vaultAddressFor(String owner, int planId) =>
+      vaultPda(owner, planId).address;
 
   @override
-  Future<VaultState?> fetchVault(String owner) async {
-    final address = vaultAddressFor(owner);
+  Future<VaultState?> fetchVault(String owner, int planId) async {
+    final address = vaultAddressFor(owner, planId);
     final account = await _account(address);
     return account == null ? null : _decodeVault(address, account);
+  }
+
+  /// Always fresh: the owner's own screens must reflect their last send.
+  @override
+  Future<List<VaultState>> fetchVaults(String owner) async {
+    final vaults = await _programVaults([
+      ProgramDataFilter.memcmpBase58(offset: 8, bytes: owner),
+    ]);
+    return vaults..sort((a, b) => a.planId.compareTo(b.planId));
   }
 
   Future<List<VaultState>>? _scan;
@@ -172,9 +247,13 @@ class DeadmanClient implements DeadmanApi {
     });
   }
 
-  Future<List<VaultState>> _scanVaults() async {
-    // Scans every Vault; fine on devnet, needs an indexer on mainnet
-    // (rules sit after a variable-length Option, so memcmp can't target them).
+  // Scans every Vault; fine on devnet, needs an indexer on mainnet
+  // (rules sit after a variable-length Option, so memcmp can't target them).
+  Future<List<VaultState>> _scanVaults() => _programVaults(const []);
+
+  Future<List<VaultState>> _programVaults(
+    List<ProgramDataFilter> filters,
+  ) async {
     final accounts = await _net(
       () => _rpc.getProgramAccounts(
         AppConfig.programId,
@@ -182,6 +261,7 @@ class DeadmanClient implements DeadmanApi {
         encoding: Encoding.base64,
         filters: [
           ProgramDataFilter.memcmp(offset: 0, bytes: Disc.vaultAccount),
+          ...filters,
         ],
       ),
     );
@@ -229,6 +309,8 @@ class DeadmanClient implements DeadmanApi {
   @override
   Future<Uint8List> buildCreateVault({
     required String owner,
+    required int planId,
+    required String label,
     required String guard,
     required int intervalSecs,
     required int lockSecs,
@@ -236,6 +318,7 @@ class DeadmanClient implements DeadmanApi {
     int depositLamports = 0,
   }) async {
     _checkAmount(depositLamports);
+    _checkLabel(label);
     if (guard == owner || guard == defaultPubkey) {
       throw DeadmanException.program(6005);
     }
@@ -246,26 +329,28 @@ class DeadmanClient implements DeadmanApi {
       lockSecs: lockSecs,
       rules: rules,
     );
-    final vault = vaultAddressFor(owner);
+    final vault = vaultAddressFor(owner, planId);
+    // With a sponsor the guard never pays fees. Otherwise a later plan reuses
+    // the guard key, which earlier plans already funded.
+    final fundGuard =
+        sponsor == null &&
+        await balance(guard) < AppConfig.guardFundingLamports;
+    final data = encodeCreateVault(
+      planId: planId,
+      label: label,
+      guard: guard,
+      intervalSecs: intervalSecs,
+      lockSecs: lockSecs,
+      rules: rules,
+    );
     return _build(owner, [
-      SystemInstruction.transfer(
-        fundingAccount: _pk(owner),
-        recipientAccount: _pk(guard),
-        lamports: AppConfig.guardFundingLamports,
-      ),
-      deadmanIx(
-        [
-          AccountMeta.writeable(pubKey: _pk(owner), isSigner: true),
-          AccountMeta.writeable(pubKey: _pk(vault), isSigner: false),
-          AccountMeta.readonly(pubKey: _pk(systemProgramId), isSigner: false),
-        ],
-        encodeCreateVault(
-          guard: guard,
-          intervalSecs: intervalSecs,
-          lockSecs: lockSecs,
-          rules: rules,
+      if (fundGuard)
+        SystemInstruction.transfer(
+          fundingAccount: _pk(owner),
+          recipientAccount: _pk(guard),
+          lamports: AppConfig.guardFundingLamports,
         ),
-      ),
+      createVaultIx(owner: owner, payer: owner, planId: planId, data: data),
       if (depositLamports > 0)
         SystemInstruction.transfer(
           fundingAccount: _pk(owner),
@@ -278,13 +363,14 @@ class DeadmanClient implements DeadmanApi {
   @override
   Future<Uint8List> buildDeposit({
     required String owner,
+    required int planId,
     required int lamports,
   }) async {
     _checkAmount(lamports);
     return _build(owner, [
       SystemInstruction.transfer(
         fundingAccount: _pk(owner),
-        recipientAccount: _pk(vaultAddressFor(owner)),
+        recipientAccount: _pk(vaultAddressFor(owner, planId)),
         lamports: lamports,
       ),
     ]);
@@ -293,6 +379,7 @@ class DeadmanClient implements DeadmanApi {
   @override
   Future<Uint8List> buildDepositToken({
     required String owner,
+    required int planId,
     required String mint,
     required int amount,
   }) async {
@@ -302,6 +389,7 @@ class DeadmanClient implements DeadmanApi {
       owner,
       depositTokenIxs(
         owner: owner,
+        planId: planId,
         mint: mint,
         amount: amount,
         decimals: decimals,
@@ -312,33 +400,45 @@ class DeadmanClient implements DeadmanApi {
   @override
   Future<Uint8List> buildWithdrawSol({
     required String owner,
+    required int planId,
     required int lamports,
   }) async {
     _checkAmount(lamports);
-    return _build(owner, [ownerActionIx(owner, encodeWithdrawSol(lamports))]);
+    return _build(owner, [
+      ownerActionIx(owner, planId, encodeWithdrawSol(lamports)),
+    ]);
   }
 
   @override
   Future<Uint8List> buildWithdrawToken({
     required String owner,
+    required int planId,
     required String mint,
     required int amount,
   }) async {
     _checkAmount(amount);
     return _build(
       owner,
-      withdrawTokenIxs(owner: owner, mint: mint, amount: amount),
+      withdrawTokenIxs(
+        owner: owner,
+        planId: planId,
+        mint: mint,
+        amount: amount,
+      ),
     );
   }
 
   @override
   Future<Uint8List> buildUpdatePolicy({
     required String owner,
+    required int planId,
+    required String label,
     required int intervalSecs,
     required int lockSecs,
     required List<RuleSpec> rules,
     String? guardian,
   }) async {
+    _checkLabel(label);
     _checkPolicy(
       owner: owner,
       intervalSecs: intervalSecs,
@@ -346,93 +446,165 @@ class DeadmanClient implements DeadmanApi {
       rules: rules,
       guardian: guardian,
     );
-    return _build(owner, [
-      ownerActionIx(
-        owner,
-        encodeUpdatePolicy(
-          intervalSecs: intervalSecs,
-          lockSecs: lockSecs,
-          rules: rules,
-          guardian: guardian,
-        ),
-      ),
-    ]);
+    final data = encodeUpdatePolicy(
+      label: label,
+      intervalSecs: intervalSecs,
+      lockSecs: lockSecs,
+      rules: rules,
+      guardian: guardian,
+    );
+    return _build(owner, [ownerActionIx(owner, planId, data)]);
   }
 
   @override
   Future<Uint8List> buildSetGuard({
     required String owner,
+    required List<int> planIds,
     required String newGuard,
-  }) => _build(owner, [ownerActionIx(owner, encodeSetGuard(newGuard))]);
+  }) {
+    final ids = _distinct(planIds);
+    return _build(owner, [
+      for (final id in ids) ownerActionIx(owner, id, encodeSetGuard(newGuard)),
+    ]);
+  }
 
   @override
-  Future<Uint8List> buildPulseByOwner({required String owner}) => _build(
-    owner,
-    [pulseOrLockdownIx(signer: owner, vaultOwner: owner, lockdown: false)],
-  );
+  Future<Uint8List> buildPulseByOwner({
+    required String owner,
+    required List<int> planIds,
+  }) async {
+    final ids = await _pulsablePlans(owner, planIds);
+    return _build(owner, [
+      for (final id in ids)
+        pulseOrLockdownIx(
+          signer: owner,
+          vaultOwner: owner,
+          planId: id,
+          lockdown: false,
+        ),
+    ]);
+  }
 
   @override
   Future<Uint8List> buildExecuteRule({
     required String executor,
     required String vaultOwner,
+    required int planId,
     required int index,
-  }) async =>
-      _build(executor, await _executeRuleIxs(executor, vaultOwner, index));
+  }) async {
+    final ixs = await _executeRuleIxs(executor, vaultOwner, planId, index);
+    return _build(executor, ixs);
+  }
 
   @override
-  Future<Uint8List> buildCloseVault({required String owner}) =>
-      _build(owner, [ownerActionIx(owner, Disc.closeVault)]);
+  Future<Uint8List> buildCloseVault({
+    required String owner,
+    required int planId,
+  }) => _build(owner, [ownerActionIx(owner, planId, Disc.closeVault)]);
 
   @override
   Future<String> pulseWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
-  }) => _sendWithKey(guard, [
-    pulseOrLockdownIx(
-      signer: guard.address,
-      vaultOwner: vaultOwner,
-      lockdown: false,
-    ),
+    required List<int> planIds,
+  }) async => _sendWithKey(guard, sponsor: sponsor, [
+    for (final id in await _pulsablePlans(vaultOwner, planIds))
+      pulseOrLockdownIx(
+        signer: guard.address,
+        vaultOwner: vaultOwner,
+        planId: id,
+        lockdown: false,
+      ),
   ]);
 
   @override
   Future<String> lockdownWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
-  }) => _sendWithKey(guard, [
-    pulseOrLockdownIx(
-      signer: guard.address,
-      vaultOwner: vaultOwner,
-      lockdown: true,
-    ),
+    required List<int> planIds,
+  }) => _sendWithKey(guard, sponsor: sponsor, [
+    for (final id in _distinct(planIds))
+      pulseOrLockdownIx(
+        signer: guard.address,
+        vaultOwner: vaultOwner,
+        planId: id,
+        lockdown: true,
+      ),
   ]);
 
   @override
   Future<String> executeRuleWithKey(
     Ed25519HDKeyPair executor, {
     required String vaultOwner,
+    required int planId,
     required int index,
   }) async => _sendWithKey(
     executor,
-    await _executeRuleIxs(executor.address, vaultOwner, index),
+    await _executeRuleIxs(executor.address, vaultOwner, planId, index),
   );
 
   @override
   Future<List<String>> sendSigned(List<Uint8List> signedTransactions) async {
-    final signatures = [
-      for (final tx in signedTransactions) await _send(base64Encode(tx)),
-    ];
+    final signatures = <String>[];
+    for (final tx in signedTransactions) {
+      signatures.add(await _send(base64Encode(tx)));
+    }
     await _confirm(signatures);
     _scan = null;
     return signatures;
   }
 
+  /// [planIds] minus completed or closed plans, which the program would
+  /// reject (`PlanCompleted`) or cannot load.
+  Future<List<int>> _pulsablePlans(String owner, List<int> planIds) async {
+    final ids = _distinct(planIds);
+    final addresses = [for (final id in ids) vaultAddressFor(owner, id)];
+    final accounts = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            addresses,
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    final open = <int>[];
+    var completed = false;
+    for (var i = 0; i < ids.length; i++) {
+      final account = accounts[i];
+      final vault = account == null
+          ? null
+          : await _decodeVault(addresses[i], account);
+      if (vault == null) continue;
+      if (vault.completed) {
+        completed = true;
+      } else {
+        open.add(ids[i]);
+      }
+    }
+    if (open.isEmpty) {
+      if (completed) {
+        throw DeadmanException.program(DeadmanException.planCompleted);
+      }
+      throw const DeadmanException('Plan not found');
+    }
+    return open;
+  }
+
+  static List<int> _distinct(List<int> planIds) {
+    if (planIds.isEmpty) {
+      throw ArgumentError.value(planIds, 'planIds', 'must not be empty');
+    }
+    return planIds.toSet().toList();
+  }
+
   Future<List<Instruction>> _executeRuleIxs(
     String executor,
     String vaultOwner,
+    int planId,
     int index,
   ) async {
-    final vault = await fetchVault(vaultOwner);
+    final vault = await fetchVault(vaultOwner, planId);
     if (vault == null) throw const DeadmanException('Vault not found');
     if (index < 0 || index >= vault.rules.length) {
       throw DeadmanException.program(6011);
@@ -445,6 +617,7 @@ class DeadmanClient implements DeadmanApi {
     return executeRuleIxs(
       executor: executor,
       vaultOwner: vaultOwner,
+      planId: planId,
       rule: rule,
       index: index,
       treasury: fees.treasury,
@@ -473,7 +646,10 @@ class DeadmanClient implements DeadmanApi {
   }
 
   /// Also rejects Token-2022 mints, which this client does not support yet.
-  Future<int> _mintDecimals(String mint) async {
+  Future<int> _mintDecimals(String mint) async =>
+      _decimals[mint] ??= await _fetchMintDecimals(mint);
+
+  Future<int> _fetchMintDecimals(String mint) async {
     final account = await _account(mint);
     final data = account?.data;
     if (account == null || data is! BinaryAccountData) {
@@ -506,8 +682,10 @@ class DeadmanClient implements DeadmanApi {
     );
   }
 
+  /// Unsigned transaction for the wallet of [signer], which pays the fee
+  /// and any rent, with a blockhash from our RPC.
   Future<Uint8List> _build(
-    String feePayer,
+    String signer,
     List<Instruction> instructions,
   ) async {
     final bh = await _net(
@@ -515,25 +693,59 @@ class DeadmanClient implements DeadmanApi {
     );
     return serializeUnsigned(
       instructions,
-      feePayer: feePayer,
+      feePayer: signer,
       recentBlockhash: bh.blockhash,
     );
   }
 
+  /// Signs with [signer] and sends. With a [sponsor], the sponsor's signer
+  /// is fee payer: [signer] fills its own slot, the sponsor co-signs and
+  /// broadcasts, so [signer] needs no SOL.
   Future<String> _sendWithKey(
     Ed25519HDKeyPair signer,
-    List<Instruction> instructions,
-  ) async {
-    final bh = await _net(
-      () => _rpc.getLatestBlockhash(commitment: commitment).value,
-    );
-    final tx = await signTransaction(bh, Message(instructions: instructions), [
-      signer,
-    ]);
-    final signature = await _send(tx.encode());
+    List<Instruction> instructions, {
+    KoraClient? sponsor,
+  }) async {
+    final String signature;
+    if (sponsor == null) {
+      final bh = await _net(
+        () => _rpc.getLatestBlockhash(commitment: commitment).value,
+      );
+      final tx = await signTransaction(
+        bh,
+        Message(instructions: instructions),
+        [signer],
+      );
+      signature = await _send(tx.encode());
+    } else {
+      final payer = (await _kora(sponsor.getPayerSigner)).signerAddress;
+      final blockhash = await _kora(sponsor.getBlockhash);
+      final tx = await partiallySign(
+        serializeUnsigned(
+          instructions,
+          feePayer: payer,
+          recentBlockhash: blockhash,
+        ),
+        signer,
+      );
+      signature = await _send(
+        base64Encode(tx),
+        kora: sponsor,
+        koraSigner: payer,
+      );
+    }
     await _confirm([signature]);
     _scan = null;
     return signature;
+  }
+
+  /// A Kora call during building: retried like RPC, errors mapped.
+  static Future<T> _kora<T>(Future<T> Function() call) async {
+    try {
+      return await _net(call);
+    } on KoraException catch (e) {
+      throw DeadmanException.fromKora(e);
+    }
   }
 
   /// Retries transient failures: sockets Android drops while the wallet app
@@ -545,7 +757,11 @@ class DeadmanClient implements DeadmanApi {
         return await call();
       } on Object catch (e) {
         final status = RegExp(r'^http status code (\d+)').firstMatch('$e');
-        final code = status == null ? null : int.parse(status.group(1)!);
+        final code = e is KoraException
+            ? e.httpStatus
+            : status == null
+            ? null
+            : int.parse(status.group(1)!);
         final throttled = code == 429 || (code != null && code >= 500);
         final transient =
             throttled ||
@@ -572,26 +788,42 @@ class DeadmanClient implements DeadmanApi {
 
   /// Public RPC pools are load-balanced and nodes lag each other, so a fresh
   /// blockhash can be unknown to the node that simulates the send. Give it a
-  /// few seconds before concluding the transaction really expired.
-  Future<String> _send(String base64Tx) async {
+  /// few seconds before concluding the transaction really expired. With
+  /// [kora], the node co-signs as [koraSigner] and broadcasts instead.
+  Future<String> _send(
+    String base64Tx, {
+    KoraClient? kora,
+    String? koraSigner,
+  }) async {
     for (var attempt = 1; ; attempt++) {
       try {
+        if (kora != null) {
+          final r = await _net(
+            () => kora.signAndSendTransaction(
+              transaction: base64Tx,
+              signerKey: koraSigner,
+            ),
+          );
+          return r.signature!;
+        }
         return await _net(
           () => _rpc.sendTransaction(base64Tx, preflightCommitment: commitment),
         );
       } on JsonRpcException catch (e) {
         final data = e.data;
-        final unknownBlockhash =
-            data is Map && data['err'] == 'BlockhashNotFound';
-        if (!unknownBlockhash) throw DeadmanException.fromRpc(e);
-        if (attempt >= blockhashRetries) {
-          throw const DeadmanException(
-            'The approval expired before reaching the network. Tap again and approve.',
-            name: 'BlockhashExpired',
-          );
+        if (data is! Map || data['err'] != 'BlockhashNotFound') {
+          throw DeadmanException.fromRpc(e);
         }
-        await Future<void>.delayed(_pollInterval);
+      } on KoraException catch (e) {
+        if (!e.blockhashNotFound) throw DeadmanException.fromKora(e);
       }
+      if (attempt >= blockhashRetries) {
+        throw const DeadmanException(
+          'The approval expired before reaching the network. Tap again and approve.',
+          name: 'BlockhashExpired',
+        );
+      }
+      await Future<void>.delayed(_pollInterval);
     }
   }
 
@@ -640,6 +872,12 @@ class DeadmanClient implements DeadmanApi {
       guardian: guardian,
     );
     if (code != null) throw DeadmanException.program(code);
+  }
+
+  static void _checkLabel(String label) {
+    if (!labelFits(label)) {
+      throw DeadmanException.program(DeadmanException.labelTooLong);
+    }
   }
 
   static void _checkAmount(int amount) {

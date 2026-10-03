@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:solana/solana.dart';
@@ -139,6 +141,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   late final _guardian = TextEditingController(
     text: widget.vault?.guardian ?? '',
   );
+  late final _label = TextEditingController(text: widget.vault?.label ?? '');
   final _deposit = TextEditingController(text: '0.1');
   bool _busy = false;
 
@@ -160,6 +163,10 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     if (g.isNotEmpty && !isAddress(g)) {
       return err('Guardian address is invalid');
     }
+    final label = _label.text.trim();
+    if (utf8.encode(label).length > 32) {
+      return err('Plan name must be 32 characters or fewer');
+    }
 
     setState(() => _busy = true);
     final actions = ref.read(actionsProvider);
@@ -167,12 +174,15 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       context,
       () => _creating
           ? actions.createVault(
+              label: label,
               rules: rules,
               intervalSecs: _cadence.interval,
               lockSecs: _cadence.lock,
               depositLamports: parseSol(_deposit.text) ?? 0,
             )
           : actions.updatePolicy(
+              planId: widget.vault!.planId,
+              label: label,
               intervalSecs: _cadence.interval,
               lockSecs: _cadence.lock,
               rules: rules,
@@ -192,7 +202,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: DmColors.bg,
-        title: Text(_creating ? 'Arm your switch' : 'Release plan'),
+        title: Text(_creating ? 'New release plan' : 'Edit release plan'),
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
@@ -203,6 +213,16 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
             style: t.bodyMedium?.copyWith(color: DmColors.muted, height: 1.4),
           ),
           const SizedBox(height: 18),
+          TextField(
+            controller: _label,
+            maxLength: 32,
+            decoration: const InputDecoration(
+              labelText: 'Plan name',
+              hintText: 'e.g. Kids, Emergency fund',
+              prefixIcon: Icon(Icons.label_outline),
+            ),
+          ),
+          const SizedBox(height: 10),
           const Text('Check in every', style: TextStyle(color: DmColors.muted)),
           const SizedBox(height: 8),
           Wrap(

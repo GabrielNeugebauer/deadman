@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -71,15 +73,19 @@ final sessionProvider = NotifierProvider<SessionController, Session>(
   SessionController.new,
 );
 
-final vaultProvider = FutureProvider<VaultState?>((ref) async {
+/// Every release plan of the connected owner, sorted by plan id.
+final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
-  if (owner == null) return null;
-  final vault = await ref.watch(apiProvider).fetchVault(owner);
-  final next = vault?.nextRuleDue;
-  if (vault != null && next != null) {
-    await scheduleFrom(pulseDue: vault.pulseDue, deadline: next);
+  if (owner == null) return const [];
+  final vaults = await ref.watch(apiProvider).fetchVaults(owner);
+  final active = vaults.where((v) => !v.completed).toList();
+  if (active.isNotEmpty) {
+    // Remind on the most urgent plan.
+    final pulseDue = active.map((v) => v.pulseDue).reduce(min);
+    final deadline = active.map((v) => v.nextRuleDue!).reduce(min);
+    await scheduleFrom(pulseDue: pulseDue, deadline: deadline);
   }
-  return vault;
+  return vaults;
 });
 
 final feesProvider = FutureProvider(
