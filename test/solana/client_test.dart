@@ -113,6 +113,30 @@ void main() {
     );
   });
 
+  test('backs off and retries when rate limited', () async {
+    rpc.throttleNext = 2;
+    expect((await client.fetchFees()).treasury, treasury);
+  });
+
+  test('reports persistent rate limiting clearly', () async {
+    rpc.throttleNext = DeadmanClient.netRetries;
+    await expectLater(
+      client.fetchFees(),
+      throwsA(
+        isA<DeadmanException>().having((e) => e.name, 'name', 'RateLimited'),
+      ),
+    );
+  });
+
+  test('watched-vault lookups share one program scan', () async {
+    await Future.wait([
+      client.fetchWatchedVaults(alice),
+      client.fetchWatchedVaults(bob),
+    ]);
+    await client.fetchWatchedVaults(guardian);
+    expect(rpc.calls.where((c) => c == 'getProgramAccounts'), hasLength(1));
+  });
+
   test('fetchFees reads Config', () async {
     final fees = await client.fetchFees();
     expect(fees.treasury, treasury);

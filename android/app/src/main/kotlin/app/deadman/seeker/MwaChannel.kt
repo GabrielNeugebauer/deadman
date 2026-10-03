@@ -1,5 +1,6 @@
 package app.deadman.seeker
 
+import android.content.Context
 import android.net.Uri
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 import com.solana.mobilewalletadapter.clientlib.Blockchain
@@ -25,6 +26,7 @@ import kotlinx.coroutines.sync.withLock
  * Calls are serialized because ActivityResultSender allows one pending intent.
  */
 class MwaChannel(
+    private val context: Context,
     private val sender: ActivityResultSender,
     private val scope: CoroutineScope,
     messenger: BinaryMessenger,
@@ -55,6 +57,7 @@ class MwaChannel(
         }
         val adapter = MobileWalletAdapter(connectionIdentity).also { it.blockchain = blockchain }
 
+        WalletSessionService.start(context)
         try {
             when (call.method) {
                 "authorize" -> authorize(adapter, result)
@@ -64,6 +67,8 @@ class MwaChannel(
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && !isInterrupted(e)) throw e
             fail(result, e.message ?: e.javaClass.simpleName, e)
+        } finally {
+            WalletSessionService.stop(context)
         }
     }
 

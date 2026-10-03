@@ -135,6 +135,9 @@ class FakeRpc {
   /// while the wallet app is in front.
   int dropNext = 0;
 
+  /// Requests answered with HTTP 429, like a rate-limited public RPC.
+  int throttleNext = 0;
+
   /// sendTransaction calls answered with a BlockhashNotFound preflight error.
   int blockhashMisses = 0;
 
@@ -151,6 +154,15 @@ class FakeRpc {
     if (dropNext > 0) {
       dropNext--;
       (await req.response.detachSocket(writeHeaders: false)).destroy();
+      return;
+    }
+    if (throttleNext > 0) {
+      throttleNext--;
+      await utf8.decoder.bind(req).join();
+      req.response
+        ..statusCode = 429
+        ..write('Too many requests for a specific RPC call');
+      await req.response.close();
       return;
     }
     final body = jsonDecode(await utf8.decoder.bind(req).join());
