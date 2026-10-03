@@ -19,6 +19,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MwaChannel(
+            context = applicationContext,
             sender = resultSender,
             scope = lifecycleScope,
             messenger = flutterEngine.dartExecutor.binaryMessenger,

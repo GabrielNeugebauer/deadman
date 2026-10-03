@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:io' show SocketException;
 import 'dart:typed_data';
 
 import 'package:solana/dto.dart'
@@ -134,8 +134,10 @@ class DeadmanClient implements DeadmanApi {
 
   static const commitment = Commitment.confirmed;
   static const confirmTimeout = Duration(seconds: 60);
-  static const _pollInterval = Duration(milliseconds: 800);
+  static const _pollInterval = Duration(milliseconds: 1500);
   static const blockhashRetries = 8;
+  static const netRetries = 5;
+  static const _vaultScanTtl = Duration(seconds: 30);
 
   final SolanaClient _client;
   final _rent = <int, int>{};
@@ -152,8 +154,25 @@ class DeadmanClient implements DeadmanApi {
     return account == null ? null : _decodeVault(address, account);
   }
 
+  Future<List<VaultState>>? _scan;
+  DateTime _scanAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// getProgramAccounts is the most rate-limited RPC call, so one scan is
+  /// shared by concurrent callers and reused briefly; sends clear it.
   @override
-  Future<List<VaultState>> fetchAllVaults() async {
+  Future<List<VaultState>> fetchAllVaults() {
+    final cached = _scan;
+    if (cached != null && DateTime.now().difference(_scanAt) < _vaultScanTtl) {
+      return cached;
+    }
+    _scanAt = DateTime.now();
+    return _scan = _scanVaults().catchError((Object e) {
+      _scan = null;
+      throw e;
+    });
+  }
+
+  Future<List<VaultState>> _scanVaults() async {
     // Scans every Vault; fine on devnet, needs an indexer on mainnet
     // (rules sit after a variable-length Option, so memcmp can't target them).
     final accounts = await _net(
@@ -404,6 +423,7 @@ class DeadmanClient implements DeadmanApi {
       for (final tx in signedTransactions) await _send(base64Encode(tx)),
     ];
     await _confirm(signatures);
+    _scan = null;
     return signatures;
   }
 
@@ -512,24 +532,40 @@ class DeadmanClient implements DeadmanApi {
     ]);
     final signature = await _send(tx.encode());
     await _confirm([signature]);
+    _scan = null;
     return signature;
   }
 
-  /// Retries transient network failures. Android can drop sockets while the
-  /// wallet app is in front; resending the same signed transaction is safe
-  /// because the network rejects duplicate signatures.
+  /// Retries transient failures: sockets Android drops while the wallet app
+  /// is in front, timeouts, and rate limiting (HTTP 429) or 5xx from public
+  /// RPCs. Resending a signed transaction is safe; duplicates are rejected.
   static Future<T> _net<T>(Future<T> Function() call) async {
     for (var attempt = 1; ; attempt++) {
       try {
         return await call();
       } on Object catch (e) {
+        final status = RegExp(r'^http status code (\d+)').firstMatch('$e');
+        final code = status == null ? null : int.parse(status.group(1)!);
+        final throttled = code == 429 || (code != null && code >= 500);
         final transient =
+            throttled ||
             e is SocketException ||
             e is ClientException ||
             e is TimeoutException ||
             e is RpcTimeoutException;
-        if (!transient || attempt >= 4) rethrow;
-        await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+        if (!transient || attempt >= netRetries) {
+          if (code == 429) {
+            throw const DeadmanException(
+              'The network is busy (rate limited). Wait a moment and try again.',
+              name: 'RateLimited',
+            );
+          }
+          rethrow;
+        }
+        // 0.5s, 1s, 2s, 4s: rate limits need real breathing room.
+        await Future<void>.delayed(
+          Duration(milliseconds: 500 << (attempt - 1)),
+        );
       }
     }
   }
@@ -554,7 +590,7 @@ class DeadmanClient implements DeadmanApi {
             name: 'BlockhashExpired',
           );
         }
-        await Future<void>.delayed(_pollInterval * 2);
+        await Future<void>.delayed(_pollInterval);
       }
     }
   }

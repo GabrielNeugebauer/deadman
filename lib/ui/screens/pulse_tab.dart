@@ -22,20 +22,30 @@ class PulseTab extends ConsumerStatefulWidget {
 
 class _PulseTabState extends ConsumerState<PulseTab> {
   late final Timer _tick;
+  late final AppLifecycleListener _lifecycle;
   int _now = nowSecs();
+  bool _foreground = true;
 
   @override
   void initState() {
     super.initState();
+    // The countdown is local; the chain is re-read once a minute, and only
+    // while the app is visible, to stay under public RPC rate limits.
     _tick = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!_foreground) return;
       setState(() => _now = nowSecs());
-      if (t.tick % 15 == 0) ref.invalidate(vaultProvider);
+      if (t.tick % 60 == 0) ref.invalidate(vaultProvider);
     });
+    _lifecycle = AppLifecycleListener(
+      onResume: () => _foreground = true,
+      onPause: () => _foreground = false,
+    );
   }
 
   @override
   void dispose() {
     _tick.cancel();
+    _lifecycle.dispose();
     super.dispose();
   }
 
