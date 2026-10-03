@@ -38,6 +38,8 @@ List<int> ruleStateBytes(RuleState r) => [
 
 List<int> vaultBytes({
   required String owner,
+  int planId = 0,
+  String label = '',
   required String guard,
   String? guardian,
   int intervalSecs = 86400,
@@ -52,6 +54,7 @@ List<int> vaultBytes({
 }) => [
   ...Disc.vaultAccount,
   ...keyBytes(owner),
+  ...le(2, planId),
   ...keyBytes(guard),
   if (guardian == null) 0 else ...[1, ...keyBytes(guardian)],
   ...le(8, intervalSecs),
@@ -64,6 +67,8 @@ List<int> vaultBytes({
   ...le(4, bestStreak),
   ...le(4, rules.length),
   for (final r in rules) ...ruleStateBytes(r),
+  ...le(4, utf8.encode(label).length),
+  ...utf8.encode(label),
   254,
 ];
 
@@ -128,6 +133,12 @@ class FakeRpc {
   final HttpServer _server;
   final accounts = <String, FakeAccount>{};
   final calls = <String>[];
+
+  /// Params of each getProgramAccounts call.
+  final programScans = <List<dynamic>>[];
+
+  /// Transactions passed to sendTransaction (wire bytes).
+  final sent = <Uint8List>[];
   String blockhash = key(99);
   int rentExempt = 2000000;
 
@@ -201,17 +212,17 @@ class FakeRpc {
         'context': ctx,
         'value': [for (final a in params[0] as List) accounts[a]?.toJson()],
       },
-      'getProgramAccounts' => [
-        for (final e in accounts.entries)
-          if (e.value.owner == params[0])
-            {'pubkey': e.key, 'account': e.value.toJson()},
-      ],
+      'getProgramAccounts' => _programAccounts(params),
+      'getBalance' => {
+        'context': ctx,
+        'value': accounts[params[0]]?.lamports ?? 0,
+      },
       'getLatestBlockhash' => {
         'context': ctx,
         'value': {'blockhash': blockhash, 'lastValidBlockHeight': 100},
       },
       'getMinimumBalanceForRentExemption' => rentExempt,
-      'sendTransaction' => 'sig${calls.length}',
+      'sendTransaction' => _record(params[0] as String),
       'getSignatureStatuses' => {
         'context': ctx,
         'value': [
@@ -227,5 +238,33 @@ class FakeRpc {
       _ => throw UnsupportedError(method),
     };
     return {'jsonrpc': '2.0', 'id': req['id'], 'result': result};
+  }
+
+  String _record(String base64Tx) {
+    sent.add(base64Decode(base64Tx));
+    return 'sig${calls.length}';
+  }
+
+  List<Map<String, dynamic>> _programAccounts(List<dynamic> params) {
+    programScans.add(params);
+    final config = params.length > 1 ? params[1] as Map : const {};
+    final memcmps = [
+      for (final f in (config['filters'] as List?) ?? const [])
+        (f as Map)['memcmp'] as Map,
+    ];
+    bool matches(List<int> data) => memcmps.every((m) {
+      final offset = m['offset'] as int;
+      final bytes = base58decode(m['bytes'] as String);
+      if (data.length < offset + bytes.length) return false;
+      for (var i = 0; i < bytes.length; i++) {
+        if (data[offset + i] != bytes[i]) return false;
+      }
+      return true;
+    });
+    return [
+      for (final e in accounts.entries)
+        if (e.value.owner == params[0] && matches(e.value.data))
+          {'pubkey': e.key, 'account': e.value.toJson()},
+    ];
   }
 }

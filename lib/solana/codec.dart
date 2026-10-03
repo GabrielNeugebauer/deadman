@@ -30,6 +30,7 @@ abstract final class Disc {
 /// Mirrors `onchain/programs/deadman/src/constants.rs`.
 abstract final class Limits {
   static const maxRules = 8;
+  static const maxLabelBytes = 32;
   static const bpsDenominator = 10000;
   static const maxFeeBps = 500;
   static const minIntervalSecs = 60;
@@ -78,8 +79,16 @@ Pda _findPda(List<List<int>> seeds, String programId) {
   throw StateError('No viable bump for PDA');
 }
 
-Pda vaultPda(String owner) =>
-    findPda([utf8.encode('vault'), Ed25519HDPublicKey.fromBase58(owner).bytes]);
+/// Plan vault: seeds `["vault", owner, planId as u16 LE]`.
+Pda vaultPda(String owner, int planId) => findPda([
+  utf8.encode('vault'),
+  Ed25519HDPublicKey.fromBase58(owner).bytes,
+  (BorshWriter()..u16(planId)).toBytes(),
+]);
+
+/// Whether [label] fits the on-chain `MAX_LABEL_LEN` (UTF-8 bytes).
+bool labelFits(String label) =>
+    utf8.encode(label).length <= Limits.maxLabelBytes;
 
 Pda configPda() => findPda([utf8.encode('config')]);
 
@@ -109,6 +118,13 @@ class BorshWriter {
   void u64(int v) =>
       _num(8, (d) => d.setUint64(0, _range(v, 0, null, 'u64'), Endian.little));
   void pubkey(String v) => _b.add(Ed25519HDPublicKey.fromBase58(v).bytes);
+
+  /// Borsh `String`: u32 byte length + UTF-8.
+  void string(String v) {
+    final bytes = utf8.encode(v);
+    u32(bytes.length);
+    _b.add(bytes);
+  }
 
   void optionPubkey(String? v) {
     if (v == null) {
@@ -166,6 +182,12 @@ class BorshReader {
     return base58encode(_d.buffer.asUint8List(_d.offsetInBytes + start, 32));
   }
 
+  String string() {
+    final len = u32();
+    final start = _take(len);
+    return utf8.decode(_d.buffer.asUint8List(_d.offsetInBytes + start, len));
+  }
+
   String? optionPubkey() => switch (u8()) {
     0 => null,
     1 => pubkey(),
@@ -189,6 +211,8 @@ class BorshReader {
 }
 
 Uint8List encodeCreateVault({
+  required int planId,
+  required String label,
   required String guard,
   required int intervalSecs,
   required int lockSecs,
@@ -196,6 +220,8 @@ Uint8List encodeCreateVault({
 }) =>
     (BorshWriter()
           ..bytes(Disc.createVault)
+          ..u16(planId)
+          ..string(label)
           ..pubkey(guard)
           ..i64(intervalSecs)
           ..i64(lockSecs)
@@ -203,6 +229,7 @@ Uint8List encodeCreateVault({
         .toBytes();
 
 Uint8List encodeUpdatePolicy({
+  required String label,
   required int intervalSecs,
   required int lockSecs,
   required List<RuleSpec> rules,
@@ -210,6 +237,7 @@ Uint8List encodeUpdatePolicy({
 }) =>
     (BorshWriter()
           ..bytes(Disc.updatePolicy)
+          ..string(label)
           ..i64(intervalSecs)
           ..i64(lockSecs)
           ..ruleInputs(rules)
@@ -305,6 +333,7 @@ VaultState decodeVault(
   }
   final r = BorshReader(data)..offset = 8;
   final owner = r.pubkey();
+  final planId = r.u16();
   final guard = r.pubkey();
   final guardian = r.optionPubkey();
   final intervalSecs = r.i64();
@@ -330,10 +359,13 @@ VaultState decodeVault(
       paid: r.u64(),
     ),
   );
+  final label = r.string();
   r.u8(); // bump
   return VaultState(
     address: address,
     owner: owner,
+    planId: planId,
+    label: label,
     guard: guard,
     guardian: guardian,
     intervalSecs: intervalSecs,
@@ -447,26 +479,45 @@ Instruction transferCheckedIx({
   ),
 );
 
-Instruction ownerActionIx(String owner, List<int> data) =>
-    deadmanIx([_w(owner, signer: true), _w(vaultPda(owner).address)], data);
+Instruction ownerActionIx(String owner, int planId, List<int> data) =>
+    deadmanIx([
+      _w(owner, signer: true),
+      _w(vaultPda(owner, planId).address),
+    ], data);
 
 /// Signer may be the owner or the guard (guardian too, for lockdown).
 Instruction pulseOrLockdownIx({
   required String signer,
   required String vaultOwner,
+  required int planId,
   required bool lockdown,
 }) => deadmanIx([
   _r(signer, signer: true),
-  _w(vaultPda(vaultOwner).address),
+  _w(vaultPda(vaultOwner, planId).address),
 ], lockdown ? Disc.lockdown : Disc.pulse);
 
+/// `create_vault`. [payer] funds the vault rent (the client passes the owner).
+Instruction createVaultIx({
+  required String owner,
+  required String payer,
+  required int planId,
+  required List<int> data,
+}) => deadmanIx([
+  _r(owner, signer: true),
+  _w(payer, signer: true),
+  _w(vaultPda(owner, planId).address),
+  _r(systemProgramId),
+], data);
+
+/// The owner funds the vault ATA if it does not exist yet.
 List<Instruction> depositTokenIxs({
   required String owner,
+  required int planId,
   required String mint,
   required int amount,
   required int decimals,
 }) {
-  final vault = vaultPda(owner).address;
+  final vault = vaultPda(owner, planId).address;
   return [
     createAtaIdempotentIx(payer: owner, owner: vault, mint: mint),
     transferCheckedIx(
@@ -483,10 +534,11 @@ List<Instruction> depositTokenIxs({
 /// Recreates the owner's ATA if it was closed, then withdraws.
 List<Instruction> withdrawTokenIxs({
   required String owner,
+  required int planId,
   required String mint,
   required int amount,
 }) {
-  final vault = vaultPda(owner).address;
+  final vault = vaultPda(owner, planId).address;
   return [
     createAtaIdempotentIx(payer: owner, owner: owner, mint: mint),
     deadmanIx([
@@ -509,11 +561,12 @@ List<Instruction> withdrawTokenIxs({
 List<Instruction> executeRuleIxs({
   required String executor,
   required String vaultOwner,
+  required int planId,
   required RuleSpec rule,
   required int index,
   required String treasury,
 }) {
-  final vault = vaultPda(vaultOwner).address;
+  final vault = vaultPda(vaultOwner, planId).address;
   final mint = rule.mint;
   if (mint == null) {
     return [
@@ -545,6 +598,8 @@ List<Instruction> executeRuleIxs({
 }
 
 /// Legacy transaction with zeroed signature slots, ready for MWA signing.
+/// With a Kora fee payer there are two or more slots, the fee payer's first;
+/// the signer fills only its own and Kora co-signs later.
 Uint8List serializeUnsigned(
   List<Instruction> instructions, {
   required String feePayer,
@@ -554,6 +609,9 @@ Uint8List serializeUnsigned(
     recentBlockhash: recentBlockhash,
     feePayer: Ed25519HDPublicKey.fromBase58(feePayer),
   );
+  if (compiled.accountKeys.first.toBase58() != feePayer) {
+    throw StateError('Fee payer $feePayer is not the first account');
+  }
   final tx = SignedTx(
     compiledMessage: compiled,
     signatures: [
@@ -564,4 +622,23 @@ Uint8List serializeUnsigned(
     ],
   );
   return Uint8List.fromList(tx.toByteArray().toList());
+}
+
+/// Fills [signer]'s signature slot of wire transaction [tx], leaving the
+/// other slots (e.g. a Kora fee payer's) as they are.
+Future<Uint8List> partiallySign(List<int> tx, Ed25519HDKeyPair signer) async {
+  final signed = SignedTx.fromBytes(tx);
+  final message = signed.compiledMessage;
+  final slot = message.accountKeys
+      .take(message.requiredSignatureCount)
+      .toList()
+      .indexOf(signer.publicKey);
+  if (slot < 0) {
+    throw ArgumentError.value(signer.address, 'signer', 'not a signer of tx');
+  }
+  final signature = await signer.sign(message.toByteArray());
+  final signatures = [...signed.signatures]..[slot] = signature;
+  return Uint8List.fromList(
+    signed.copyWith(signatures: signatures).toByteArray().toList(),
+  );
 }

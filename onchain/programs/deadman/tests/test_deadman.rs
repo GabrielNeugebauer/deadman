@@ -32,14 +32,20 @@ struct Env {
     owner: Keypair,
     guard: Keypair,
     keeper: Keypair,
+    /// Plan the helpers act on.
+    plan: u16,
 }
 
 fn config_pda() -> Pubkey {
     Pubkey::find_program_address(&[CONFIG_SEED], &deadman::id()).0
 }
 
-fn vault_pda(owner: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[VAULT_SEED, owner.as_ref()], &deadman::id()).0
+fn vault_pda(owner: &Pubkey, plan_id: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[VAULT_SEED, owner.as_ref(), &plan_id.to_le_bytes()],
+        &deadman::id(),
+    )
+    .0
 }
 
 fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
@@ -116,9 +122,14 @@ impl Env {
             owner,
             guard,
             keeper,
+            plan: 0,
         };
         env.set_time(1_800_000_000);
         env
+    }
+
+    fn vault_addr(&self) -> Pubkey {
+        vault_pda(&self.owner.pubkey(), self.plan)
     }
 
     fn now(&self) -> i64 {
@@ -151,10 +162,7 @@ impl Env {
     }
 
     fn vault(&self) -> Vault {
-        let acc = self
-            .svm
-            .get_account(&vault_pda(&self.owner.pubkey()))
-            .unwrap();
+        let acc = self.svm.get_account(&self.vault_addr()).unwrap();
         Vault::try_deserialize(&mut acc.data.as_slice()).unwrap()
     }
 
@@ -167,7 +175,7 @@ impl Env {
     }
 
     fn withdrawable(&self) -> u64 {
-        let v = vault_pda(&self.owner.pubkey());
+        let v = self.vault_addr();
         let acc = self.svm.get_account(&v).unwrap();
         acc.lamports - self.svm.minimum_balance_for_rent_exemption(acc.data.len())
     }
@@ -202,6 +210,8 @@ impl Env {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::CreateVault {
+                plan_id: self.plan,
+                label: format!("Plan {}", self.plan),
                 guard: self.guard.pubkey(),
                 interval_secs: INTERVAL,
                 lock_secs: LOCK,
@@ -210,7 +220,8 @@ impl Env {
             .data(),
             deadman::accounts::CreateVault {
                 owner: self.owner.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                payer: self.owner.pubkey(),
+                vault: self.vault_addr(),
                 system_program: system_program::ID,
             }
             .to_account_metas(None),
@@ -222,7 +233,7 @@ impl Env {
     fn deposit_sol(&mut self, amount: u64) {
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &self.owner.pubkey(),
-            &vault_pda(&self.owner.pubkey()),
+            &self.vault_addr(),
             amount,
         );
         let owner = self.owner.insecure_clone();
@@ -235,7 +246,7 @@ impl Env {
             &data.data(),
             deadman::accounts::OwnerAction {
                 owner: self.owner.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                vault: self.vault_addr(),
             }
             .to_account_metas(None),
         )
@@ -247,6 +258,7 @@ impl Env {
         guardian: Option<Pubkey>,
     ) -> Result<u64, String> {
         let ix = self.owner_ix(deadman::instruction::UpdatePolicy {
+            label: "Updated".to_string(),
             interval_secs: INTERVAL,
             lock_secs: LOCK,
             rules,
@@ -262,7 +274,7 @@ impl Env {
             &deadman::instruction::Pulse {}.data(),
             deadman::accounts::Pulse {
                 signer: signer.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                vault: self.vault_addr(),
             }
             .to_account_metas(None),
         );
@@ -276,7 +288,7 @@ impl Env {
             &deadman::instruction::Lockdown {}.data(),
             deadman::accounts::Lockdown {
                 signer: signer.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                vault: self.vault_addr(),
             }
             .to_account_metas(None),
         );
@@ -290,7 +302,7 @@ impl Env {
             &deadman::instruction::WithdrawSol { amount }.data(),
             deadman::accounts::WithdrawSol {
                 owner: self.owner.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                vault: self.vault_addr(),
             }
             .to_account_metas(None),
         );
@@ -314,7 +326,7 @@ impl Env {
             &deadman::instruction::ExecuteSolRule { index }.data(),
             deadman::accounts::ExecuteSolRule {
                 executor: self.keeper.pubkey(),
-                vault: vault_pda(&self.owner.pubkey()),
+                vault: self.vault_addr(),
                 config: config_pda(),
                 beneficiary: *beneficiary,
                 treasury: *treasury,
@@ -331,7 +343,7 @@ impl Env {
         beneficiary: &Pubkey,
         mint: &Pubkey,
     ) -> Result<u64, String> {
-        let vault = vault_pda(&self.owner.pubkey());
+        let vault = self.vault_addr();
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::ExecuteTokenRule { index }.data(),
@@ -355,7 +367,7 @@ impl Env {
     }
 
     fn withdraw_token(&mut self, mint: &Pubkey, amount: u64) -> Result<u64, String> {
-        let vault = vault_pda(&self.owner.pubkey());
+        let vault = self.vault_addr();
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::WithdrawToken { amount }.data(),
@@ -380,7 +392,7 @@ impl Env {
             .decimals(6)
             .send()
             .unwrap();
-        let vault = vault_pda(&self.owner.pubkey());
+        let vault = self.vault_addr();
         for owner in [vault, self.owner.pubkey(), self.treasury.pubkey()] {
             CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, &mint)
                 .owner(&owner)
@@ -828,7 +840,7 @@ fn guard_cannot_move_funds() {
         &deadman::instruction::WithdrawSol { amount: SOL }.data(),
         deadman::accounts::WithdrawSol {
             owner: guard.pubkey(),
-            vault: vault_pda(&env.owner.pubkey()),
+            vault: env.vault_addr(),
         }
         .to_account_metas(None),
     );
@@ -872,7 +884,7 @@ fn guardian_cosigns_early_unlock() {
         deadman::accounts::Unlock {
             owner: env.owner.pubkey(),
             guardian: guardian.pubkey(),
-            vault: vault_pda(&env.owner.pubkey()),
+            vault: env.vault_addr(),
         }
         .to_account_metas(None),
     );
@@ -905,7 +917,7 @@ fn close_vault_blocked_while_locked() {
         &deadman::instruction::CloseVault {}.data(),
         deadman::accounts::CloseVault {
             owner: env.owner.pubkey(),
-            vault: vault_pda(&env.owner.pubkey()),
+            vault: env.vault_addr(),
         }
         .to_account_metas(None),
     );
@@ -913,7 +925,7 @@ fn close_vault_blocked_while_locked() {
     assert!(env.send(ix.clone(), &[&owner]).is_err());
     env.advance(LOCK + 1);
     env.send(ix, &[&owner]).unwrap();
-    assert_eq!(env.lamports(&vault_pda(&env.owner.pubkey())), 0);
+    assert_eq!(env.lamports(&env.vault_addr()), 0);
 }
 
 #[test]
@@ -946,4 +958,133 @@ fn compute_unit_profile() {
          lockdown={lock} execute_sol_rule={exec}"
     );
     assert!(exec < 30_000);
+}
+
+#[test]
+fn pulse_is_closed_once_every_tier_released() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(5 * SOL);
+    let guard = env.guard.insecure_clone();
+    let owner = env.owner.insecure_clone();
+
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    // Between tiers a check-in still stops the rest.
+    env.pulse(&guard).unwrap();
+
+    env.advance(20 * DAY + 1);
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert!(env.pulse(&guard).is_err(), "guard pulse after full release");
+    let err = env.pulse(&owner).unwrap_err();
+    assert!(err.contains("PlanCompleted"), "{err}");
+}
+
+#[test]
+fn one_owner_runs_independent_plans() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&a.pubkey()));
+    env.deposit_sol(2 * SOL);
+
+    env.plan = 7;
+    env.create_vault(vec![rule(
+        &b.pubkey(),
+        Rail::Zcash,
+        30 * DAY,
+        None,
+        AmountMode::Percent,
+        10_000,
+    )])
+    .unwrap();
+    env.deposit_sol(3 * SOL);
+    assert!(env.create_vault(all_to(&b.pubkey())).is_err(), "id taken");
+    let v = env.vault();
+    assert_eq!((v.plan_id, v.label.as_str()), (7, "Plan 7"));
+
+    // Plan 0 releases on its own schedule; plan 7 is untouched.
+    env.advance(10 * DAY + 1);
+    env.plan = 0;
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    env.plan = 7;
+    assert!(env.execute_sol(0, &b.pubkey()).is_err(), "plan 7 not due");
+    assert!(env.withdrawable() >= 3 * SOL);
+}
+
+#[test]
+fn label_length_is_capped() {
+    let a = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::CreateVault {
+            plan_id: 0,
+            label: "x".repeat(33),
+            guard: env.guard.pubkey(),
+            interval_secs: INTERVAL,
+            lock_secs: LOCK,
+            rules: all_to(&a.pubkey()),
+        }
+        .data(),
+        deadman::accounts::CreateVault {
+            owner: env.owner.pubkey(),
+            payer: env.owner.pubkey(),
+            vault: env.vault_addr(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let owner = env.owner.insecure_clone();
+    assert!(env.send(ix, &[&owner]).is_err());
+}
+
+#[test]
+fn sponsor_pays_vault_rent() {
+    let a = Keypair::new();
+    let sponsor = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
+    let owner_before = env.lamports(&env.owner.pubkey());
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::CreateVault {
+            plan_id: 0,
+            label: "Sponsored".to_string(),
+            guard: env.guard.pubkey(),
+            interval_secs: INTERVAL,
+            lock_secs: LOCK,
+            rules: all_to(&a.pubkey()),
+        }
+        .data(),
+        deadman::accounts::CreateVault {
+            owner: env.owner.pubkey(),
+            payer: sponsor.pubkey(),
+            vault: env.vault_addr(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let owner = env.owner.insecure_clone();
+    // The sponsor is the fee payer and funds rent; the owner only signs.
+    env.send(ix, &[&sponsor, &owner]).unwrap();
+    assert_eq!(env.lamports(&env.owner.pubkey()), owner_before);
+    assert_eq!(env.vault().owner, env.owner.pubkey());
 }

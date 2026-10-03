@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/config.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/providers.dart';
@@ -131,6 +132,8 @@ class SettingsTab extends ConsumerWidget {
           const _ReceivePrivatelyCard(),
           const SizedBox(height: 12),
           const _FeesCard(),
+          const SizedBox(height: 12),
+          const _GasCard(),
           const SizedBox(height: 12),
           Card(
             child: ListTile(
@@ -286,6 +289,29 @@ class _FeesCard extends ConsumerWidget {
               : 'Free to use. On release: ${fees.feeBpsPublic / 100}% via Solana, '
                     '${fees.feeBpsPrivate / 100}% via Cloak or Zcash.',
         ),
+      ),
+    );
+  }
+}
+
+/// Owners pay their own fees in SOL; check-ins can be sponsored by Kora.
+class _GasCard extends ConsumerWidget {
+  const _GasCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    const sponsored = AppConfig.koraSponsorUrl != '';
+    final lamports = ref.watch(walletBalanceProvider).value;
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.local_gas_station_outlined),
+        title: const Text('Network fees'),
+        subtitle: Text(
+          'Your wallet pays its own fees in SOL: '
+          '${lamports == null ? '…' : sol(lamports)} SOL available.\n'
+          '${sponsored ? 'Check-ins and duress locks are free; this phone needs no SOL.' : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).'}',
+        ),
+        isThreeLine: true,
       ),
     );
   }

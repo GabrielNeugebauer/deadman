@@ -32,6 +32,10 @@ pub enum DeadmanError {
     NoGuardian,
     #[msg("Guardian lockdown is cooling down")]
     GuardianCooldown,
+    #[msg("Every tier of this plan has released; check-ins are closed")]
+    PlanCompleted,
+    #[msg("Plan label is too long")]
+    LabelTooLong,
     #[msg("Treasury must be set")]
     InvalidConfig,
     #[msg("Arithmetic overflow")]

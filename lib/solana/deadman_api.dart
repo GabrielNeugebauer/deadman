@@ -58,6 +58,8 @@ class VaultState {
   const VaultState({
     required this.address,
     required this.owner,
+    required this.planId,
+    required this.label,
     required this.guard,
     required this.guardian,
     required this.intervalSecs,
@@ -75,6 +77,10 @@ class VaultState {
 
   final String address;
   final String owner;
+
+  /// Owner-chosen id; an owner can hold many independent plans.
+  final int planId;
+  final String label;
   final String guard;
   final String? guardian;
   final int intervalSecs;
@@ -94,6 +100,9 @@ class VaultState {
   final int withdrawableLamports;
 
   int get pulseDue => lastPulse + intervalSecs;
+
+  /// Every tier has released; the program rejects further check-ins.
+  bool get completed => rules.every((r) => r.executed);
   int ruleDueAt(int index) => lastPulse + rules[index].afterSecs;
   bool isLocked(int now) => now < lockedUntil;
 
@@ -137,9 +146,13 @@ class FeeSchedule {
 /// unsigned transactions (fee payer = the signer named first) to hand to
 /// [WalletBridge.signTransactions]. Key-signed methods sign and send directly.
 abstract class DeadmanApi {
-  String vaultAddressFor(String owner);
+  /// Plan vault PDA: seeds `["vault", owner, planId as u16 LE]`.
+  String vaultAddressFor(String owner, int planId);
 
-  Future<VaultState?> fetchVault(String owner);
+  Future<VaultState?> fetchVault(String owner, int planId);
+
+  /// Every plan of [owner], sorted by plan id.
+  Future<List<VaultState>> fetchVaults(String owner);
 
   /// Every Deadman vault (keepers use this to find due rules).
   Future<List<VaultState>> fetchAllVaults();
@@ -154,10 +167,12 @@ abstract class DeadmanApi {
   /// Token balance (base units) of [owner]'s ATA for [mint]; 0 if missing.
   Future<int> tokenBalance(String owner, String mint);
 
-  /// Creates the vault, funds the guard key with fee money, and optionally
-  /// deposits [depositLamports], in one transaction.
+  /// Creates plan [planId], funds the guard key with fee money if it holds
+  /// less than that, and optionally deposits [depositLamports], in one tx.
   Future<Uint8List> buildCreateVault({
     required String owner,
+    required int planId,
+    required String label,
     required String guard,
     required int intervalSecs,
     required int lockSecs,
@@ -167,68 +182,86 @@ abstract class DeadmanApi {
 
   Future<Uint8List> buildDeposit({
     required String owner,
+    required int planId,
     required int lamports,
   });
 
-  /// Moves [amount] of [mint] from the owner's ATA into the vault's ATA
+  /// Moves [amount] of [mint] from the owner's ATA into the plan vault's ATA
   /// (created idempotently).
   Future<Uint8List> buildDepositToken({
     required String owner,
+    required int planId,
     required String mint,
     required int amount,
   });
 
   Future<Uint8List> buildWithdrawSol({
     required String owner,
+    required int planId,
     required int lamports,
   });
 
   Future<Uint8List> buildWithdrawToken({
     required String owner,
+    required int planId,
     required String mint,
     required int amount,
   });
 
   Future<Uint8List> buildUpdatePolicy({
     required String owner,
+    required int planId,
+    required String label,
     required int intervalSecs,
     required int lockSecs,
     required List<RuleSpec> rules,
     String? guardian,
   });
 
+  /// Rotates the guard on every listed plan in one transaction.
   Future<Uint8List> buildSetGuard({
     required String owner,
+    required List<int> planIds,
     required String newGuard,
   });
 
-  Future<Uint8List> buildPulseByOwner({required String owner});
+  Future<Uint8List> buildPulseByOwner({
+    required String owner,
+    required List<int> planIds,
+  });
 
-  /// Executes rule [index] of [vaultOwner]'s vault (SOL or token variant,
-  /// chosen from the rule). Also creates the treasury ATA for token rules.
+  /// Executes rule [index] of a plan (SOL or token variant, chosen from the
+  /// rule). Also creates the treasury ATA for token rules.
   Future<Uint8List> buildExecuteRule({
     required String executor,
     required String vaultOwner,
+    required int planId,
     required int index,
   });
 
-  Future<Uint8List> buildCloseVault({required String owner});
+  Future<Uint8List> buildCloseVault({
+    required String owner,
+    required int planId,
+  });
 
-  /// Guard-key actions: signed locally, no wallet prompt.
+  /// Guard-key actions over several plans, one transaction, no wallet prompt.
   Future<String> pulseWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
+    required List<int> planIds,
   });
 
   Future<String> lockdownWithGuard(
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
+    required List<int> planIds,
   });
 
   /// Executes a rule signed by a local key (claim key or keeper).
   Future<String> executeRuleWithKey(
     Ed25519HDKeyPair executor, {
     required String vaultOwner,
+    required int planId,
     required int index,
   });
 

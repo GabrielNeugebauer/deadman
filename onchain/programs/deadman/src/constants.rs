@@ -2,6 +2,8 @@ pub const CONFIG_SEED: &[u8] = b"config";
 pub const VAULT_SEED: &[u8] = b"vault";
 
 pub const MAX_RULES: usize = 8;
+/// Plan label length in bytes.
+pub const MAX_LABEL_LEN: usize = 32;
 pub const BPS_DENOMINATOR: u64 = 10_000;
 /// Hard cap on the payout fee for any rail: 5%.
 pub const MAX_FEE_BPS: u16 = 500;

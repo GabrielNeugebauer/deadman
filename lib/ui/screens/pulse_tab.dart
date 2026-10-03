@@ -34,7 +34,7 @@ class _PulseTabState extends ConsumerState<PulseTab> {
     _tick = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!_foreground) return;
       setState(() => _now = nowSecs());
-      if (t.tick % 60 == 0) ref.invalidate(vaultProvider);
+      if (t.tick % 60 == 0) ref.invalidate(vaultsProvider);
     });
     _lifecycle = AppLifecycleListener(
       onResume: () => _foreground = true,
@@ -51,57 +51,73 @@ class _PulseTabState extends ConsumerState<PulseTab> {
 
   @override
   Widget build(BuildContext context) {
-    final vault = ref.watch(vaultProvider);
+    final vaults = ref.watch(vaultsProvider);
     return SafeArea(
-      child: vault.when(
+      child: vaults.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) =>
-            _Retry(message: '$e', onRetry: () => ref.invalidate(vaultProvider)),
-        data: (v) => v == null
+        error: (e, _) => _Retry(
+          message: '$e',
+          onRetry: () => ref.invalidate(vaultsProvider),
+        ),
+        data: (list) => list.isEmpty
             ? const _ArmIntro()
             : RefreshIndicator(
-                onRefresh: () async => ref.invalidate(vaultProvider),
-                child: _VaultView(vault: v, now: _now),
+                onRefresh: () async => ref.invalidate(vaultsProvider),
+                child: _Dashboard(plans: list, now: _now),
               ),
       ),
     );
   }
 }
 
-class _VaultView extends ConsumerWidget {
-  const _VaultView({required this.vault, required this.now});
+void openEditor(BuildContext context, {VaultState? vault}) => Navigator.push(
+  context,
+  MaterialPageRoute<void>(builder: (_) => RulesEditorPage(vault: vault)),
+);
 
-  final VaultState vault;
+/// One check-in covers every active plan, so the ring follows the most
+/// urgent one.
+class _Dashboard extends ConsumerWidget {
+  const _Dashboard({required this.plans, required this.now});
+
+  final List<VaultState> plans;
   final int now;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
-    final next = vault.nextRuleDue;
-    final released = vault.rules.where((r) => r.executed).length;
-    final inGrace = now > vault.pulseDue;
+    final active = plans.where((v) => !v.completed).toList();
+    final locked = plans.any((v) => v.isLocked(now)) && !duress;
+
+    final urgent = active.isEmpty
+        ? null
+        : active.reduce((a, b) => a.nextRuleDue! <= b.nextRuleDue! ? a : b);
+    final next = urgent?.nextRuleDue;
+    final inGrace = urgent != null && now > urgent.pulseDue;
     final firing = next != null && now > next;
 
-    final color = firing
+    final color = urgent == null
+        ? DmColors.muted
+        : firing
         ? DmColors.danger
         : inGrace
         ? DmColors.warn
         : DmColors.alive;
-    final (big, label, progress) = next == null
-        ? ('Done', 'every tier released', 0.0)
+    final (big, label, progress) = urgent == null
+        ? ('Done', 'every plan released', 0.0)
         : firing
         ? (span(now - next), 'tier due, releasing', 0.0)
         : inGrace
         ? (
-            span(next - now),
+            span(next! - now),
             'until next tier',
-            (next - now) / (next - vault.pulseDue),
+            (next - now) / (next - urgent.pulseDue),
           )
         : (
-            span(vault.pulseDue - now),
+            span(urgent.pulseDue - now),
             'until next check-in',
-            (vault.pulseDue - now) / vault.intervalSecs,
+            (urgent.pulseDue - now) / urgent.intervalSecs,
           );
 
     return ListView(
@@ -111,8 +127,7 @@ class _VaultView extends ConsumerWidget {
           children: [
             Text('Pulse', style: t.headlineMedium),
             const Spacer(),
-            if (vault.isLocked(now) && !duress)
-              const _Chip(text: 'LOCKED', color: DmColors.warn),
+            if (locked) const _Chip(text: 'LOCKED', color: DmColors.warn),
           ],
         ),
         const SizedBox(height: 20),
@@ -129,37 +144,37 @@ class _VaultView extends ConsumerWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(label, style: const TextStyle(color: DmColors.muted)),
+                if (urgent != null && active.length > 1) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    urgent.label,
+                    style: const TextStyle(color: DmColors.muted, fontSize: 12),
+                  ),
+                ],
               ],
             ),
           ),
         ),
         const SizedBox(height: 24),
-        _PulseButton(color: color),
-        if (released > 0) ...[
-          const SizedBox(height: 12),
-          Text(
-            '$released of ${vault.rules.length} tiers already released. Checking in stops the rest.',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: DmColors.warn),
-          ),
-        ],
+        _PulseButton(color: color, activePlans: active.length),
         const SizedBox(height: 16),
-        _StreakCard(vault: vault),
-        const SizedBox(height: 12),
-        _BalanceCard(vault: vault),
-        const SizedBox(height: 12),
-        _PlanCard(vault: vault, now: now),
-        if (vault.isLocked(now) && !duress) ...[
-          const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.lock_clock, color: DmColors.warn),
-              title: const Text('Lockdown active'),
-              subtitle: Text(
-                'Withdrawals and changes frozen for ${span(vault.lockedUntil - now)}',
-              ),
+        _StreakCard(plans: active.isEmpty ? plans : active),
+        const SizedBox(height: 18),
+        Row(
+          children: [
+            Text('Release plans', style: t.titleLarge),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: () => openEditor(context),
+              icon: const Icon(Icons.add),
+              label: const Text('New plan'),
             ),
-          ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        for (final v in plans) ...[
+          _PlanCard(vault: v, now: now),
+          const SizedBox(height: 12),
         ],
       ],
     );
@@ -167,9 +182,10 @@ class _VaultView extends ConsumerWidget {
 }
 
 class _PulseButton extends ConsumerStatefulWidget {
-  const _PulseButton({required this.color});
+  const _PulseButton({required this.color, required this.activePlans});
 
   final Color color;
+  final int activePlans;
 
   @override
   ConsumerState<_PulseButton> createState() => _PulseButtonState();
@@ -183,35 +199,47 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
     await runGuarded(
       context,
       () => ref.read(actionsProvider).pulse(),
-      success: 'Pulse recorded on-chain',
+      success: widget.activePlans == 1
+          ? 'Pulse recorded on-chain'
+          : 'Pulse recorded on ${widget.activePlans} plans',
     );
     if (mounted) setState(() => _busy = false);
   }
 
   @override
-  Widget build(BuildContext context) => FilledButton.icon(
-    style: FilledButton.styleFrom(
-      backgroundColor: widget.color,
-      minimumSize: const Size.fromHeight(64),
-    ),
-    onPressed: _busy ? null : _pulse,
-    icon: _busy
-        ? const SizedBox.square(
-            dimension: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : const Icon(Icons.fingerprint, size: 28),
-    label: const Text("I'm alive", style: TextStyle(fontSize: 18)),
-  );
+  Widget build(BuildContext context) {
+    final closed = widget.activePlans == 0;
+    return FilledButton.icon(
+      style: FilledButton.styleFrom(
+        backgroundColor: widget.color,
+        minimumSize: const Size.fromHeight(64),
+      ),
+      onPressed: _busy || closed ? null : _pulse,
+      icon: _busy
+          ? const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.fingerprint, size: 28),
+      label: Text(
+        closed ? 'All plans released' : "I'm alive",
+        style: const TextStyle(fontSize: 18),
+      ),
+    );
+  }
 }
 
 class _StreakCard extends StatelessWidget {
-  const _StreakCard({required this.vault});
+  const _StreakCard({required this.plans});
 
-  final VaultState vault;
+  final List<VaultState> plans;
 
   @override
   Widget build(BuildContext context) {
+    final streak = plans.map((v) => v.streak).fold(0, (a, b) => a > b ? a : b);
+    final best = plans
+        .map((v) => v.bestStreak)
+        .fold(0, (a, b) => a > b ? a : b);
     Widget stat(String value, String label) => Expanded(
       child: Column(
         children: [
@@ -237,9 +265,9 @@ class _StreakCard extends StatelessWidget {
                 size: 30,
               ),
             ),
-            stat('${vault.streak}', 'day streak'),
-            stat('${vault.bestStreak}', 'best'),
-            stat('${vault.totalPulses}', 'pulses'),
+            stat('$streak', 'day streak'),
+            stat('$best', 'best'),
+            stat('${plans.length}', plans.length == 1 ? 'plan' : 'plans'),
           ],
         ),
       ),
@@ -247,16 +275,20 @@ class _StreakCard extends StatelessWidget {
   }
 }
 
-class _BalanceCard extends ConsumerWidget {
-  const _BalanceCard({required this.vault});
+class _PlanCard extends ConsumerWidget {
+  const _PlanCard({required this.vault, required this.now});
 
   final VaultState vault;
+  final int now;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
-    final earn = ref.watch(earnProvider);
     final actions = ref.read(actionsProvider);
+    final earn = ref.watch(earnProvider);
+    final duress = ref.watch(sessionProvider.select((s) => s.duress));
+    final released = vault.rules.where((r) => r.executed).length;
+    final id = vault.planId;
 
     Future<void> run(
       String title,
@@ -268,73 +300,7 @@ class _BalanceCard extends ConsumerWidget {
       await runGuarded(context, () => action(lamports), success: done);
     }
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Protected in vault',
-              style: TextStyle(color: DmColors.muted),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${sol(vault.withdrawableLamports)} SOL',
-              style: t.headlineMedium,
-            ),
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () =>
-                        run('Deposit SOL', actions.deposit, 'Deposited'),
-                    child: const Text('Deposit'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () =>
-                        run('Withdraw SOL', actions.withdraw, 'Withdrawn'),
-                    child: const Text('Withdraw'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(foregroundColor: DmColors.alive),
-              onPressed: earn.available
-                  ? () => run(
-                      'Earn with SOL',
-                      actions.earn,
-                      'Earning in your vault',
-                    )
-                  : null,
-              icon: const Icon(Icons.trending_up),
-              label: Text(
-                earn.available
-                    ? 'Earn staking yield (JitoSOL)'
-                    : 'Earn · mainnet only',
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PlanCard extends StatelessWidget {
-  const _PlanCard({required this.vault, required this.now});
-
-  final VaultState vault;
-  final int now;
-
-  @override
-  Widget build(BuildContext context) {
+    final small = OutlinedButton.styleFrom(minimumSize: const Size(0, 42));
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(18, 14, 8, 12),
@@ -343,25 +309,35 @@ class _PlanCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Text(
-                  'Release plan',
-                  style: TextStyle(color: DmColors.muted),
-                ),
-                const Spacer(),
-                TextButton(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute<void>(
-                      builder: (_) => RulesEditorPage(vault: vault),
-                    ),
+                Expanded(
+                  child: Text(
+                    vault.label.isEmpty ? 'Plan ${id + 1}' : vault.label,
+                    style: t.titleLarge,
                   ),
-                  child: const Text('Edit'),
                 ),
+                if (vault.completed)
+                  const _Chip(text: 'RELEASED', color: DmColors.muted)
+                else if (released > 0)
+                  _Chip(
+                    text: '$released/${vault.rules.length} RELEASED',
+                    color: DmColors.warn,
+                  ),
+                if (!vault.completed)
+                  TextButton(
+                    onPressed: () => openEditor(context, vault: vault),
+                    child: const Text('Edit'),
+                  ),
               ],
             ),
+            Text(
+              '${sol(vault.withdrawableLamports)} SOL protected'
+              '${vault.completed ? '' : ' · check in every ${span(vault.intervalSecs)}'}',
+              style: const TextStyle(color: DmColors.muted),
+            ),
+            const SizedBox(height: 10),
             for (final (i, r) in vault.rules.indexed)
               Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
+                padding: const EdgeInsets.symmetric(vertical: 5),
                 child: Row(
                   children: [
                     Icon(
@@ -379,7 +355,8 @@ class _PlanCard extends StatelessWidget {
                           Text(
                             r.executed
                                 ? 'Released ${ago(r.executedAt, now)}'
-                                : 'After ${span(r.afterSecs)} silent · ${vault.ruleDueAt(i) > now ? 'in ${span(vault.ruleDueAt(i) - now)}' : 'due now'}',
+                                : 'After ${span(r.afterSecs)} silent · '
+                                      '${vault.ruleDueAt(i) > now ? 'in ${span(vault.ruleDueAt(i) - now)}' : 'due now'}',
                             style: const TextStyle(
                               color: DmColors.muted,
                               fontSize: 12,
@@ -397,7 +374,7 @@ class _PlanCard extends StatelessWidget {
               ),
             if (vault.guardian != null)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 4),
                 child: Row(
                   children: [
                     const Icon(
@@ -410,10 +387,57 @@ class _PlanCard extends StatelessWidget {
                   ],
                 ),
               ),
-            const SizedBox(height: 6),
-            Text(
-              'Check in every ${span(vault.intervalSecs)}',
-              style: const TextStyle(color: DmColors.muted, fontSize: 12),
+            if (vault.isLocked(now) && !duress)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  'Locked down for ${span(vault.lockedUntil - now)}',
+                  style: const TextStyle(color: DmColors.warn),
+                ),
+              ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton(
+                    style: small,
+                    onPressed: () => run(
+                      'Deposit SOL',
+                      (l) => actions.deposit(id, l),
+                      'Deposited',
+                    ),
+                    child: const Text('Deposit'),
+                  ),
+                  OutlinedButton(
+                    style: small,
+                    onPressed: () => run(
+                      'Withdraw SOL',
+                      (l) => actions.withdraw(id, l),
+                      'Withdrawn',
+                    ),
+                    child: const Text('Withdraw'),
+                  ),
+                  OutlinedButton.icon(
+                    style: small.copyWith(
+                      foregroundColor: const WidgetStatePropertyAll(
+                        DmColors.alive,
+                      ),
+                    ),
+                    onPressed: earn.available
+                        ? () => run(
+                            'Earn with SOL',
+                            (l) => actions.earn(id, l),
+                            'Earning in this plan',
+                          )
+                        : null,
+                    icon: const Icon(Icons.trending_up, size: 18),
+                    label: Text(earn.available ? 'Earn' : 'Earn · mainnet'),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -436,7 +460,8 @@ class _ArmIntro extends ConsumerWidget {
         const SizedBox(height: 10),
         Text(
           'Build a release plan: who receives what, after how long without a check-in, '
-          'and how it gets there: a plain Solana transfer, privately through Cloak, or as shielded Zcash.',
+          'and how it gets there: a plain Solana transfer, privately through Cloak, or as shielded Zcash. '
+          'Create as many plans as you like; one check-in keeps them all alive.',
           style: t.bodyMedium?.copyWith(color: DmColors.muted, height: 1.45),
         ),
         const SizedBox(height: 22),
@@ -453,10 +478,7 @@ class _ArmIntro extends ConsumerWidget {
           ),
         const SizedBox(height: 14),
         FilledButton(
-          onPressed: () => Navigator.push(
-            context,
-            MaterialPageRoute<void>(builder: (_) => const RulesEditorPage()),
-          ),
+          onPressed: () => openEditor(context),
           child: const Text('Build release plan'),
         ),
         const SizedBox(height: 10),

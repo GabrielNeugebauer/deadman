@@ -6,6 +6,7 @@ use crate::state::Rail;
 pub struct VaultCreated {
     pub vault: Pubkey,
     pub owner: Pubkey,
+    pub plan_id: u16,
     pub rules: u8,
 }
 

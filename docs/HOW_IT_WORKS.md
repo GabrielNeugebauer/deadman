@@ -54,6 +54,7 @@ The Solana program is the only component that holds funds. Everything else signs
 | Cloak rail     | **Cloak SDK 0.2.5** in a **headless WebView** (`flutter_inappwebview` 6.2 beta) | Every Cloak deposit needs a Groth16 zero-knowledge proof. The only prover is Cloak's TypeScript SDK (snarkjs + WebAssembly), and no Dart prover exists. We bundle it (3.4 MB) and run it in an invisible WebView on the phone, so the claim key never leaves the device. |
 | Yield          | **Jupiter Swap V2** (`/order` + `/execute`) into **JitoSOL**                    | Jupiter's current API returns an unsigned v0 transaction that MWA can sign, and supports an integrator referral fee. A direct Jito stake-pool deposit is cheaper for the user but earns the protocol nothing.                                                            |
 | Keeper         | **Dart CLI** (`tool/keeper.dart`)                                               | Reuses the app's own client code. It runs on any server or cron.                                                                                                                                                                                                         |
+| Fee sponsor    | **Kora 2.0.5** (Solana Foundation paymaster)                                    | Pays the network fee for guard-key check-ins and duress locks, so the phone needs no SOL. Allowlisted to the Deadman program only; owners still pay their own fees in SOL. See [`KORA.md`](KORA.md).                                                                     |
 
 ---
 
@@ -71,7 +72,7 @@ Native SOL has no allowance mechanism. An SPL token delegate can be revoked by a
 | **Guard**               | phone secure storage      | `pulse`, `lockdown`                                       | move funds, edit the plan |
 | **Guardian** (optional) | a trusted person's wallet | `lockdown` (rate-limited), co-sign early `unlock`         | move funds                |
 
-The guard key exists so daily check-ins and the duress PIN need **no wallet prompt**. If someone steals it, the worst they can do is check in for you or lock your vault. You rotate it with one owner signature, even during a lockdown.
+The guard key exists so daily check-ins and the duress PIN need **no wallet prompt**. With the Kora sponsor configured, it also needs **no SOL**: Kora pays the fee for its `pulse` and `lockdown`. If someone steals it, the worst they can do is check in for you or lock your vault. You rotate it with one owner signature, even during a lockdown.
 
 ### 3.3 The release plan (rules engine)
 
@@ -122,13 +123,13 @@ The program does no lending or staking calls (no CPI), so there is no extra smar
 
 On-chain, every rail pays a **Solana key**. For private rails that key is a **claim key**: a fresh keypair created by the _beneficiary's_ Deadman app, never used for anything else. The beneficiary's app then routes the money:
 
-|                             | Zcash rail                                                                                                                                                                          | Cloak rail                                                                                                                                                   |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Beneficiary sets up         | Security → Receive privately → a Zcash **unified `u1`** address (must be shielded-only)                                                                                             | Security → Receive privately → a Solana address to receive privately, or a Cloak shielded address                                                            |
-| What they send the owner    | a claim code `zcash:<claim key>`                                                                                                                                                    | a claim code `cloak:<claim key>`                                                                                                                             |
+|                             | Zcash rail                                                                                                                                                                                                                                                         | Cloak rail                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Beneficiary sets up         | Security → Receive privately → a Zcash **unified `u1`** address (must be shielded-only)                                                                                                                                                                            | Security → Receive privately → a Solana address to receive privately, or a Cloak shielded address                                                            |
+| What they send the owner    | a claim code `zcash:<claim key>`                                                                                                                                                                                                                                   | a claim code `cloak:<claim key>`                                                                                                                             |
 | After the tier releases     | The app gets a 1Click quote (verifies 1Click's signature on it) and sends the SOL from the claim key to the quote's deposit address (the route also supports USDC/USDT, but the app's button forwards SOL only for now). ZEC arrives **shielded** in ~2–3 minutes. | The app starts the Cloak SDK in a hidden WebView, proves a deposit with zero knowledge on the phone (~6 s on desktop), and Cloak's relay delivers privately. |
-| Fees on top of Deadman's 5% | about 0.2% (1Click) + 0.00032 ZEC network fee                                                                                                                                       | deposit free; private send to an address costs 0.3% + 0.005 SOL                                                                                              |
-| Networks                    | mainnet only                                                                                                                                                                        | mainnet only (Cloak has no devnet program)                                                                                                                   |
+| Fees on top of Deadman's 5% | about 0.2% (1Click) + 0.00032 ZEC network fee                                                                                                                                                                                                                      | deposit free; private send to an address costs 0.3% + 0.005 SOL                                                                                              |
+| Networks                    | mainnet only                                                                                                                                                                                                                                                       | mainnet only (Cloak has no devnet program)                                                                                                                   |
 
 **What stays visible** (judges will ask):
 
@@ -157,7 +158,7 @@ sequenceDiagram
   U->>A: choose PIN, then a different duress PIN
   U->>A: Build release plan (tiers, cadence, deposit)
   A->>A: create guard key in secure storage
-  A->>W: sign 1 tx: fund guard 0.01 SOL + create_vault + deposit
+  A->>W: sign 1 tx: create_vault + deposit (+ fund guard 0.01 SOL only without Kora)
   W-->>A: signed
   A->>P: send
 ```

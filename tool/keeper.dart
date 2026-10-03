@@ -53,6 +53,7 @@ Future<void> sweep(DeadmanClient client, Ed25519HDKeyPair keeper) async {
         final sig = await client.executeRuleWithKey(
           keeper,
           vaultOwner: v.owner,
+          planId: v.planId,
           index: i,
         );
         executed++;

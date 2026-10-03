@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
@@ -48,7 +50,7 @@ class VaultActions {
   }
 
   void _refresh() {
-    ref.invalidate(vaultProvider);
+    ref.invalidate(vaultsProvider);
     ref.invalidate(walletBalanceProvider);
     ref.invalidate(watchedVaultsProvider);
   }
@@ -62,7 +64,12 @@ class VaultActions {
     }
   }
 
+  Future<List<VaultState>> _plans() => _api.fetchVaults(_owner);
+
+  /// Creates a new plan with the next free id. Every plan uses this
+  /// device's guard key so one check-in covers all of them.
   Future<void> createVault({
+    required String label,
     required List<RuleSpec> rules,
     required int intervalSecs,
     required int lockSecs,
@@ -70,9 +77,15 @@ class VaultActions {
   }) async {
     final store = ref.read(secureStoreProvider);
     final guard = await store.loadGuard() ?? await store.createGuard();
+    final plans = await _plans();
+    final planId = plans.isEmpty
+        ? 0
+        : plans.map((v) => v.planId).reduce(max) + 1;
     await _signAndSend([
       await _api.buildCreateVault(
         owner: _owner,
+        planId: planId,
+        label: label,
         guard: guard.address,
         intervalSecs: intervalSecs,
         lockSecs: lockSecs,
@@ -90,32 +103,57 @@ class VaultActions {
     if (guard == null) {
       throw const ActionError('Guard key missing on this device');
     }
-    await _api.pulseWithGuard(guard, vaultOwner: _owner);
+    final active = [
+      for (final v in await _plans())
+        if (!v.completed && v.guard == guard.address) v.planId,
+    ];
+    if (active.isEmpty) {
+      throw const ActionError(
+        'Every plan has fully released; nothing to check in',
+      );
+    }
+    await _api.pulseWithGuard(guard, vaultOwner: _owner, planIds: active);
     HapticFeedback.heavyImpact();
     _refresh();
   }
 
   /// Silent: no prompt, no haptics. Used by the duress PIN and Panic.
+  /// Locks every plan this device guards.
   Future<void> lockdown() async {
     final guard = await ref.read(secureStoreProvider).loadGuard();
     if (guard == null) return;
-    await _api.lockdownWithGuard(guard, vaultOwner: _owner);
+    final ids = [
+      for (final v in await _plans())
+        if (v.guard == guard.address) v.planId,
+    ];
+    if (ids.isEmpty) return;
+    await _api.lockdownWithGuard(guard, vaultOwner: _owner, planIds: ids);
     _refresh();
   }
 
-  Future<void> deposit(int lamports) => _decoy(
+  Future<void> deposit(int planId, int lamports) => _decoy(
     () async => _signAndSend([
-      await _api.buildDeposit(owner: _owner, lamports: lamports),
+      await _api.buildDeposit(
+        owner: _owner,
+        planId: planId,
+        lamports: lamports,
+      ),
     ]),
   );
 
-  Future<void> withdraw(int lamports) => _decoy(
+  Future<void> withdraw(int planId, int lamports) => _decoy(
     () async => _signAndSend([
-      await _api.buildWithdrawSol(owner: _owner, lamports: lamports),
+      await _api.buildWithdrawSol(
+        owner: _owner,
+        planId: planId,
+        lamports: lamports,
+      ),
     ]),
   );
 
   Future<void> updatePolicy({
+    required int planId,
+    required String label,
     required int intervalSecs,
     required int lockSecs,
     required List<RuleSpec> rules,
@@ -124,6 +162,8 @@ class VaultActions {
     () async => _signAndSend([
       await _api.buildUpdatePolicy(
         owner: _owner,
+        planId: planId,
+        label: label,
         intervalSecs: intervalSecs,
         lockSecs: lockSecs,
         rules: rules,
@@ -132,20 +172,28 @@ class VaultActions {
     ]),
   );
 
-  /// Moves the guard to a fresh device key (e.g. after losing a phone).
+  /// Moves the guard of every plan to a fresh key on this device (e.g.
+  /// after losing a phone), in one wallet approval.
   Future<void> rotateGuard() async {
+    final ids = [for (final v in await _plans()) v.planId];
+    if (ids.isEmpty) throw const ActionError('You have no plans yet');
     final fresh = await ref.read(secureStoreProvider).createGuard();
     await _signAndSend([
-      await _api.buildSetGuard(owner: _owner, newGuard: fresh.address),
+      await _api.buildSetGuard(
+        owner: _owner,
+        planIds: ids,
+        newGuard: fresh.address,
+      ),
     ]);
   }
 
   /// Executes a due rule from the connected wallet. Anyone may execute;
   /// the payout destination is fixed on-chain.
-  Future<void> executeRule(String vaultOwner, int index) async => _signAndSend([
+  Future<void> executeRule(VaultState vault, int index) async => _signAndSend([
     await _api.buildExecuteRule(
       executor: _owner,
-      vaultOwner: vaultOwner,
+      vaultOwner: vault.owner,
+      planId: vault.planId,
       index: index,
     ),
   ]);
@@ -193,25 +241,29 @@ class VaultActions {
     return id;
   }
 
-  /// Swaps idle SOL into the yield token, then deposits it into the vault.
-  Future<void> earn(int lamports) => _decoy(() async {
+  /// Swaps wallet SOL into the yield token, then deposits it into a plan.
+  /// The swap goes through Jupiter's /execute: some routes need Jupiter's
+  /// co-signature, so it can't be sent through our own RPC.
+  Future<void> earn(int planId, int lamports) => _decoy(() async {
     final earn = ref.read(earnProvider);
     if (!earn.available) {
       throw const ActionError('Earn is only available on mainnet builds');
     }
-    await _signAndSend([
-      await earn.buildStake(owner: _owner, lamports: lamports),
-    ]);
+    final unsigned = await earn.buildStake(owner: _owner, lamports: lamports);
+    final signed = await ref.read(walletProvider).signTransactions([unsigned]);
+    await earn.execute(signed.single);
     final lst = await _api.tokenBalance(_owner, earn.lstMint);
     if (lst > 0) {
       await _signAndSend([
         await _api.buildDepositToken(
           owner: _owner,
+          planId: planId,
           mint: earn.lstMint,
           amount: lst,
         ),
       ]);
     }
+    _refresh();
   });
 
   /// Under duress, fund-moving actions look like a flaky wallet instead of

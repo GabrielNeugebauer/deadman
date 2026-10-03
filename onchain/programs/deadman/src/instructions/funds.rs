@@ -55,7 +55,8 @@ fn vault_transfer<'info>(
         });
         infos.push(acc.clone());
     }
-    let seeds: &[&[u8]] = &[VAULT_SEED, vault.owner.as_ref(), &[vault.bump]];
+    let plan_id = vault.plan_id.to_le_bytes();
+    let seeds: &[&[u8]] = &[VAULT_SEED, vault.owner.as_ref(), &plan_id, &[vault.bump]];
     invoke_signed(&ix, &infos, &[seeds]).map_err(Into::into)
 }
 
@@ -65,7 +66,7 @@ pub struct WithdrawSol<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized
     )]
@@ -91,7 +92,7 @@ pub struct WithdrawToken<'info> {
     pub owner: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, owner.key().as_ref()],
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized
     )]
@@ -144,7 +145,7 @@ pub struct ExecuteSolRule<'info> {
     pub executor: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.owner.as_ref()],
+        seeds = [VAULT_SEED, vault.owner.as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump
     )]
     pub vault: Box<Account<'info, Vault>>,
@@ -223,7 +224,7 @@ pub struct ExecuteTokenRule<'info> {
     pub executor: Signer<'info>,
     #[account(
         mut,
-        seeds = [VAULT_SEED, vault.owner.as_ref()],
+        seeds = [VAULT_SEED, vault.owner.as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump
     )]
     pub vault: Box<Account<'info, Vault>>,
