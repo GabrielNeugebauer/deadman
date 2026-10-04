@@ -86,7 +86,7 @@ flowchart LR
    - The beneficiary account passed in must equal `rule.beneficiary`, and the treasury must equal `config.treasury`.
    - The beneficiary receives `gross − fee`; the treasury receives `fee` at the rule's rail rate.
    - SOL rules: if the fee would leave a brand-new treasury account below rent, the fee goes to the beneficiary instead. If the net payout would leave a brand-new beneficiary account below rent, nothing moves and the rule stays pending (`BeneficiaryCannotReceive`); after the plan's grace period anyone may `skip_rule` it, so later rules are not blocked, and its share stays reserved for it.
-   - Token rules on a private rail: if the claim key holds less than 0.003 SOL and the vault has at least that much withdrawable, the vault sends it 0.003 SOL (`PRIVATE_GAS_STIPEND`).
+   - Token rules on a private rail: if the claim key holds less than the rail's stipend (0.012 SOL on Cloak, 0.003 SOL on Zcash) and the vault has at least that much spare SOL (withdrawable minus vesting commitments and skipped SOL tiers' shares), the vault tops it up by the stipend (`Rail::gas_stipend`: `CLOAK_GAS_STIPEND`, `ZCASH_GAS_STIPEND`).
    - `executed_at` and `paid` are recorded, and a `RuleExecuted` event logs the rail, amount, fee and executor.
 5. **Pulse after a partial release.** The clock restarts for every pending rule; executed rules stay executed. The owner can withdraw what is left as normal.
 6. **Plan change.** `update_policy` installs new pending tiers; tiers that paid or were skipped stay as history and can never pay twice. Once every tier has released, the plan starts over with only the new tiers.

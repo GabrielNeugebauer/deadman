@@ -58,4 +58,6 @@ pub enum DeadmanError {
     InvalidConfig,
     #[msg("Arithmetic overflow")]
     MathOverflow,
+    #[msg("Not a plan account in an older layout")]
+    NotLegacyVault,
 }

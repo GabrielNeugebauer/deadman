@@ -1,4 +1,10 @@
+import 'dart:typed_data';
+
+import 'package:deadman/rails/cloak_route.dart';
+import 'package:deadman/rails/rails.dart';
+import 'package:deadman/rails/zcash_route.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/secure_store.dart';
 import 'package:solana/base58.dart';
 import 'package:solana/solana.dart';
 
@@ -117,6 +123,10 @@ class FakeApi implements DeadmanApi {
 
   List<VaultState> plans;
   Object? fail;
+  final balances = <String, int>{};
+
+  /// Keyed by `owner:mint`.
+  final tokens = <String, int>{};
   final locked = <List<int>>[];
   final pulsed = <List<int>>[];
 
@@ -148,6 +158,304 @@ class FakeApi implements DeadmanApi {
   }) async {
     pulsed.add(planIds);
     return 'sig';
+  }
+
+  @override
+  Future<int> balance(String address) async => balances[address] ?? 0;
+
+  @override
+  Future<int> tokenBalance(String owner, String mint) async =>
+      tokens['$owner:$mint'] ?? 0;
+
+  /// Every batched balance lookup, in call order.
+  final balanceBatches = <List<(String, String)>>[];
+
+  @override
+  Future<List<int>> tokenBalances(List<(String, String)> accounts) async {
+    balanceBatches.add(accounts);
+    return [for (final (o, m) in accounts) tokens['$o:$m'] ?? 0];
+  }
+
+  /// Token deposits of each [buildCreateVault] call.
+  final createdDeposits = <Map<String, int>>[];
+
+  @override
+  Future<Uint8List> buildCreateVault({
+    required String owner,
+    required int planId,
+    required String label,
+    required String guard,
+    required int intervalSecs,
+    required int lockSecs,
+    required int skipGraceSecs,
+    required List<RuleSpec> rules,
+    int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
+  }) async {
+    createdDeposits.add(tokenDeposits);
+    return Uint8List(0);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+var _notes = 0;
+
+CloakNote note(int amount, {String? mint, bool spent = false}) => CloakNote(
+  commitment: (++_notes).toRadixString(16).padLeft(64, '0'),
+  amount: amount,
+  mint: mint,
+  blinding: 'ab' * 32,
+  spent: spent,
+);
+
+Future<Ed25519HDKeyPair> keyPair(int seed) =>
+    Ed25519HDKeyPair.fromPrivateKeyBytes(privateKey: List.filled(32, seed));
+
+/// Claim profiles held in memory.
+class FakeSecureStore implements SecureStore {
+  FakeSecureStore([List<ClaimProfile> profiles = const []])
+    : claims = {for (final p in profiles) p.rail: p};
+
+  final Map<Rail, ClaimProfile> claims;
+
+  @override
+  Future<ClaimProfile?> loadClaim(Rail rail) async => claims[rail];
+
+  @override
+  Future<List<ClaimProfile>> loadClaims() async => [
+    for (final r in [Rail.cloak, Rail.zcash]) ?claims[r],
+  ];
+
+  @override
+  Future<ClaimProfile> saveClaim(Rail rail, String destination) async =>
+      claims[rail] = ClaimProfile(
+        rail: rail,
+        key: claims[rail]?.key ?? await keyPair(40 + rail.index),
+        destination: destination,
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+typedef QuoteCall = ({String claimKey, String? mint, int amount, String to});
+
+/// 1Click without the network: quotes echo the request, [track] replays
+/// [statuses].
+class FakeZcashRoute implements ZcashRoute {
+  FakeZcashRoute({this.live = true});
+
+  bool live;
+  Object? fail;
+  final spendableBy = <String?, int>{};
+  final quotes = <QuoteCall>[];
+  final estimates = <QuoteCall>[];
+  final executed = <RouteQuote>[];
+  Object? executeFail;
+  List<String> statuses = const ['PROCESSING', 'SUCCESS'];
+  final tracked = <String>[];
+  static final depositAddress = addr(77);
+
+  @override
+  Rail get rail => Rail.zcash;
+
+  @override
+  bool get available => live;
+
+  @override
+  Future<int> spendable({
+    required String claimKey,
+    required String? inputMint,
+  }) async => spendableBy[inputMint] ?? 0;
+
+  RouteQuote _quote(QuoteCall c, {required bool dry}) => RouteQuote(
+    rail: Rail.zcash,
+    amountIn: c.amount,
+    inputMint: c.mint,
+    estimatedOut: '0.0034 ZEC',
+    expiresAt: DateTime.now().add(const Duration(minutes: 30)),
+    depositAddress: dry ? null : depositAddress,
+    raw: {
+      'quote': {
+        'amountInUsd': '5.00',
+        'amountOutUsd': '4.50',
+        'withdrawFee': '32000',
+      },
+    },
+  );
+
+  @override
+  Future<RouteQuote> quote({
+    required String claimKey,
+    required String? inputMint,
+    required int amount,
+    required String destination,
+  }) async {
+    if (fail != null) throw fail!;
+    final c = (
+      claimKey: claimKey,
+      mint: inputMint,
+      amount: amount,
+      to: destination,
+    );
+    quotes.add(c);
+    return _quote(c, dry: false);
+  }
+
+  @override
+  Future<RouteQuote> estimate({
+    required String claimKey,
+    required String? inputMint,
+    required int amount,
+    required String destination,
+  }) async {
+    if (fail != null) throw fail!;
+    final c = (
+      claimKey: claimKey,
+      mint: inputMint,
+      amount: amount,
+      to: destination,
+    );
+    estimates.add(c);
+    return _quote(c, dry: true);
+  }
+
+  @override
+  Future<String> execute({
+    required Ed25519HDKeyPair claimKey,
+    required RouteQuote quote,
+  }) async {
+    executed.add(quote);
+    if (executeFail != null) throw executeFail!;
+    return quote.depositAddress!;
+  }
+
+  @override
+  Future<String> status(String trackingId) async => statuses.last;
+
+  @override
+  Stream<String> track(
+    String depositAddress, {
+    Duration every = const Duration(seconds: 5),
+    Duration maxEvery = const Duration(minutes: 2),
+  }) {
+    tracked.add(depositAddress);
+    return Stream.fromIterable(statuses);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Cloak without a WebView or the network.
+class FakeCloakRoute implements CloakRoute {
+  FakeCloakRoute({this.live = true});
+
+  static final ownAddress = 'cloak:${'1' * 64}:${'2' * 64}';
+
+  bool live;
+  Object? fail;
+  Object? executeFail;
+  final quoted = <int>[];
+
+  @override
+  final int solFeeReserveLamports = 0;
+
+  @override
+  final int splFeeReserveLamports = CloakRoute.defaultSplFeeReserveLamports;
+  List<CloakNote> notes = const [];
+  final executed = <RouteQuote>[];
+  final withdrawals = <({List<CloakNote> notes, String destination})>[];
+  final statusCalls = <String>[];
+  List<String> statuses = const ['PENDING', 'SUCCESS'];
+  var _status = 0;
+  int scans = 0;
+
+  @override
+  Rail get rail => Rail.cloak;
+
+  @override
+  bool get available => live;
+
+  @override
+  String? get unavailableReason => live ? null : 'mainnet only';
+
+  @override
+  Future<RouteQuote> quote({
+    required String claimKey,
+    required String? inputMint,
+    required int amount,
+    required String destination,
+  }) async {
+    if (fail != null) throw fail!;
+    quoted.add(amount);
+    final shielded = destination.startsWith('cloak:');
+    return RouteQuote(
+      rail: Rail.cloak,
+      amountIn: amount,
+      inputMint: inputMint,
+      estimatedOut: shielded ? 'shielded' : 'after exit fee',
+      expiresAt: DateTime.now().add(const Duration(minutes: 10)),
+      raw: CloakQuoteData(
+        claimKey: claimKey,
+        shielded: shielded ? CloakAddress.parse(destination) : null,
+        publicRecipient: shielded ? null : destination,
+      ),
+    );
+  }
+
+  @override
+  Future<String> execute({
+    required Ed25519HDKeyPair claimKey,
+    required RouteQuote quote,
+  }) async {
+    executed.add(quote);
+    if (executeFail != null) throw executeFail!;
+    return 'cloakSig';
+  }
+
+  @override
+  Future<CloakAddress> receiveAddressFor(Ed25519HDKeyPair claimKey) async =>
+      CloakAddress.parse(ownAddress);
+
+  @override
+  Future<String> status(String trackingId) async {
+    statusCalls.add(trackingId);
+    return statuses[_status < statuses.length
+        ? _status++
+        : statuses.length - 1];
+  }
+
+  @override
+  Future<List<CloakNote>> scanReceived({
+    required Ed25519HDKeyPair claimKey,
+  }) async {
+    scans++;
+    if (fail != null) throw fail!;
+    return notes;
+  }
+
+  @override
+  Future<String> withdrawReceived({
+    required Ed25519HDKeyPair claimKey,
+    required List<CloakNote> notes,
+    required String destination,
+  }) async {
+    withdrawals.add((notes: notes, destination: destination));
+    return 'withdrawSig';
+  }
+
+  @override
+  Future<CloakSelfTest> selfTest({String? mint}) async {
+    if (fail != null) throw fail!;
+    return const CloakSelfTest(
+      download: Duration(milliseconds: 1200),
+      prove: Duration(milliseconds: 5600),
+      total: Duration(milliseconds: 6900),
+      steps: [],
+    );
   }
 
   @override

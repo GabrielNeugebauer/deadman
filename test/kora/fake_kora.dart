@@ -24,6 +24,10 @@ class FakeKora {
   int feeInLamports = 10000;
   int? feeInToken = 2500;
 
+  /// `payment_address` in estimates, when it should differ from
+  /// [paymentAddress] (a tampered response).
+  String? estimatePaymentAddress;
+
   /// Next estimateTransactionFee answered with this Kora error message.
   String? failNextEstimate;
 
@@ -86,7 +90,7 @@ class FakeKora {
               ? null
               : feeInToken,
           'signer_pubkey': signer,
-          'payment_address': paymentAddress,
+          'payment_address': estimatePaymentAddress ?? paymentAddress,
         });
       case 'getConfig':
         return ok({

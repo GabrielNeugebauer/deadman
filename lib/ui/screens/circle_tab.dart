@@ -5,12 +5,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/assets.dart';
+import '../../state/plan_math.dart';
+import '../../state/private_rails.dart';
 import '../../state/providers.dart';
 import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
+import '../web/web_ui.dart';
 import '../widgets/feedback.dart';
+import '../widgets/private_funds.dart';
 import '../widgets/vesting_progress.dart';
 
 /// Family Circle: vaults naming this wallet (or this device's claim keys)
@@ -24,19 +28,41 @@ class CircleTab extends ConsumerWidget {
     final me = ref.watch(sessionProvider.select((s) => s.owner)) ?? '';
     final watched = ref.watch(watchedVaultsProvider);
     final keys = ref.watch(myBeneficiaryKeysProvider).value ?? {me};
+    void refresh() {
+      ref.invalidate(watchedVaultsProvider);
+      ref.invalidate(watchedTokenBalancesProvider);
+      ref.invalidate(claimFundsProvider);
+      ref.invalidate(transferStatusProvider);
+    }
+
     return SafeArea(
       child: RefreshIndicator(
-        onRefresh: () async => ref.invalidate(watchedVaultsProvider),
+        onRefresh: () async => refresh(),
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
-            Text('Family Circle', style: t.headlineMedium),
+            Row(
+              children: [
+                Text('Family Circle', style: t.headlineMedium),
+                const Spacer(),
+                // No pull-to-refresh with a mouse.
+                if (ref.watch(isWebProvider))
+                  IconButton(
+                    tooltip: 'Refresh',
+                    onPressed: refresh,
+                    icon: const Icon(Icons.refresh),
+                  ),
+              ],
+            ),
             const SizedBox(height: 6),
             const Text(
               'People who named you in their release or vesting plan.',
               style: TextStyle(color: DmColors.muted),
             ),
             const SizedBox(height: 20),
+            const PrivateFundsSection(),
+            const ShieldedInboxTile(),
+            const PrivateTransfersCard(),
             ...watched.when(
               loading: () => [const Center(child: CircularProgressIndicator())],
               error: (e, _) => [
@@ -80,37 +106,10 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
     if (mounted) setState(() => _busy = false);
   }
 
-  Future<void> _skip(VaultState v, int index, {required bool own}) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
-        title: Text('Skip tier ${index + 1}?'),
-        content: Text(
-          own
-              ? 'Try "Release this tier" first. Skipping only lets later tiers continue; '
-                    'this tier\'s share stays reserved for you and you can still claim it later.'
-              : 'Tier ${index + 1} could not pay within the plan\'s grace period and is blocking yours. '
-                    'Skipping only lets later tiers continue; this tier\'s share stays reserved '
-                    'for its beneficiary, who can still claim it.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Skip'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    await _run(
-      () => ref.read(actionsProvider).skipRule(v, index),
-      'Tier skipped; its share is reserved and later tiers can continue',
-    );
+  Future<void> _route(RuleState r) async {
+    setState(() => _busy = true);
+    await routePrivatelyFlow(context, ref, r.rail, r.mint);
+    if (mounted) setState(() => _busy = false);
   }
 
   @override
@@ -151,6 +150,13 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
         : ('Alive', DmColors.alive);
 
     final actions = ref.read(actionsProvider);
+    final tokens = ref
+        .watch(watchedTokenBalancesProvider)
+        .whenOrNull(data: (b) => b[v.address] ?? const <String, int>{});
+    String forWhom(RuleState r) =>
+        widget.keys.contains(r.beneficiary) ? 'you' : short(r.beneficiary);
+    final live = ref.watch(privateRailsLiveProvider);
+    final web = ref.watch(isWebProvider);
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Card(
@@ -208,14 +214,14 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     rule: r,
                     now: now,
                     busy: _busy,
+                    live: live,
+                    web: web,
+                    funded: tierFunded(v, i, tokens),
                     onClaim: () => _run(
                       () => actions.releaseVested(v, i),
                       'Vested amount claimed',
                     ),
-                    onRoute: () => _run(
-                      () async => actions.routePrivately(r.rail),
-                      'Routing to your ${r.rail.label} address',
-                    ),
+                    onRoute: () => _route(r),
                   ),
                 ],
               if (!v.isVesting)
@@ -244,7 +250,7 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                       style: FilledButton.styleFrom(
                         backgroundColor: DmColors.danger,
                       ),
-                      onPressed: _busy
+                      onPressed: _busy || tierFunded(v, i, tokens) == false
                           ? null
                           : () => _run(
                               () => actions.executeRule(v, i),
@@ -258,60 +264,39 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                             : 'Release this tier',
                       ),
                     ),
-                    if (r.rail != Rail.solana)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 6),
-                        child: Text(
-                          'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
-                          style: TextStyle(
-                            color: DmColors.muted,
-                            fontSize: 12,
-                            height: 1.35,
-                          ),
-                        ),
+                    if (tierFunded(v, i, tokens) == false)
+                      _Note(waitingForFunds(r.mint))
+                    else if (r.rail != Rail.solana)
+                      const _Note(
+                        'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
                       ),
                   ],
+                  // Tiers past due and grace that cannot pay: the keeper
+                  // skips them; nobody does it by hand.
                   for (final j in [
                     for (var j = 0; j <= i; j++)
                       if ((j == i || v.rules[j].mint == r.mint) &&
-                          v.canSkip(j, now))
+                          v.canSkip(j, now) &&
+                          tierFunded(v, j, tokens) != true)
                         j,
-                  ]) ...[
-                    const SizedBox(height: 10),
-                    OutlinedButton(
-                      onPressed: _busy ? null : () => _skip(v, j, own: j == i),
-                      child: Text(
-                        j == i
-                            ? 'Skip this tier (it could not pay)'
-                            : 'Skip blocking tier ${j + 1} (it could not pay)',
-                      ),
+                  ])
+                    _Note(
+                      '${j == i ? '' : 'Tier ${j + 1} could not pay and holds yours back. '}'
+                      'Deadman skips it automatically after the grace period; '
+                      'its share stays reserved for ${forWhom(v.rules[j])}',
                     ),
-                    const Padding(
-                      padding: EdgeInsets.only(top: 6),
-                      child: Text(
-                        'This tier has been due longer than the plan\'s grace period. Skipping only lets '
-                        'later tiers continue; this tier\'s share stays reserved for its beneficiary.',
-                        style: TextStyle(
-                          color: DmColors.muted,
-                          fontSize: 12,
-                          height: 1.35,
-                        ),
-                      ),
-                    ),
-                  ],
                   if (r.executed &&
                       r.rail != Rail.solana &&
-                      r.mint == null) ...[
+                      routableMint(r.mint)) ...[
                     const SizedBox(height: 10),
                     OutlinedButton.icon(
-                      onPressed: _busy
-                          ? null
-                          : () => _run(
-                              () async => actions.routePrivately(r.rail),
-                              'Routing to your ${r.rail.label} address',
-                            ),
+                      onPressed: _busy || !live ? null : () => _route(r),
                       icon: Icon(r.rail.icon),
-                      label: Text('Route privately via ${r.rail.label}'),
+                      label: Text(
+                        live
+                            ? 'Route privately via ${r.rail.label}'
+                            : routeOffLabel(r.rail.label, web: web),
+                      ),
                     ),
                   ],
                 ],
@@ -331,6 +316,9 @@ class _VestingClaim extends StatelessWidget {
     required this.rule,
     required this.now,
     required this.busy,
+    required this.live,
+    required this.web,
+    required this.funded,
     required this.onClaim,
     required this.onRoute,
   });
@@ -340,6 +328,11 @@ class _VestingClaim extends StatelessWidget {
   final RuleState rule;
   final int now;
   final bool busy;
+  final bool live;
+  final bool web;
+
+  /// The plan holds some of the schedule's asset; null when unknown.
+  final bool? funded;
   final VoidCallback onClaim;
   final VoidCallback onRoute;
 
@@ -359,33 +352,49 @@ class _VestingClaim extends StatelessWidget {
           const SizedBox(height: 10),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: DmColors.plus),
-            onPressed: busy ? null : onClaim,
+            onPressed: busy || funded == false ? null : onClaim,
             child: Text('Claim vested ${amountText(p.claimable, rule.mint)}'),
           ),
-          if (rule.rail != Rail.solana)
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: Text(
-                'Claiming from your wallet links it to this payout.',
-                style: TextStyle(
-                  color: DmColors.muted,
-                  fontSize: 12,
-                  height: 1.35,
-                ),
-              ),
-            ),
+          if (funded == false)
+            _Note(waitingForFunds(rule.mint))
+          else if (rule.rail != Rail.solana)
+            const _Note('Claiming from your wallet links it to this payout.'),
         ],
-        if (rule.paid > 0 && rule.rail != Rail.solana && rule.mint == null) ...[
+        if (rule.paid > 0 &&
+            rule.rail != Rail.solana &&
+            routableMint(rule.mint)) ...[
           const SizedBox(height: 10),
           OutlinedButton.icon(
-            onPressed: busy ? null : onRoute,
+            onPressed: busy || !live ? null : onRoute,
             icon: Icon(rule.rail.icon),
-            label: Text('Route privately via ${rule.rail.label}'),
+            label: Text(
+              live
+                  ? 'Route privately via ${rule.rail.label}'
+                  : routeOffLabel(rule.rail.label, web: web),
+            ),
           ),
         ],
       ],
     );
   }
+}
+
+String waitingForFunds(String? mint) =>
+    'Waiting for funds: this plan holds no ${assetSymbol(mint)} yet';
+
+class _Note extends StatelessWidget {
+  const _Note(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 6),
+    child: Text(
+      text,
+      style: const TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35),
+    ),
+  );
 }
 
 class _Empty extends StatelessWidget {

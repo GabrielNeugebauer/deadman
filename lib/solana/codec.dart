@@ -27,10 +27,15 @@ abstract final class Disc {
   static const revokeVesting = [12, 252, 252, 168, 39, 101, 98, 9];
   static const releaseVestedSol = [136, 188, 48, 45, 14, 211, 200, 228];
   static const releaseVestedToken = [50, 241, 129, 168, 233, 106, 179, 16];
+  static const recoverLegacyVault = [202, 5, 20, 4, 206, 216, 105, 134];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
 }
+
+/// `Vault::SPACE` (8 + `Vault::INIT_SPACE`). A Vault account of any other
+/// size is in an older layout (see `recover_legacy_vault`).
+const vaultAccountSize = 1390;
 
 /// Mirrors `onchain/programs/deadman/src/constants.rs`.
 abstract final class Limits {
@@ -46,7 +51,16 @@ abstract final class Limits {
   static const maxSkipGraceSecs = 366 * 86400;
   static const minLockSecs = 60;
   static const maxLockSecs = 30 * 86400;
-  static const privateGasStipend = 3000000;
+  static const cloakGasStipend = 12000000;
+  static const zcashGasStipend = 3000000;
+
+  /// SOL a token payout on [rail] tops a claim key holding less up with
+  /// (`Rail::gas_stipend`), when the vault has that much spare.
+  static int gasStipend(Rail rail) => switch (rail) {
+    Rail.solana => 0,
+    Rail.cloak => cloakGasStipend,
+    Rail.zcash => zcashGasStipend,
+  };
   static const maxVestSecs = 20 * 366 * 86400;
   static const maxVestStartSkewSecs = 366 * 86400;
 }
@@ -121,11 +135,11 @@ class BorshWriter {
     4,
     (d) => d.setUint32(0, _range(v, 0, 0xffffffff, 'u32'), Endian.little),
   );
-  void i64(int v) => _num(8, (d) => d.setInt64(0, v, Endian.little));
+  void i64(int v) => _num(8, (d) => _setInt64(d, v));
 
-  /// Dart ints are signed 64-bit, so only 0..2^63-1 is representable.
-  void u64(int v) =>
-      _num(8, (d) => d.setUint64(0, _range(v, 0, null, 'u64'), Endian.little));
+  /// Dart ints are signed 64-bit, so only 0..2^63-1 is representable
+  /// (0..2^53 exactly when compiled to JavaScript).
+  void u64(int v) => _num(8, (d) => _setInt64(d, _range(v, 0, null, 'u64')));
   void pubkey(String v) => _b.add(Ed25519HDPublicKey.fromBase58(v).bytes);
 
   /// Borsh `String`: u32 byte length + UTF-8.
@@ -172,6 +186,15 @@ class BorshWriter {
 
   Uint8List toBytes() => _b.toBytes();
 
+  /// As two 32-bit halves: ByteData's 64-bit accessors throw when compiled
+  /// to JavaScript.
+  static void _setInt64(ByteData d, int v) {
+    final lo = v & 0xffffffff;
+    d
+      ..setUint32(0, lo, Endian.little)
+      ..setUint32(4, ((v - lo) ~/ 0x100000000) & 0xffffffff, Endian.little);
+  }
+
   void _num(int len, void Function(ByteData) set) {
     final d = ByteData(len);
     set(d);
@@ -196,8 +219,19 @@ class BorshReader {
   int u8() => _d.getUint8(_take(1));
   int u16() => _d.getUint16(_take(2), Endian.little);
   int u32() => _d.getUint32(_take(4), Endian.little);
-  int i64() => _d.getInt64(_take(8), Endian.little);
-  int u64() => _d.getUint64(_take(8), Endian.little);
+  int i64() => _int64(signed: true);
+  int u64() => _int64(signed: false);
+
+  /// Same results as getInt64/getUint64 on native platforms, which
+  /// JavaScript lacks.
+  int _int64({required bool signed}) {
+    final at = _take(8);
+    final lo = _d.getUint32(at, Endian.little);
+    final hi = signed
+        ? _d.getInt32(at + 4, Endian.little)
+        : _d.getUint32(at + 4, Endian.little);
+    return hi * 0x100000000 + lo;
+  }
 
   bool boolean() => switch (u8()) {
     0 => false,
@@ -330,6 +364,12 @@ Uint8List encodeSkipRule(int index) =>
     (BorshWriter()
           ..bytes(Disc.skipRule)
           ..u8(index))
+        .toBytes();
+
+Uint8List encodeRecoverLegacyVault(int planId) =>
+    (BorshWriter()
+          ..bytes(Disc.recoverLegacyVault)
+          ..u16(planId))
         .toBytes();
 
 /// Tiers `update_policy` keeps as history in front of the new rules: every
@@ -469,6 +509,7 @@ VaultState decodeVault(
   final revocable = r.boolean();
   final revokedAt = r.i64();
   final rentPayer = r.pubkey();
+  final rentPaid = r.u64();
   final count = r.u32();
   if (count > Limits.maxRules) throw FormatException('Bad rule count $count');
   final rules = List.generate(
@@ -489,7 +530,10 @@ VaultState decodeVault(
     ),
   );
   final label = r.string();
-  r.u8(); // bump
+  r.u8(); // bump; 64 reserved (zero) bytes follow.
+  final rentReserve = rentPaid > rentExemptMinimum
+      ? rentPaid
+      : rentExemptMinimum;
   return VaultState(
     address: address,
     owner: owner,
@@ -509,14 +553,13 @@ VaultState decodeVault(
     bestStreak: bestStreak,
     rules: rules,
     lamports: lamports,
-    withdrawableLamports: lamports > rentExemptMinimum
-        ? lamports - rentExemptMinimum
-        : 0,
+    withdrawableLamports: lamports > rentReserve ? lamports - rentReserve : 0,
     kind: kind,
     startAt: startAt,
     revocable: revocable,
     revokedAt: revokedAt,
     rentPayer: rentPayer,
+    rentPaid: rentPaid,
   );
 }
 
@@ -676,6 +719,16 @@ Instruction closeVaultIx({
   _w(vaultPda(owner, planId).address),
   _w(rentPayer),
 ], Disc.closeVault);
+
+/// `recover_legacy_vault`: closes [owner]'s plan [planId] left in an older
+/// account layout and sends all its lamports to the owner.
+Instruction recoverLegacyVaultIx({
+  required String owner,
+  required int planId,
+}) => deadmanIx([
+  _w(owner, signer: true),
+  _w(vaultPda(owner, planId).address),
+], encodeRecoverLegacyVault(planId));
 
 /// [payer] (default: the owner) funds the vault ATA if it does not exist.
 List<Instruction> depositTokenIxs({

@@ -118,7 +118,7 @@ beneficiary · rail · asset (SOL or USDC in the app) · total · cliff · durat
 
 - **No subscription.** Creating a vault, depositing, checking in and locking are free (Solana network fees only, paid in SOL, or in USDC through the paymaster, §3.8).
 - **Fee on release only**, charged on-chain from each payout, inheritance tier or vesting release: **2% on the Solana rail, 5% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
-- **Why the private rails cost more:** the beneficiary gets privacy and cross-chain delivery, and the payout also carries a 0.003 SOL gas stipend so their claim key can route the funds.
+- **Why the private rails cost more:** the beneficiary gets privacy and cross-chain delivery, and a token payout also carries a SOL gas stipend (0.012 SOL on Cloak, 0.003 SOL on Zcash) so their claim key can route the funds.
 - **Why the fee lives in the program, not with the rail operators:** we measured NEAR Intents' `appFees` live. The fee you set is **split 50/50 with 1Click** and capped at 5% total, so a Deadman 5% through NEAR is impossible (2.5% maximum), and the fee would land inside NEAR, not in our Solana treasury. Charging on-chain is predictable and enforced the same way on every rail.
 - If the treasury can't accept a tiny SOL fee (rent rules), the fee is waived to the beneficiary instead of blocking the payout.
 
@@ -218,7 +218,7 @@ sequenceDiagram
   K->>P: execute_sol_rule(i) / execute_token_rule(i)
   P->>P: check due, not executed, earlier same-asset tiers done, payout > 0
   Note over K,P: a tier that still can't pay after the plan's grace period<br/>can be skipped by anyone (skip_rule):<br/>later tiers continue, its share stays reserved and claimable
-  P->>B: payout minus fee (+0.003 SOL stipend on private token tiers)
+  P->>B: payout minus fee (+0.012/0.003 SOL stipend on Cloak/Zcash token tiers)
   P->>T: 2% or 5% fee
 ```
 

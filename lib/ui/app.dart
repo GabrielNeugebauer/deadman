@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +10,7 @@ import 'screens/pulse_tab.dart';
 import 'screens/settings_tab.dart';
 import 'screens/welcome_screen.dart';
 import 'theme.dart';
+import 'web/web_ui.dart';
 
 class DeadmanApp extends StatelessWidget {
   const DeadmanApp({super.key});
@@ -18,6 +20,8 @@ class DeadmanApp extends StatelessWidget {
     title: 'Deadman',
     debugShowCheckedModeBanner: false,
     theme: buildTheme(),
+    // Browser windows can be desktop-wide; the app stays phone-shaped.
+    builder: kIsWeb ? (context, child) => WebFrame(child: child!) : null,
     home: const _Gate(),
   );
 }

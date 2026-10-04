@@ -1,5 +1,6 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/assets.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/screens/pulse_tab.dart';
 import 'package:flutter/material.dart';
@@ -9,7 +10,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
 
-Future<void> _pump(WidgetTester tester, List<VaultState> plans) async {
+Future<void> _pump(
+  WidgetTester tester,
+  List<VaultState> plans, {
+  Map<String, Map<String, int>> planTokens = const {},
+}) async {
   tester.view.physicalSize = const Size(1200, 6000);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -22,6 +27,8 @@ Future<void> _pump(WidgetTester tester, List<VaultState> plans) async {
         vaultsProvider.overrideWith((ref) async => plans),
         guardAddressProvider.overrideWith((ref) async => addr(2)),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
+        planTokenBalancesProvider.overrideWith((ref) async => planTokens),
+        walletTokenProvider.overrideWith((ref, mint) async => 7000000),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
@@ -95,6 +102,61 @@ void main() {
     await tester.tap(find.text('Vesting'));
     await tester.pumpAndSettle();
     expect(find.text('New vesting plan'), findsOneWidget);
+    await _unmount(tester);
+  });
+
+  testWidgets('a plan without the asset of a pending tier warns and offers '
+      'a deposit of that asset', (tester) async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final usdc = AppConfig.usdcMint;
+    final kids = vault(
+      planId: 0,
+      label: 'Kids',
+      guard: addr(2),
+      lastPulse: now,
+      ownerLastSeen: now,
+      withdrawableLamports: 1000000000,
+      rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+    );
+    await _pump(
+      tester,
+      [kids],
+      planTokens: {
+        kids.address: {usdc: 0},
+      },
+    );
+
+    expect(find.text('No USDC in this plan'), findsOneWidget);
+    expect(find.text('No SOL in this plan'), findsNothing);
+    await tester.tap(find.text('Deposit USDC'));
+    await tester.pumpAndSettle();
+    expect(find.text('Deposit USDC'), findsWidgets);
+    expect(find.text('7 USDC in your wallet'), findsOneWidget);
+    expect(find.byType(SegmentedButton<AssetInfo>), findsNothing);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await _unmount(tester);
+  });
+
+  testWidgets('a funded plan shows no funding warning', (tester) async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final usdc = AppConfig.usdcMint;
+    final kids = vault(
+      planId: 0,
+      guard: addr(2),
+      lastPulse: now,
+      ownerLastSeen: now,
+      withdrawableLamports: 1000000000,
+      rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+    );
+    await _pump(
+      tester,
+      [kids],
+      planTokens: {
+        kids.address: {usdc: 1},
+      },
+    );
+    expect(find.textContaining('in this plan'), findsNothing);
     await _unmount(tester);
   });
 }

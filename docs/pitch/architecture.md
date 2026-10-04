@@ -93,7 +93,7 @@ flowchart LR
 1. **Silence.** No check-in, so `last_pulse + after_secs` passes. (`state.rs` `rule_due_at`)
 2. **Anyone triggers.** The keeper or the heir calls `execute_sol_rule` / `execute_token_rule`. (`funds.rs`; keeper skips zero or unprofitable payouts: `tool/keeper.dart`)
 3. **Program checks.** Due, not yet paid, earlier tiers of that asset settled, beneficiary and treasury match the stored ones. (`state.rs` `check_executable`; `funds.rs` `require_keys_eq!`, `address = config.treasury`)
-4. **Pays.** Heir gets the net; treasury gets 2% (Solana rail) or 5% (private rails). Private token tiers also get 0.003 SOL for gas. (`state.rs` `split_fee`; `tool/init_config.dart` defaults 200/500 bps; `constants.rs` `PRIVATE_GAS_STIPEND`)
+4. **Pays.** Heir gets the net; treasury gets 2% (Solana rail) or 5% (private rails). Private token tiers also get SOL for gas (0.012 on Cloak, 0.003 on Zcash). (`state.rs` `split_fee`; `tool/init_config.dart` defaults 200/500 bps; `constants.rs` `CLOAK_GAS_STIPEND` / `ZCASH_GAS_STIPEND`)
 5. **Stuck tier? Skip, not steal.** After the owner-chosen grace period anyone may `skip_rule`; its share stays reserved for that heir. Private-rail heirs then route to shielded ZEC or Cloak from their phone. (`funds.rs` `handle_skip_rule`, `state.rs` `reserved_for`; `lib/rails/`)
 
 **Side panel, "Vesting, same program":** linear vesting with a cliff, revocable or irrevocable. Releases ignore check-ins; the owner can't withdraw what is still owed; revoking keeps what already vested. (`instructions/vault.rs` `handle_create_vesting`, `handle_revoke_vesting`; `state.rs` `vested`, `committed`; `funds.rs` `release_vested_sol/token`)

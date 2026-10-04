@@ -66,9 +66,32 @@ class KoraClient {
   }) : _http = httpClient ?? http.Client();
 
   /// Null when [url] is empty, i.e. Kora is not configured for this build.
-  static KoraClient? fromConfig(String url) => url.isEmpty
-      ? null
-      : KoraClient(Uri.parse(url), apiKey: AppConfig.koraApiKey);
+  /// Throws [ArgumentError] for a URL [checkUrl] refuses.
+  static KoraClient? fromConfig(
+    String url, {
+    bool mainnet = AppConfig.isMainnet,
+  }) {
+    if (url.isEmpty) return null;
+    checkUrl(url, mainnet: mainnet);
+    return KoraClient(Uri.parse(url), apiKey: AppConfig.koraApiKey);
+  }
+
+  /// A Kora URL must be https; plain http only on devnet (audit M-3: on an
+  /// open network anyone on the path could rewrite the fee and the payer).
+  static void checkUrl(String url, {required bool mainnet}) {
+    final uri = Uri.tryParse(url);
+    final scheme = uri?.scheme;
+    if (uri != null &&
+        uri.host.isNotEmpty &&
+        (scheme == 'https' || (!mainnet && scheme == 'http'))) {
+      return;
+    }
+    throw ArgumentError.value(
+      url,
+      'url',
+      mainnet ? 'must be an https URL on mainnet' : 'must be an http(s) URL',
+    );
+  }
 
   final Uri url;
 

@@ -44,8 +44,9 @@ get_config = true
 
 [validation]
 # Caps both the network fee and the fee payer's outflow (plan tier): ONE
-# vault created with payer = Kora (8 + Vault::INIT_SPACE = 1318 bytes ->
-# 7_345_680 lamports rent) + <= 2 ATAs (2 x 2_039_280) + <= 50_000 fee.
+# vault created with payer = Kora (Vault::SPACE = 1390 bytes -> 7_711_440
+# lamports rent) + <= 2 ATAs (2 x 1_488_440; 2 x 1_513_840 for Token-2022)
+# + <= 50_000 fee = 10_738_320 (10_789_120).
 max_allowed_lamports = 11500000
 max_signatures = 2                    # Kora + the owner
 price_source = "Mock"                 # Jupiter has no devnet prices; see docs/KORA.md

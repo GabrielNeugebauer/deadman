@@ -168,6 +168,34 @@ void main() {
     );
   });
 
+  test('Kora URLs: https everywhere, plain http only on devnet (M-3)', () {
+    for (final ok in ['https://k.test', 'https://k.test:8081/']) {
+      KoraClient.checkUrl(ok, mainnet: true);
+      KoraClient.checkUrl(ok, mainnet: false);
+    }
+    KoraClient.checkUrl('http://192.168.0.2:8081', mainnet: false);
+    for (final bad in ['http://192.168.0.2:8081', 'k.test', 'ftp://k.test']) {
+      expect(
+        () => KoraClient.checkUrl(bad, mainnet: true),
+        throwsArgumentError,
+        reason: bad,
+      );
+    }
+    expect(
+      () => KoraClient.checkUrl('k.test:8081', mainnet: false),
+      throwsArgumentError,
+    );
+    expect(
+      () => KoraClient.fromConfig('http://k.test', mainnet: true),
+      throwsArgumentError,
+    );
+    expect(KoraClient.fromConfig('', mainnet: true), isNull);
+    expect(
+      KoraClient.fromConfig('http://k.test', mainnet: false)?.url.host,
+      'k.test',
+    );
+  });
+
   test('fromConfig is null for an empty URL', () {
     expect(KoraClient.fromConfig(''), isNull);
     expect(KoraClient.fromConfig('https://k.test')?.url.host, 'k.test');

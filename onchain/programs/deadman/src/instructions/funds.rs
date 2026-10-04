@@ -9,36 +9,51 @@ use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{split_fee, Config, PlanKind, Vault},
+    state::{split_fee, Config, PlanKind, Rail, Vault},
 };
 
-fn withdrawable_lamports(vault: &AccountInfo) -> Result<u64> {
-    let rent = Rent::get()?.minimum_balance(vault.data_len());
-    Ok(vault.lamports().saturating_sub(rent))
+/// Lamports above the rent reserve (see [`Vault::rent_reserve`]).
+fn withdrawable_lamports(vault: &Account<Vault>) -> Result<u64> {
+    let info = vault.to_account_info();
+    Ok(info
+        .lamports()
+        .saturating_sub(vault.rent_reserve(info.data_len())?))
+}
+
+/// Private-rail token payouts also send the rail's SOL stipend so a fresh
+/// claim key can pay to route the tokens onward, but only when the key
+/// holds less and only from SOL nobody else is owed (vesting commitments
+/// and shares reserved for skipped SOL tiers stay untouched).
+/// At most once per rule ([`Vault::stipend_paid`]), so a beneficiary who
+/// spends it between vesting releases cannot drain the owner's spare SOL.
+fn pay_stipend<'info>(
+    vault: &mut Account<'info, Vault>,
+    beneficiary: &UncheckedAccount<'info>,
+    rail: Rail,
+    index: usize,
+) -> Result<()> {
+    let stipend = rail.gas_stipend();
+    let bit = u32::try_from(index)
+        .ok()
+        .and_then(|i| 1u8.checked_shl(i))
+        .ok_or(DeadmanError::InvalidRuleIndex)?;
+    if stipend == 0 || vault.stipend_paid & bit != 0 || beneficiary.lamports() >= stipend {
+        return Ok(());
+    }
+    let spare = withdrawable_lamports(vault)?
+        .saturating_sub(vault.committed(None)?)
+        .saturating_sub(vault.reserved_for(None, usize::MAX)?);
+    if spare >= stipend {
+        vault.sub_lamports(stipend)?;
+        beneficiary.add_lamports(stipend)?;
+        vault.stipend_paid |= bit;
+    }
+    Ok(())
 }
 
 /// Vault-signed `transfer_checked`. `extra` (the instruction's remaining
 /// accounts) is appended so Token-2022 transfer-hook mints can resolve their
 /// hook accounts; the token program ignores them otherwise.
-/// Private-rail token payouts also send a little SOL so a fresh claim key
-/// can pay to route the tokens onward, from SOL nobody else is owed.
-fn pay_stipend<'info>(
-    vault: &Account<'info, Vault>,
-    beneficiary: &UncheckedAccount<'info>,
-    rail: crate::state::Rail,
-) -> Result<()> {
-    if !rail.is_private() || beneficiary.lamports() >= PRIVATE_GAS_STIPEND {
-        return Ok(());
-    }
-    let spare =
-        withdrawable_lamports(&vault.to_account_info())?.saturating_sub(vault.committed(None)?);
-    if spare >= PRIVATE_GAS_STIPEND {
-        vault.sub_lamports(PRIVATE_GAS_STIPEND)?;
-        beneficiary.add_lamports(PRIVATE_GAS_STIPEND)?;
-    }
-    Ok(())
-}
-
 fn vault_transfer<'info>(
     token_program: &Interface<'info, TokenInterface>,
     from: &InterfaceAccount<'info, TokenAccount>,
@@ -96,7 +111,7 @@ pub fn handle_withdraw_sol(ctx: Context<WithdrawSol>, amount: u64) -> Result<()>
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
     vault.require_unlocked(now)?;
-    let free = withdrawable_lamports(&vault.to_account_info())?;
+    let free = withdrawable_lamports(vault)?;
     require!(amount <= free, DeadmanError::InsufficientFunds);
     require!(
         amount <= free.saturating_sub(vault.committed(None)?),
@@ -192,7 +207,6 @@ pub struct ExecuteSolRule<'info> {
 pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let i = usize::from(index);
-    let vault_info = ctx.accounts.vault.to_account_info();
     ctx.accounts.vault.require_kind(PlanKind::Inheritance)?;
     ctx.accounts.vault.check_executable(i, None, now)?;
     let rule = ctx.accounts.vault.rules[i];
@@ -202,7 +216,7 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
         DeadmanError::Unauthorized
     );
 
-    let balance = withdrawable_lamports(&vault_info)?;
+    let balance = withdrawable_lamports(&ctx.accounts.vault)?;
     let gross = ctx.accounts.vault.payout_gross(i, balance)?;
     // An empty payout would burn the tier; leave it pending instead.
     require!(gross > 0, DeadmanError::NothingToPay);
@@ -342,7 +356,12 @@ pub fn handle_execute_token_rule<'info>(
         fee,
     )?;
 
-    pay_stipend(&ctx.accounts.vault, &ctx.accounts.beneficiary, rule.rail)?;
+    pay_stipend(
+        &mut ctx.accounts.vault,
+        &ctx.accounts.beneficiary,
+        rule.rail,
+        i,
+    )?;
 
     let vault = &mut ctx.accounts.vault;
     vault.rules[i].executed_at = now;
@@ -386,7 +405,7 @@ pub fn handle_skip_rule(ctx: Context<SkipRule>, index: u8) -> Result<()> {
     ctx.accounts.vault.check_skippable(i, now)?;
     let mint = ctx.accounts.vault.rules[i].mint;
     let balance = match mint {
-        None => withdrawable_lamports(&ctx.accounts.vault.to_account_info())?,
+        None => withdrawable_lamports(&ctx.accounts.vault)?,
         Some(mint) => {
             let token = ctx
                 .accounts
@@ -434,7 +453,7 @@ pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Res
     );
 
     let due = vault.vested(i, now)?.saturating_sub(rule.released);
-    let gross = due.min(withdrawable_lamports(&vault.to_account_info())?);
+    let gross = due.min(withdrawable_lamports(vault)?);
     require!(gross > 0, DeadmanError::NothingToPay);
     let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail))?;
     let rent = Rent::get()?;
@@ -519,7 +538,12 @@ pub fn handle_release_vested_token<'info>(
         ctx.remaining_accounts,
         fee,
     )?;
-    pay_stipend(&ctx.accounts.vault, &ctx.accounts.beneficiary, rule.rail)?;
+    pay_stipend(
+        &mut ctx.accounts.vault,
+        &ctx.accounts.beneficiary,
+        rule.rail,
+        i,
+    )?;
     record_release(&mut ctx.accounts.vault, i, now, gross, net)?;
     emit!(RuleExecuted {
         vault: ctx.accounts.vault.key(),

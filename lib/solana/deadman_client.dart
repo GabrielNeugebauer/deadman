@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show SocketException;
 import 'dart:typed_data';
 
 import 'package:solana/dto.dart'
@@ -20,6 +19,9 @@ import 'package:solana/solana.dart';
 import '../core/config.dart';
 import '../kora/kora_client.dart';
 import 'codec.dart';
+import 'socket_exception_stub.dart'
+    if (dart.library.io) 'dart:io'
+    show SocketException;
 import 'deadman_api.dart';
 
 /// Failed RPC call or transaction. [name] is set for Deadman program errors
@@ -215,6 +217,7 @@ class DeadmanException implements Exception {
     ),
     6026: ('InvalidConfig', 'Treasury must be set'),
     6027: ('MathOverflow', 'Arithmetic overflow'),
+    6028: ('NotLegacyVault', 'Not a plan account in an older layout'),
   };
 
   /// Clearer wording than the program's `msg` where the user must act.
@@ -228,8 +231,8 @@ class DeadmanException implements Exception {
         'right now',
     6019:
         "The beneficiary's account cannot receive this payout (too small to "
-        'open a new account). Once the grace period passes, later tiers can '
-        "skip past it; this tier's share stays reserved for its beneficiary",
+        'open a new account). Once the grace period passes, Deadman skips it '
+        "automatically; this tier's share stays reserved for its beneficiary",
     6020: "This tier can only be skipped after the plan's grace period",
     6021:
         'This action does not apply to this kind of plan: vesting plans need '
@@ -260,6 +263,7 @@ class DeadmanException implements Exception {
   static const notRevocable = 6023;
   static const alreadyRevoked = 6024;
   static const fundsCommitted = 6025;
+  static const notLegacyVault = 6028;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -292,11 +296,16 @@ class DeadmanClient implements DeadmanApi {
   /// [feeToken] (a final SPL transfer). Without either, wallet-signed
   /// transactions pay their own fees and rent in SOL.
   ///
+  /// The paymaster must answer as [paymasterSigner] (fee payer and payment
+  /// address) and quote at most [maxFee] base units of the fee token.
+  ///
   /// [clock] returns unix seconds; it only drives client-side pre-checks.
   DeadmanClient.withKora({
     SolanaClient? client,
     this.sponsor,
     this.paymaster,
+    this.paymasterSigner = AppConfig.koraPaymasterSigner,
+    this.maxFee = AppConfig.koraMaxFee,
     int Function()? clock,
   }) : _now = clock ?? _systemNow,
        _client =
@@ -316,6 +325,12 @@ class DeadmanClient implements DeadmanApi {
   final SolanaClient _client;
   final KoraClient? sponsor;
   final KoraClient? paymaster;
+
+  /// Pinned paymaster key (audit M-3); empty refuses the paymaster.
+  final String paymasterSigner;
+
+  /// Highest paymaster fee accepted, in fee-token base units.
+  final int maxFee;
   final int Function() _now;
 
   @override
@@ -398,6 +413,46 @@ class DeadmanClient implements DeadmanApi {
     return vaults..sort((a, b) => a.planId.compareTo(b.planId));
   }
 
+  @override
+  Future<List<int>> fetchLegacyPlanIds(String owner) async {
+    final accounts = await _net(
+      () => _rpc.getProgramAccounts(
+        AppConfig.programId,
+        commitment: commitment,
+        encoding: Encoding.base64,
+        filters: [
+          ProgramDataFilter.memcmp(offset: 0, bytes: Disc.vaultAccount),
+          ProgramDataFilter.memcmpBase58(offset: 8, bytes: owner),
+        ],
+      ),
+    );
+    final ids = <int>[];
+    for (final pa in accounts) {
+      final data = _programData(pa.account);
+      if (data == null || data.length == vaultAccountSize || data.length < 42) {
+        continue;
+      }
+      final id = data[40] | (data[41] << 8);
+      // The program only recovers the account at the plan's own address.
+      if (vaultAddressFor(owner, id) == pa.pubkey) ids.add(id);
+    }
+    return ids..sort();
+  }
+
+  @override
+  Future<Uint8List> buildRecoverLegacyVault({
+    required String owner,
+    required int planId,
+  }) async {
+    if (!(await fetchLegacyPlanIds(owner)).contains(planId)) {
+      throw DeadmanException.program(DeadmanException.notLegacyVault);
+    }
+    return _build(
+      owner,
+      (_) => [recoverLegacyVaultIx(owner: owner, planId: planId)],
+    );
+  }
+
   Future<List<VaultState>>? _scan;
   DateTime _scanAt = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -476,6 +531,32 @@ class DeadmanClient implements DeadmanApi {
   }
 
   @override
+  Future<List<int>> tokenBalances(List<(String, String)> accounts) async {
+    final out = <int>[];
+    // getMultipleAccounts takes at most 100 keys.
+    for (var i = 0; i < accounts.length; i += 100) {
+      final atas = [
+        for (final (owner, mint) in accounts.skip(i).take(100))
+          ataAddress(owner, mint),
+      ];
+      final found = await _net(
+        () => _rpc
+            .getMultipleAccounts(
+              atas,
+              commitment: commitment,
+              encoding: Encoding.base64,
+            )
+            .value,
+      );
+      for (final a in found) {
+        final data = a?.data;
+        out.add(data is BinaryAccountData ? decodeTokenAmount(data.data) : 0);
+      }
+    }
+    return out;
+  }
+
+  @override
   Future<Uint8List> buildCreateVault({
     required String owner,
     required int planId,
@@ -486,8 +567,10 @@ class DeadmanClient implements DeadmanApi {
     required int skipGraceSecs,
     required List<RuleSpec> rules,
     int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
   }) async {
     _checkAmount(depositLamports);
+    tokenDeposits.values.forEach(_checkAmount);
     _checkLabel(label);
     if (guard == owner || guard == defaultPubkey) {
       throw DeadmanException.program(6005);
@@ -502,6 +585,14 @@ class DeadmanClient implements DeadmanApi {
       skipGraceSecs: skipGraceSecs,
       rules: rules,
     );
+    final deposits = {
+      for (final e in tokenDeposits.entries)
+        if (e.value > 0) e.key: e.value,
+    };
+    // Rejects Token-2022 and non-mint accounts before anything is signed.
+    final decimals = {
+      for (final mint in deposits.keys) mint: await _mintDecimals(mint),
+    };
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreateVault(
       planId: planId,
@@ -518,7 +609,17 @@ class DeadmanClient implements DeadmanApi {
         if (fundGuard) _transfer(owner, guard, AppConfig.guardFundingLamports),
         createVaultIx(owner: owner, payer: payer, planId: planId, data: data),
         if (depositLamports > 0) _transfer(owner, vault, depositLamports),
+        for (final e in deposits.entries)
+          ...depositTokenIxs(
+            owner: owner,
+            planId: planId,
+            mint: e.key,
+            amount: e.value,
+            decimals: decimals[e.key]!,
+            payer: payer,
+          ),
       ],
+      spend: deposits,
     );
   }
 
@@ -787,9 +888,16 @@ class DeadmanClient implements DeadmanApi {
     required int index,
   }) async {
     final rule = await _checkSkippable(vaultOwner, planId, index);
+    final createAta = await _vaultAtaMissing(vaultOwner, planId, rule.mint);
     return _build(
       caller,
-      (_) => [
+      (payer) => [
+        if (createAta)
+          createAtaIdempotentIx(
+            payer: payer,
+            owner: vaultAddressFor(vaultOwner, planId),
+            mint: rule.mint!,
+          ),
         skipRuleIx(
           caller: caller,
           vaultOwner: vaultOwner,
@@ -906,7 +1014,14 @@ class DeadmanClient implements DeadmanApi {
     required int index,
   }) async {
     final rule = await _checkSkippable(vaultOwner, planId, index);
+    final createAta = await _vaultAtaMissing(vaultOwner, planId, rule.mint);
     return _sendWithKey(caller, [
+      if (createAta)
+        createAtaIdempotentIx(
+          payer: caller.address,
+          owner: vaultAddressFor(vaultOwner, planId),
+          mint: rule.mint!,
+        ),
       skipRuleIx(
         caller: caller.address,
         vaultOwner: vaultOwner,
@@ -916,6 +1031,18 @@ class DeadmanClient implements DeadmanApi {
       ),
     ]);
   }
+
+  /// A token tier's plan that never held its mint has no token account,
+  /// which `skip_rule` must read; creating it (empty) lets the skip record
+  /// that nothing was there to reserve.
+  Future<bool> _vaultAtaMissing(
+    String vaultOwner,
+    int planId,
+    String? mint,
+  ) async =>
+      mint != null &&
+      await _account(ataAddress(vaultAddressFor(vaultOwner, planId), mint)) ==
+          null;
 
   @override
   Future<String> executeRuleWithKey(
@@ -1123,7 +1250,21 @@ class DeadmanClient implements DeadmanApi {
     final rule = vault.rules[index];
     if (rule.executed) throw DeadmanException.program(6008);
     final mint = rule.mint;
-    if (mint != null) await _mintDecimals(mint);
+    if (mint != null) {
+      await _mintDecimals(mint);
+      // A vault that never held the mint has no token account: the program
+      // would fail with AccountNotInitialized inside the wallet's preview.
+      if (await tokenBalance(vault.address, mint) <= 0) {
+        throw DeadmanException(
+          'This plan holds none of ${_tokenName(mint)} yet, so this tier has '
+          'nothing to pay. The owner must deposit it first; after the grace '
+          'period Deadman skips the tier automatically and keeps its share '
+          'reserved.',
+          code: DeadmanException.nothingToPay,
+          name: 'NothingToPay',
+        );
+      }
+    }
     final fees = await fetchFees();
     return (payer) => executeRuleIxs(
       executor: executor,
@@ -1219,7 +1360,10 @@ class DeadmanClient implements DeadmanApi {
 
   Future<VaultState?> _decodeVault(String address, Account account) async {
     final data = _programData(account);
-    if (data == null || !hasDiscriminator(data, Disc.vaultAccount)) {
+    // Other sizes are older layouts (see fetchLegacyPlanIds).
+    if (data == null ||
+        !hasDiscriminator(data, Disc.vaultAccount) ||
+        data.length != vaultAccountSize) {
       return null;
     }
     final len = data.length;
@@ -1280,10 +1424,24 @@ class DeadmanClient implements DeadmanApi {
     List<Instruction> Function(String payer) instructions,
     Map<String, int> spend,
   ) async {
-    final kora = (await _kora(paymaster.getPayerSigner)).signerAddress;
+    final pinned = paymasterSigner;
+    if (pinned.isEmpty) {
+      throw const DeadmanException(
+        'Paying network fees in USDC is not set up in this build '
+        '(KORA_PAYMASTER_SIGNER). Switch network fees back to SOL.',
+        name: 'KoraUnpinned',
+      );
+    }
+    final payer = await _kora(paymaster.getPayerSigner);
+    _checkPaymasterKey(payer.signerAddress, payer.paymentAddress);
+    final kora = payer.signerAddress;
     final blockhash = await _kora(paymaster.getBlockhash);
     final decimals = await _mintDecimals(token);
-    final ixs = await _withoutExistingKoraAtas(instructions(kora), kora);
+    final ixs = await _withoutExistingKoraAtas(
+      instructions(kora),
+      kora,
+      signer,
+    );
     final estimate = await _kora(
       () => paymaster.estimateTransactionFee(
         transaction: base64Encode(
@@ -1293,12 +1451,22 @@ class DeadmanClient implements DeadmanApi {
         signerKey: kora,
       ),
     );
+    _checkPaymasterKey(estimate.signerPubkey, estimate.paymentAddress);
     final fee = estimate.feeInToken;
     if (fee == null || fee < 0) {
       throw DeadmanException(
         'The fee service does not accept ${_tokenName(token)}. Switch '
         'network fees back to SOL.',
         name: 'KoraError',
+      );
+    }
+    if (fee > maxFee) {
+      final name = _tokenName(token);
+      throw DeadmanException(
+        'The fee service asks ${_units(fee, decimals)} $name for this, more '
+        'than the ${_units(maxFee, decimals)} $name limit. Nothing was '
+        'signed. Switch network fees back to SOL.',
+        name: 'KoraFeeTooHigh',
       );
     }
     final extra = spend[token] ?? 0;
@@ -1323,7 +1491,7 @@ class DeadmanClient implements DeadmanApi {
           transferCheckedIx(
             source: ataAddress(signer, token),
             mint: token,
-            destination: ataAddress(estimate.paymentAddress, token),
+            destination: ataAddress(paymasterSigner, token),
             authority: signer,
             amount: fee,
             decimals: decimals,
@@ -1334,12 +1502,28 @@ class DeadmanClient implements DeadmanApi {
     );
   }
 
+  /// The paymaster must be the pinned key, as fee payer and as payment
+  /// address, so a tampered response cannot take the fee (audit M-3).
+  void _checkPaymasterKey(String signer, String paymentAddress) {
+    if (signer != paymasterSigner || paymentAddress != paymasterSigner) {
+      throw DeadmanException(
+        'The fee service answered as $signer (payments to $paymentAddress), '
+        'not the expected $paymasterSigner. Nothing was signed. Switch '
+        'network fees back to SOL.',
+        name: 'KoraUntrusted',
+      );
+    }
+  }
+
   /// Drops token-account creates paid by [kora] whose account already
   /// exists: the paymaster prices a transaction by what it funds, so a
-  /// no-op create would move it into a dearer tier.
+  /// no-op create would move it into a dearer tier. The paymaster never
+  /// funds a token account of [signer]'s own wallet (audit M-1), so such a
+  /// create (a token withdrawal into a closed account) is paid by [signer].
   Future<List<Instruction>> _withoutExistingKoraAtas(
     List<Instruction> ixs,
     String kora,
+    String signer,
   ) async {
     bool koraAta(Instruction ix) =>
         ix.programId.toBase58() == ataProgramId &&
@@ -1362,13 +1546,52 @@ class DeadmanClient implements DeadmanApi {
       for (var i = 0; i < atas.length; i++)
         if (accounts[i] != null) atas[i],
     };
-    return [
+    // withdraw_token pays into the signer's own account.
+    final own = {
       for (final ix in ixs)
-        if (!koraAta(ix) ||
-            !existing.contains(ix.accounts[1].pubKey.toBase58()))
-          ix,
-    ];
+        if (ix.programId.toBase58() == AppConfig.programId &&
+            hasDiscriminator(ix.data.toList(), Disc.withdrawToken))
+          ix.accounts[4].pubKey.toBase58(),
+    };
+    var ownCreates = 0;
+    final out = <Instruction>[];
+    for (final ix in ixs) {
+      final ata = koraAta(ix) ? ix.accounts[1].pubKey.toBase58() : null;
+      if (ata == null) {
+        out.add(ix);
+      } else if (existing.contains(ata)) {
+        continue;
+      } else if (own.contains(ata)) {
+        ownCreates++;
+        out.add(
+          createAtaIdempotentIx(
+            payer: signer,
+            owner: ix.accounts[2].pubKey.toBase58(),
+            mint: ix.accounts[3].pubKey.toBase58(),
+          ),
+        );
+      } else {
+        out.add(ix);
+      }
+    }
+    if (ownCreates > 0) {
+      final rent = ownCreates * await _ataRent();
+      final held = await balance(signer);
+      if (held < rent) {
+        throw DeadmanException(
+          'This reopens your closed token account, which costs '
+          '${_units(rent, 9)} SOL from your wallet (it holds '
+          '${_units(held, 9)}). Add SOL first.',
+          name: 'NoSolForAccount',
+        );
+      }
+    }
+    return out;
   }
+
+  Future<int> _ataRent() async => _rent[165] ??= await _net(
+    () => _rpc.getMinimumBalanceForRentExemption(165, commitment: commitment),
+  );
 
   static String _tokenName(String mint) =>
       mint == AppConfig.usdcMint ? 'USDC' : 'token ${mint.substring(0, 4)}…';

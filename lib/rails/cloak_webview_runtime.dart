@@ -1,9 +1,6 @@
-// Drop-in CloakJsRuntime for the app. Rename to lib/rails/cloak_webview_runtime.dart
-// once `flutter_inappwebview: ^6.1.5` is in pubspec.yaml and `assets/cloak/` is
-// declared as an asset folder. Kept as .example so analysis passes before that.
-//
-// Must run in the foreground isolate (WebView needs the UI engine), so start
-// it when the beneficiary opens the claim screen, not from workmanager.
+// Runs assets/cloak in a headless WebView. Must run in the foreground
+// isolate (WebView needs the UI engine), so start it from a screen, not from
+// workmanager.
 import 'dart:async';
 
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';

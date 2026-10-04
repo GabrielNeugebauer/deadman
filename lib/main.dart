@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'state/providers.dart';
-import 'state/reminders.dart';
+import 'state/reminders_stub.dart' if (dart.library.io) 'state/reminders.dart';
 import 'ui/app.dart';
 
 Future<void> main() async {

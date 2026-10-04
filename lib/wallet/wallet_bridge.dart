@@ -1,6 +1,23 @@
 import 'dart:typed_data';
 
-/// Result of a Mobile Wallet Adapter authorization.
+/// Thrown when a wallet call fails (Mobile Wallet Adapter on Android, a
+/// browser extension on the web).
+class WalletException implements Exception {
+  const WalletException(this.code, this.message);
+
+  /// `NO_WALLET`, `DECLINED`, `NO_IDENTITY`, `BAD_ARGS`, `WRONG_ACCOUNT`,
+  /// `MWA_ERROR` or `WALLET_ERROR`.
+  final String code;
+  final String message;
+
+  bool get noWallet => code == 'NO_WALLET';
+  bool get declined => code == 'DECLINED';
+
+  @override
+  String toString() => 'WalletException($code): $message';
+}
+
+/// Result of a wallet authorization.
 class WalletSession {
   const WalletSession({
     required this.publicKey,
@@ -14,8 +31,9 @@ class WalletSession {
   final String? walletLabel;
 }
 
-/// Signs with the user's Seed Vault-backed wallet through Mobile Wallet
-/// Adapter. Every call opens the wallet app for user approval.
+/// Signs with the user's wallet: Seed Vault through Mobile Wallet Adapter on
+/// Android, Phantom or Solflare on the web. Every call asks the wallet for
+/// user approval.
 abstract class WalletBridge {
   Future<WalletSession> authorize();
 

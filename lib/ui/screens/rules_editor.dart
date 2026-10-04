@@ -165,7 +165,26 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   );
   late final _label = TextEditingController(text: widget.vault?.label ?? '');
   final _deposit = TextEditingController(text: '0.1');
+
+  /// Initial token deposits at creation, per mint a tier pays.
+  final _tokenDeposits = <String, TextEditingController>{};
   bool _busy = false;
+
+  /// Tokens the tiers pay, in tier order.
+  List<String> get _tokenMints => [
+    ...{
+      for (final d in _drafts) ?d.mint,
+    },
+  ];
+
+  TextEditingController _tokenDeposit(String mint) =>
+      _tokenDeposits.putIfAbsent(mint, TextEditingController.new);
+
+  /// Typed initial deposit of [mint]: 0 when empty, null when invalid.
+  int? _tokenDepositOf(String mint) {
+    final text = _tokenDeposit(mint).text.trim();
+    return text.isEmpty ? 0 : parseAmount(text, mint);
+  }
 
   bool get _creating => widget.vault == null;
   bool get _fresh => widget.vault?.completed ?? false;
@@ -188,8 +207,64 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           ? parseSol(_deposit.text)
           : widget.vault!.withdrawableLamports;
     }
-    if (_creating || mint != AppConfig.usdcMint) return null;
+    if (_creating) return _tokenDepositOf(mint);
+    if (mint != AppConfig.usdcMint) return null;
     return ref.read(planUsdcProvider(widget.vault!.address)).value;
+  }
+
+  /// Tokens the tiers pay that the plan will not hold: no initial deposit
+  /// when creating, or none in the vault when editing (unknown = held).
+  Future<List<String>> _unfundedTokens(
+    List<String> mints,
+    Map<String, int> deposits,
+  ) async {
+    if (_creating) {
+      return [
+        for (final m in mints)
+          if ((deposits[m] ?? 0) == 0) m,
+      ];
+    }
+    if (mints.isEmpty) return const [];
+    final address = widget.vault!.address;
+    try {
+      final held = await ref
+          .read(apiProvider)
+          .tokenBalances([for (final m in mints) (address, m)]);
+      return [
+        for (final (i, m) in mints.indexed)
+          if (held[i] == 0) m,
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<bool> _confirmUnfunded(List<String> mints) async {
+    if (mints.isEmpty) return true;
+    final names = mints.map(assetSymbol).join(', ');
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: DmColors.surface,
+            title: const Text('No funds for some tiers'),
+            content: Text(
+              'This plan will hold no $names. Tiers paying it have nothing to '
+              'release until you deposit it'
+              '${_creating ? ': add an initial deposit, or deposit later from the plan card.' : ' from the plan card.'}',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Go back'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(_creating ? 'Create anyway' : 'Save anyway'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   /// Assets whose last tier leaves something in the vault.
@@ -254,6 +329,19 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     if (utf8.encode(label).length > 32) {
       return err('Plan name must be 32 characters or fewer');
     }
+    final mints = _tokenMints;
+    final deposits = <String, int>{};
+    if (_creating) {
+      for (final m in mints) {
+        final v = _tokenDepositOf(m);
+        if (v == null) return err('Check the ${unitLabel(m)} deposit');
+        if (v > 0) deposits[m] = v;
+      }
+    }
+    if (!await _confirmUnfunded(await _unfundedTokens(mints, deposits)) ||
+        !mounted) {
+      return;
+    }
     if (!await _confirmLeftovers(rules) || !mounted) return;
 
     setState(() => _busy = true);
@@ -269,6 +357,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
               lockSecs: _cadence.lock,
               skipGraceSecs: _grace,
               depositLamports: parseSol(_deposit.text) ?? 0,
+              tokenDeposits: deposits,
             )
           : await actions.updatePolicy(
               planId: widget.vault!.planId,
@@ -293,6 +382,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       error: unguarded.isNotEmpty,
     );
     Navigator.pop(context);
+  }
+
+  String? _walletHint(String mint) {
+    final have = ref.watch(walletTokenProvider(mint)).value;
+    return have == null ? null : 'Wallet has ${amountText(have, mint)}';
   }
 
   @override
@@ -380,9 +474,9 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           ),
           const SizedBox(height: 4),
           const Text(
-            'A due tier that still cannot pay this long after it fell due can be skipped, '
-            'so one broken destination never blocks the rest. Its share stays reserved '
-            'for its beneficiary to claim.',
+            'A due tier that still cannot pay this long after it fell due is skipped '
+            'automatically, so one broken destination never blocks the rest. Its share '
+            'stays reserved for its beneficiary to claim.',
             style: TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35),
           ),
           const SizedBox(height: 18),
@@ -428,7 +522,28 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
                 suffixText: 'SOL',
                 prefixIcon: Icon(Icons.savings_outlined),
               ),
-            )
+            ),
+          if (_creating)
+            for (final m in _tokenMints) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _tokenDeposit(m),
+                onChanged: (_) => setState(() {}),
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: 'Initial ${assetSymbol(m)} deposit',
+                  hintText: '0',
+                  suffixText: unitLabel(m),
+                  prefixIcon: const Icon(Icons.savings_outlined),
+                  helperText: _walletHint(m),
+                  errorText: _tokenDepositOf(m) == null
+                      ? 'Check this amount'
+                      : null,
+                ),
+              ),
+            ]
           else
             TextField(
               controller: _guardian,
@@ -451,10 +566,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           ),
           if (_creating) ...[
             const SizedBox(height: 12),
-            const Text(
-              "One wallet approval creates the vault, funds this phone's guard key with 0.01 SOL "
+            Text(
+              'One wallet approval creates the vault, funds this '
+              "${ref.read(isWebProvider) ? 'browser' : 'phone'}'s guard key with 0.01 SOL "
               'for check-in fees, and makes your deposit.',
-              style: TextStyle(
+              style: const TextStyle(
                 color: DmColors.muted,
                 fontSize: 12,
                 height: 1.4,

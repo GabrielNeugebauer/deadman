@@ -449,4 +449,365 @@ void main() {
       expect(silent.run('ping', '{}'), throwsA(isA<CloakRouteException>()));
     });
   });
+  group('USDC execute', () {
+    test(
+      'private send hands the USDC mint and wallet to the runtime',
+      () async {
+        final runtime = FakeRuntime(
+          (_, _) => ok({'state': 'sent', 'sendSignature': 'usdc-sig'}),
+        );
+        final r = route(
+          runtime: runtime,
+          client: rpc((_, _) => {'value': 10000000}),
+        );
+        final wallet = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+          privateKey: List.filled(32, 5),
+        )).address;
+        final q = await r.quote(
+          claimKey: claim.address,
+          inputMint: usdc,
+          amount: 1000000,
+          destination: wallet,
+        );
+        expect(q.estimatedOut, '0.547 USDC');
+        expect(await r.execute(claimKey: claim, quote: q), 'usdc-sig');
+        final payload = runtime.calls.single.$2;
+        expect(payload['mint'], usdc);
+        expect(payload['amount'], '1000000');
+        expect(payload['recipientSolana'], wallet);
+        expect(payload['recipientUtxoPubkey'], isNull);
+        expect(payload['resumeOnlyReason'], isNull);
+      },
+    );
+  });
+
+  group('receiving', () {
+    final note = {
+      'commitment': 'ab' * 32,
+      'amount': '2500000',
+      'mint': usdc,
+      'blinding': '0c' * 32,
+      'index': 4242,
+      'spent': false,
+      'blockTime': 1790895223,
+    };
+
+    CloakNote noteWith({
+      String? mint = usdc,
+      int amount = 2500000,
+      bool spent = false,
+    }) => CloakNote(
+      commitment: 'cd' * 32,
+      amount: amount,
+      mint: mint,
+      blinding: '0d' * 32,
+      spent: spent,
+    );
+
+    test('receiveAddressFor derives from the claim secret', () async {
+      final runtime = FakeRuntime(
+        (_, _) => ok({'utxoPubkey': utxoHex, 'viewingPubkey': viewHex}),
+      );
+      final a = await route(runtime: runtime).receiveAddressFor(claim);
+      expect(a.toString(), destination);
+      final (op, payload) = runtime.calls.single;
+      expect(op, 'receiveAddress');
+      expect(base64Decode(payload['secret'] as String), List.filled(32, 9));
+      expect(payload.containsKey('spendKey'), isFalse);
+    });
+
+    test('scanReceived parses notes', () async {
+      final runtime = FakeRuntime(
+        (_, _) => ok({
+          'rpcCalls': 29,
+          'notes': [
+            note,
+            {
+              ...note,
+              'mint': null,
+              'amount': '20000000',
+              'index': null,
+              'spent': true,
+              'blockTime': null,
+            },
+          ],
+        }),
+      );
+      final notes = await route(runtime: runtime).scanReceived(claimKey: claim);
+      final (op, payload) = runtime.calls.single;
+      expect(op, 'scanReceived');
+      expect(payload['rpcUrl'], 'https://rpc.test');
+      expect(base64Decode(payload['secret'] as String), List.filled(32, 9));
+
+      expect(notes, hasLength(2));
+      expect(notes[0].commitment, 'ab' * 32);
+      expect(notes[0].amount, 2500000);
+      expect(notes[0].mint, usdc);
+      expect(notes[0].pool!.symbol, 'USDC');
+      expect(notes[0].leafIndex, 4242);
+      expect(notes[0].spent, isFalse);
+      expect(notes[0].receivedAt, DateTime.utc(2026, 10, 1, 22, 53, 43));
+      expect(notes[0].toJson(), {
+        'commitment': 'ab' * 32,
+        'amount': '2500000',
+        'mint': usdc,
+        'blinding': '0c' * 32,
+      });
+      expect(notes[0].toString(), isNot(contains('0c' * 32)));
+      expect(notes[1].mint, isNull);
+      expect(notes[1].pool!.symbol, 'SOL');
+      expect(notes[1].spent, isTrue);
+      expect(notes[1].leafIndex, isNull);
+      expect(notes[1].receivedAt, isNull);
+    });
+
+    test('scanReceived maps runtime errors and malformed replies', () async {
+      await expectLater(
+        route(
+          runtime: FakeRuntime(
+            (_, _) => jsonEncode({
+              'ok': false,
+              'error': 'Scan incomplete: 3 delivery records could not be read',
+              'retryable': true,
+            }),
+          ),
+        ).scanReceived(claimKey: claim),
+        throwsA(
+          isA<CloakRouteException>()
+              .having((e) => e.message, 'message', contains('incomplete'))
+              .having((e) => e.retryable, 'retryable', isTrue),
+        ),
+      );
+      await expectLater(
+        route(
+          runtime: FakeRuntime(
+            (_, _) => ok({
+              'notes': [
+                {'amount': 'x'},
+              ],
+            }),
+          ),
+        ).scanReceived(claimKey: claim),
+        throwsA(
+          isA<CloakRouteException>().having(
+            (e) => e.message,
+            'message',
+            'Malformed Cloak scan reply',
+          ),
+        ),
+      );
+      await expectLater(
+        route(runtime: FakeRuntime((_, _) => 'not json'))
+            .scanReceived(claimKey: claim),
+        throwsA(isA<CloakRouteException>()),
+      );
+    });
+
+    test('scanReceived needs mainnet and a runtime', () async {
+      final runtime = FakeRuntime((_, _) => ok({'notes': []}));
+      await expectLater(
+        route(
+          runtime: runtime,
+          cluster: 'devnet',
+        ).scanReceived(claimKey: claim),
+        throwsA(isA<CloakRouteException>()),
+      );
+      await expectLater(
+        route().scanReceived(claimKey: claim),
+        throwsA(isA<CloakRouteException>()),
+      );
+      expect(runtime.calls, isEmpty);
+    });
+
+    test(
+      'withdrawReceived sends the notes and returns the signature',
+      () async {
+        final runtime = FakeRuntime(
+          (_, _) =>
+              ok({'signature': 'wd-sig', 'amount': '5000000', 'fee': '465000'}),
+        );
+        final wallet = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+          privateKey: List.filled(32, 5),
+        )).address;
+        final notes = [noteWith(), noteWith(amount: 2500000)];
+        final sig = await route(
+          runtime: runtime,
+        ).withdrawReceived(claimKey: claim, notes: notes, destination: wallet);
+        expect(sig, 'wd-sig');
+        final (op, payload) = runtime.calls.single;
+        expect(op, 'withdrawReceived');
+        expect(payload['destination'], wallet);
+        expect(payload['rpcUrl'], 'https://rpc.test');
+        expect(base64Decode(payload['secret'] as String), List.filled(32, 9));
+        expect(payload['notes'], [for (final n in notes) n.toJson()]);
+      },
+    );
+
+    test('withdrawReceived validates before calling the runtime', () async {
+      final runtime = FakeRuntime((_, _) => ok({'signature': 'x'}));
+      final r = route(runtime: runtime);
+      final wallet = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+        privateKey: List.filled(32, 5),
+      )).address;
+      Future<void> refuses(
+        List<CloakNote> notes,
+        String message, {
+        String? to,
+      }) => expectLater(
+        r.withdrawReceived(
+          claimKey: claim,
+          notes: notes,
+          destination: to ?? wallet,
+        ),
+        throwsA(
+          isA<CloakRouteException>().having(
+            (e) => e.message,
+            'message',
+            contains(message),
+          ),
+        ),
+      );
+
+      await refuses([], 'No notes');
+      await refuses([noteWith(), noteWith(mint: null)], 'one mint');
+      await refuses([noteWith(spent: true)], 'already withdrawn');
+      await refuses([
+        noteWith(mint: 'So11111111111111111111111111111111111111112'),
+      ], 'Unsupported mint');
+      await refuses(
+        [noteWith()],
+        'Invalid destination',
+        to: 'cloak:$utxoHex:$viewHex',
+      );
+      // 0.45 USDC fixed + 0.3%
+      await refuses([noteWith(amount: 451000)], 'exit fee of 0.451353 USDC');
+      await refuses([
+        noteWith(mint: null, amount: 5000000),
+      ], 'exit fee of 0.005015 SOL');
+      expect(runtime.calls, isEmpty);
+    });
+
+    test('withdrawReceived maps runtime errors', () async {
+      final wallet = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+        privateKey: List.filled(32, 5),
+      )).address;
+      await expectLater(
+        route(
+          runtime: FakeRuntime(
+            (_, _) => jsonEncode({
+              'ok': false,
+              'error': 'Note is not indexed by the Cloak relay yet; try again shortly',
+              'retryable': null,
+            }),
+          ),
+        ).withdrawReceived(
+          claimKey: claim,
+          notes: [noteWith()],
+          destination: wallet,
+        ),
+        throwsA(
+          isA<CloakRouteException>()
+              .having((e) => e.message, 'message', contains('not indexed'))
+              .having((e) => e.retryable, 'retryable', isNull),
+        ),
+      );
+      await expectLater(
+        route(runtime: FakeRuntime((_, _) => ok({}))).withdrawReceived(
+          claimKey: claim,
+          notes: [noteWith()],
+          destination: wallet,
+        ),
+        throwsA(
+          isA<CloakRouteException>().having(
+            (e) => e.message,
+            'message',
+            'Cloak runtime returned no signature',
+          ),
+        ),
+      );
+    });
+  });
+
+  group('selfTest', () {
+    String reply(String op, Map<String, dynamic> p) => ok({
+      'reachedSigning': true,
+      'downloadMs': 3974,
+      'proveMs': 6541,
+      'totalMs': 14216,
+      'depositor': 'x',
+      'steps': ['0ms Validating transaction parameters...'],
+    });
+
+    test('runs on a devnet build against a mainnet RPC', () async {
+      final runtime = FakeRuntime(reply);
+      final t = await CloakRoute(
+        runtime: runtime,
+        cluster: 'devnet',
+      ).selfTest();
+      expect(t.download, const Duration(milliseconds: 3974));
+      expect(t.prove, const Duration(milliseconds: 6541));
+      expect(t.total, const Duration(milliseconds: 14216));
+      expect(t.steps.single, contains('Validating'));
+      final (op, payload) = runtime.calls.single;
+      expect(op, 'selfTest');
+      expect(payload['rpcUrl'], CloakRoute.selfTestRpcUrl);
+      expect(payload['mint'], isNull);
+      expect(payload.containsKey('secret'), isFalse);
+    });
+
+    test('uses the configured RPC and mint', () async {
+      final runtime = FakeRuntime(
+        (_, _) => ok({
+          'reachedSigning': true,
+          'downloadMs': 0,
+          'proveMs': null,
+          'totalMs': 9000,
+          'steps': [],
+        }),
+      );
+      final t = await route(runtime: runtime).selfTest(mint: usdc);
+      expect(t.prove, isNull);
+      expect(runtime.calls.single.$2['rpcUrl'], 'https://rpc.test');
+      expect(runtime.calls.single.$2['mint'], usdc);
+    });
+
+    test('fails clearly', () async {
+      await expectLater(
+        CloakRoute(cluster: 'devnet').selfTest(),
+        throwsA(isA<CloakRouteException>()),
+      );
+      await expectLater(
+        route(runtime: FakeRuntime(reply))
+            .selfTest(mint: 'So11111111111111111111111111111111111111112'),
+        throwsA(isA<CloakRouteException>()),
+      );
+      await expectLater(
+        route(runtime: FakeRuntime((_, _) => ok({'reachedSigning': false})))
+            .selfTest(),
+        throwsA(
+          isA<CloakRouteException>().having(
+            (e) => e.message,
+            'message',
+            'Malformed Cloak self-test reply',
+          ),
+        ),
+      );
+      await expectLater(
+        route(
+          runtime: FakeRuntime(
+            (_, _) => jsonEncode({
+              'ok': false,
+              'error': 'Circuit integrity check failed',
+              'retryable': false,
+            }),
+          ),
+        ).selfTest(),
+        throwsA(
+          isA<CloakRouteException>()
+              .having((e) => e.message, 'message', contains('integrity'))
+              .having((e) => e.retryable, 'retryable', isFalse),
+        ),
+      );
+    });
+  });
 }

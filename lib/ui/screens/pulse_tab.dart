@@ -66,15 +66,23 @@ class _PulseTabState extends ConsumerState<PulseTab> {
           message: '$e',
           onRetry: () => ref.invalidate(vaultsProvider),
         ),
-        data: (list) => list.isEmpty
-            ? const _ArmIntro()
-            : RefreshIndicator(
-                onRefresh: () async {
-                  ref.invalidate(vaultsProvider);
-                  ref.invalidate(planUsdcProvider);
-                },
-                child: _Dashboard(plans: list, now: _now),
-              ),
+        data: (list) => Column(
+          children: [
+            const _LegacyPlansCard(),
+            Expanded(
+              child: list.isEmpty
+                  ? const _ArmIntro()
+                  : RefreshIndicator(
+                      onRefresh: () async {
+                        ref.invalidate(vaultsProvider);
+                        ref.invalidate(planUsdcProvider);
+                        ref.invalidate(planTokenBalancesProvider);
+                      },
+                      child: _Dashboard(plans: list, now: _now),
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -160,6 +168,8 @@ class _Dashboard extends ConsumerWidget {
     final t = Theme.of(context).textTheme;
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
     final guard = ref.watch(guardAddressProvider);
+    // On the web "I'm alive" is wallet-signed, so guard coverage is moot.
+    final web = ref.watch(isWebProvider);
     // "I'm alive" covers inheritance plans only; vesting runs on its own.
     final switches = switchPlans(plans);
     final vestings = [
@@ -169,7 +179,7 @@ class _Dashboard extends ConsumerWidget {
     // Plans with a pending tier; skipped tiers only await their claim.
     final active = activeSwitchPlans(plans);
     final locked = plans.any((v) => v.isLocked(now)) && !duress;
-    final cover = guard.hasValue
+    final cover = guard.hasValue && !web
         ? PlanCoverage.of(plans, guard.value, now)
         : null;
 
@@ -219,6 +229,17 @@ class _Dashboard extends ConsumerWidget {
             Text('Pulse', style: t.headlineMedium),
             const Spacer(),
             if (locked) const _Chip(text: 'LOCKED', color: DmColors.warn),
+            // No pull-to-refresh with a mouse.
+            if (web)
+              IconButton(
+                tooltip: 'Refresh',
+                onPressed: () {
+                  ref.invalidate(vaultsProvider);
+                  ref.invalidate(planUsdcProvider);
+                  ref.invalidate(planTokenBalancesProvider);
+                },
+                icon: const Icon(Icons.refresh),
+              ),
           ],
         ),
         const SizedBox(height: 20),
@@ -251,7 +272,18 @@ class _Dashboard extends ConsumerWidget {
           color: color,
           activePlans: active.length,
           hasSwitch: switches.isNotEmpty,
+          wallet: web,
         ),
+        if (web && active.isNotEmpty)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'On the web you check in with your wallet. Reminders and one-tap '
+              'check-ins are in the Android app.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: DmColors.muted, fontSize: 12),
+            ),
+          ),
         if (cover != null && cover.otherGuard.isNotEmpty) ...[
           const SizedBox(height: 12),
           _OtherGuardBanner(plans: cover.otherGuard),
@@ -308,10 +340,14 @@ class _PulseButton extends ConsumerStatefulWidget {
     required this.color,
     required this.activePlans,
     required this.hasSwitch,
+    this.wallet = false,
   });
 
   final Color color;
   final int activePlans;
+
+  /// Check in with the owner's wallet (web) instead of the guard key.
+  final bool wallet;
 
   /// The owner has at least one inheritance plan.
   final bool hasSwitch;
@@ -324,6 +360,7 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
   bool _busy = false;
 
   Future<void> _pulse() async {
+    if (widget.wallet) return _pulseWithWallet();
     setState(() => _busy = true);
     PlanCoverage? cover;
     final ok = await runGuarded(
@@ -334,6 +371,25 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
     setState(() => _busy = false);
     if (ok && cover != null) {
       toast(context, cover!.reportText(pulsed: true), error: !cover!.complete);
+    }
+  }
+
+  Future<void> _pulseWithWallet() async {
+    setState(() => _busy = true);
+    List<VaultState>? done;
+    await runGuarded(
+      context,
+      () async => done = await ref.read(actionsProvider).pulseWithWallet(),
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (done != null) {
+      toast(
+        context,
+        done!.length == 1
+            ? 'Pulse recorded on ${planName(done!.single)}.'
+            : 'Pulse recorded on ${done!.length} plans.',
+      );
     }
   }
 
@@ -351,7 +407,12 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
               dimension: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.fingerprint, size: 28),
+          : Icon(
+              widget.wallet
+                  ? Icons.account_balance_wallet_outlined
+                  : Icons.fingerprint,
+              size: 28,
+            ),
       label: Text(
         !widget.hasSwitch
             ? 'No plan to check in'
@@ -486,6 +547,12 @@ class _PlanCard extends ConsumerWidget {
     final released = vault.rules.where((r) => r.executed).length;
     final id = vault.planId;
     final usdc = ref.watch(planUsdcProvider(vault.address)).value;
+    final unfunded = unfundedAssets(
+      vault,
+      ref
+          .watch(planTokenBalancesProvider)
+          .whenOrNull(data: (b) => b[vault.address] ?? const <String, int>{}),
+    );
 
     Future<void> run(
       String title,
@@ -531,6 +598,29 @@ class _PlanCard extends ConsumerWidget {
               '${vault.completed ? '' : ' · check in every ${span(vault.intervalSecs)}'}',
               style: const TextStyle(color: DmColors.muted),
             ),
+            for (final mint in unfunded)
+              Padding(
+                padding: const EdgeInsets.only(top: 8, right: 10),
+                child: Wrap(
+                  spacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _Chip(
+                      text: 'No ${assetSymbol(mint)} in this plan',
+                      color: DmColors.warn,
+                    ),
+                    TextButton(
+                      onPressed: () => depositToPlan(
+                        context,
+                        ref,
+                        id,
+                        asset: assetInfo(mint),
+                      ),
+                      child: Text('Deposit ${assetSymbol(mint)}'),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: 10),
             for (final (i, r) in vault.rules.indexed)
               Padding(
@@ -602,7 +692,8 @@ class _PlanCard extends ConsumerWidget {
                   style: TextStyle(color: DmColors.warn),
                 ),
               ),
-            if (needsWalletCheckIn(vault, now))
+            // Every web check-in is already wallet-signed.
+            if (needsWalletCheckIn(vault, now) && !ref.watch(isWebProvider))
               _WalletCheckIn(vault: vault, now: now),
             if (vault.isLocked(now) && !duress)
               Padding(
@@ -715,6 +806,80 @@ class _WalletCheckInState extends ConsumerState<_WalletCheckIn> {
         ],
       ),
     );
+  }
+}
+
+/// Plans an upgrade left in an older layout: the app cannot show them, but
+/// the owner can take their SOL back.
+class _LegacyPlansCard extends ConsumerStatefulWidget {
+  const _LegacyPlansCard();
+
+  @override
+  ConsumerState<_LegacyPlansCard> createState() => _LegacyPlansCardState();
+}
+
+class _LegacyPlansCardState extends ConsumerState<_LegacyPlansCard> {
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final ids = ref.watch(legacyPlansProvider).value ?? const [];
+    if (ids.isEmpty) return const SizedBox.shrink();
+    final n = ids.length;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Card(
+        color: DmColors.raised,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.history, color: DmColors.warn),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      n == 1
+                          ? '1 plan from an older version'
+                          : '$n plans from an older version',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'An upgrade changed the plan format, so these plans no longer '
+                'run. Recover them to close them and return all their SOL to '
+                'your wallet, then create new plans.',
+                style: TextStyle(color: DmColors.muted, height: 1.4),
+              ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: _busy ? null : () => _recover(ids),
+                  child: Text(_busy ? 'Recovering…' : 'Recover SOL'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _recover(List<int> ids) async {
+    setState(() => _busy = true);
+    final ok = await runGuarded(
+      context,
+      () => ref.read(actionsProvider).recoverLegacyPlans(ids),
+      success: 'SOL returned to your wallet',
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (ok) ref.invalidate(legacyPlansProvider);
   }
 }
 
@@ -860,19 +1025,31 @@ Future<int?> askAmount(BuildContext context, String title) {
   );
 }
 
-/// Deposits SOL or USDC from the wallet into plan [planId].
+/// Deposits SOL or USDC from the wallet into plan [planId]; only [asset]
+/// when given.
 Future<void> depositToPlan(
   BuildContext context,
   WidgetRef ref,
-  int planId,
-) async {
+  int planId, {
+  AssetInfo? asset,
+}) async {
   final wallet = <String?, int>{
     null: ?ref.read(walletBalanceProvider).value,
     AppConfig.usdcMint: ?ref.read(walletUsdcProvider).value,
   };
+  final mint = asset?.mint;
+  if (mint != null && !wallet.containsKey(mint)) {
+    try {
+      wallet[mint] = await ref.read(walletTokenProvider(mint).future);
+    } catch (_) {
+      // The hint is optional; the deposit itself reports real failures.
+    }
+    if (!context.mounted) return;
+  }
   final pick = await askAssetAmount(
     context,
-    'Deposit',
+    asset == null ? 'Deposit' : 'Deposit ${asset.symbol}',
+    assets: asset == null ? const [solAsset, usdcAsset] : [asset],
     available: wallet,
     availableLabel: 'in your wallet',
   );

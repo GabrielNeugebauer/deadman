@@ -23,6 +23,20 @@ const usdcAsset = AssetInfo(
 );
 const jitoSolAsset = AssetInfo(jitoSolMint, 'JitoSOL', 9, 4);
 
+const circleDevnetUsdcMint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+
+/// Mints named for display only (not offered as presets), so plans made
+/// with another USDC build still read clearly. [AppConfig.usdcMint] wins.
+const _knownMints = <String, AssetInfo>{
+  if (!AppConfig.isMainnet)
+    circleDevnetUsdcMint: AssetInfo(
+      circleDevnetUsdcMint,
+      'USDC (Circle)',
+      AppConfig.usdcDecimals,
+      2,
+    ),
+};
+
 /// Assets offered as one-tap choices; any other mint is "Other token".
 const presetAssets = [
   solAsset,
@@ -34,8 +48,13 @@ AssetInfo? knownAsset(String? mint) {
   if (mint == null) return solAsset;
   if (mint == AppConfig.usdcMint) return usdcAsset;
   if (mint == jitoSolMint) return jitoSolAsset;
-  return null;
+  return _knownMints[mint];
 }
+
+/// [knownAsset], or an unknown token typed in base units under a
+/// shortened mint.
+AssetInfo assetInfo(String? mint) =>
+    knownAsset(mint) ?? AssetInfo(mint, _short(mint!), 0, 0);
 
 String _short(String a) =>
     a.length <= 10 ? a : '${a.substring(0, 4)}…${a.substring(a.length - 4)}';
