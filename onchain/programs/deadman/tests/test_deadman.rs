@@ -4,7 +4,7 @@ use {
         solana_program::{clock::Clock, instruction::Instruction, system_program},
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    anchor_spl::associated_token::{self, get_associated_token_address_with_program_id},
+    anchor_spl::associated_token::get_associated_token_address_with_program_id,
     deadman::{AmountMode, Config, Rail, RuleInput, Vault, CONFIG_SEED, VAULT_SEED},
     litesvm::LiteSVM,
     litesvm_token::{
@@ -21,6 +21,7 @@ const SOL: u64 = 1_000_000_000;
 const DAY: i64 = 86_400;
 const INTERVAL: i64 = 7 * DAY;
 const LOCK: i64 = 3 * DAY;
+const GRACE: i64 = 30 * DAY;
 const FEE_PUBLIC: u16 = 200;
 const FEE_PRIVATE: u16 = 500;
 const STIPEND: u64 = 3_000_000;
@@ -215,6 +216,7 @@ impl Env {
                 guard: self.guard.pubkey(),
                 interval_secs: INTERVAL,
                 lock_secs: LOCK,
+                skip_grace_secs: GRACE,
                 rules,
             }
             .data(),
@@ -261,6 +263,7 @@ impl Env {
             label: "Updated".to_string(),
             interval_secs: INTERVAL,
             lock_secs: LOCK,
+            skip_grace_secs: GRACE,
             rules,
             guardian,
         });
@@ -310,6 +313,30 @@ impl Env {
         self.send(ix, &[&owner])
     }
 
+    fn skip(&mut self, index: u8) -> Result<u64, String> {
+        self.skip_with(index, None)
+    }
+
+    fn skip_token(&mut self, index: u8, mint: &Pubkey) -> Result<u64, String> {
+        let vault_token = ata(&self.vault_addr(), mint);
+        self.skip_with(index, Some(vault_token))
+    }
+
+    fn skip_with(&mut self, index: u8, vault_token: Option<Pubkey>) -> Result<u64, String> {
+        let ix = Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::SkipRule { index }.data(),
+            deadman::accounts::SkipRule {
+                caller: self.keeper.pubkey(),
+                vault: self.vault_addr(),
+                vault_token,
+            }
+            .to_account_metas(None),
+        );
+        let keeper = self.keeper.insecure_clone();
+        self.send(ix, &[&keeper])
+    }
+
     fn execute_sol(&mut self, index: u8, beneficiary: &Pubkey) -> Result<u64, String> {
         let treasury = self.treasury.pubkey();
         self.execute_sol_with(index, beneficiary, &treasury)
@@ -343,6 +370,23 @@ impl Env {
         beneficiary: &Pubkey,
         mint: &Pubkey,
     ) -> Result<u64, String> {
+        // The program no longer creates the beneficiary's account; clients
+        // create the ATA (or pass any token account the beneficiary owns).
+        let admin = self.admin.insecure_clone();
+        CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, mint)
+            .owner(beneficiary)
+            .send()
+            .map_err(|e| format!("{:?}", e.err))?;
+        self.execute_token_to(index, beneficiary, mint, &ata(beneficiary, mint))
+    }
+
+    fn execute_token_to(
+        &mut self,
+        index: u8,
+        beneficiary: &Pubkey,
+        mint: &Pubkey,
+        destination: &Pubkey,
+    ) -> Result<u64, String> {
         let vault = self.vault_addr();
         let ix = Instruction::new_with_bytes(
             deadman::id(),
@@ -354,11 +398,9 @@ impl Env {
                 mint: *mint,
                 vault_token: ata(&vault, mint),
                 beneficiary: *beneficiary,
-                beneficiary_token: ata(beneficiary, mint),
+                beneficiary_token: *destination,
                 treasury_token: ata(&self.treasury.pubkey(), mint),
                 token_program: TOKEN_ID,
-                associated_token_program: associated_token::ID,
-                system_program: system_program::ID,
             }
             .to_account_metas(None),
         );
@@ -662,8 +704,13 @@ fn pulse_resets_pending_rules_after_partial_release() {
     env.advance(10 * DAY + 1);
     env.execute_sol(0, &a.pubkey()).unwrap();
 
-    // The owner was only on a long trip: one pulse stops the second tier.
+    // After a release only the owner's wallet can stop the later tiers.
     let guard = env.guard.insecure_clone();
+    let err = env.pulse(&guard).unwrap_err();
+    assert!(err.contains("OwnerConfirmationRequired"), "{err}");
+    // The owner was only on a long trip: one wallet check-in stops tier 2.
+    let owner = env.owner.insecure_clone();
+    env.pulse(&owner).unwrap();
     env.pulse(&guard).unwrap();
     env.advance(15 * DAY);
     assert!(env.execute_sol(1, &b.pubkey()).is_err());
@@ -671,7 +718,7 @@ fn pulse_resets_pending_rules_after_partial_release() {
 }
 
 #[test]
-fn dust_to_fresh_account_is_skipped_not_blocking() {
+fn undeliverable_dust_stays_pending_then_can_be_skipped() {
     let (a, b) = (Keypair::new(), Keypair::new());
     let mut env = ready(vec![
         rule(
@@ -693,8 +740,17 @@ fn dust_to_fresh_account_is_skipped_not_blocking() {
     ]);
     env.deposit_sol(SOL);
     env.advance(10 * DAY + 1);
-    env.execute_sol(0, &a.pubkey()).unwrap();
-    assert_eq!(env.vault().rules[0].paid, 0);
+    let err = env.execute_sol(0, &a.pubkey()).unwrap_err();
+    assert!(err.contains("BeneficiaryCannotReceive"), "{err}");
+    assert_eq!(env.vault().rules[0].executed_at, 0, "not consumed");
+    assert!(env.execute_sol(1, &b.pubkey()).is_err(), "still ordered");
+
+    assert!(env.skip(0).unwrap_err().contains("SkipTooEarly"));
+    env.advance(30 * DAY);
+    env.skip(0).unwrap();
+    let v = env.vault();
+    assert!(v.rules[0].skipped_at > 0 && v.rules[0].executed_at == 0);
+    assert_eq!(v.rules[0].reserved, 1_000, "its share stays set aside");
     env.execute_sol(1, &b.pubkey()).unwrap();
     assert!(env.lamports(&b.pubkey()) > SOL / 2);
 }
@@ -987,8 +1043,8 @@ fn pulse_is_closed_once_every_tier_released() {
 
     env.advance(10 * DAY + 1);
     env.execute_sol(0, &a.pubkey()).unwrap();
-    // Between tiers a check-in still stops the rest.
-    env.pulse(&guard).unwrap();
+    // Between tiers a wallet check-in still stops the rest.
+    env.pulse(&owner).unwrap();
 
     env.advance(20 * DAY + 1);
     env.execute_sol(1, &b.pubkey()).unwrap();
@@ -1040,6 +1096,7 @@ fn label_length_is_capped() {
             guard: env.guard.pubkey(),
             interval_secs: INTERVAL,
             lock_secs: LOCK,
+            skip_grace_secs: GRACE,
             rules: all_to(&a.pubkey()),
         }
         .data(),
@@ -1071,6 +1128,7 @@ fn sponsor_pays_vault_rent() {
             guard: env.guard.pubkey(),
             interval_secs: INTERVAL,
             lock_secs: LOCK,
+            skip_grace_secs: GRACE,
             rules: all_to(&a.pubkey()),
         }
         .data(),
@@ -1087,4 +1145,398 @@ fn sponsor_pays_vault_rent() {
     env.send(ix, &[&sponsor, &owner]).unwrap();
     assert_eq!(env.lamports(&env.owner.pubkey()), owner_before);
     assert_eq!(env.vault().owner, env.owner.pubkey());
+}
+
+// Regression tests for docs/security-audit-2026-10-03.md.
+
+fn usdc_rules(env: &mut Env, a: &Keypair, b: &Keypair) -> Pubkey {
+    let usdc = env.token_setup(1_000_000);
+    env.update_policy(
+        vec![
+            rule(
+                &a.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                Some(usdc),
+                AmountMode::Percent,
+                1_000,
+            ),
+            rule(
+                &b.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                Some(usdc),
+                AmountMode::Percent,
+                10_000,
+            ),
+        ],
+        None,
+    )
+    .unwrap();
+    usdc
+}
+
+#[test]
+fn h1_reassigned_ata_is_bypassed_with_another_token_account() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = usdc_rules(&mut env, &a, &b);
+    env.advance(10 * DAY + 1);
+    // Alice's own ATA cannot be used (wrong owner check fails) ...
+    let stranger = Keypair::new().pubkey();
+    let admin = env.admin.insecure_clone();
+    let foreign = CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&stranger)
+        .send()
+        .unwrap();
+    assert!(env
+        .execute_token_to(0, &a.pubkey(), &usdc, &foreign)
+        .is_err());
+    // ... but any token account Alice owns works, not only her ATA.
+    env.execute_token(0, &a.pubkey(), &usdc).unwrap();
+    env.execute_token(1, &b.pubkey(), &usdc).unwrap();
+    assert!(env.token_balance(&ata(&b.pubkey(), &usdc)) > 0);
+}
+
+#[test]
+fn h1_unpayable_tier_is_skipped_after_grace_and_later_tiers_run() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = usdc_rules(&mut env, &a, &b);
+    env.advance(10 * DAY + 1);
+    // Alice never provides a usable account: tier 1 blocks tier 2 ...
+    assert!(env
+        .execute_token(1, &b.pubkey(), &usdc)
+        .unwrap_err()
+        .contains("RuleOutOfOrder"));
+    // ... only until the grace period ends.
+    assert!(env
+        .skip_token(0, &usdc)
+        .unwrap_err()
+        .contains("SkipTooEarly"));
+    env.advance(30 * DAY);
+    env.skip_token(0, &usdc).unwrap();
+    assert!(env.skip_token(0, &usdc).is_err(), "skip once");
+    // Bob gets 100% of what is not reserved for Alice.
+    env.execute_token(1, &b.pubkey(), &usdc).unwrap();
+    let bob = 900_000;
+    assert_eq!(
+        env.token_balance(&ata(&b.pubkey(), &usdc)),
+        bob - fee(bob, FEE_PUBLIC)
+    );
+    // Alice can still claim her reserved 10% later.
+    env.execute_token(0, &a.pubkey(), &usdc).unwrap();
+    let alice = 100_000;
+    assert_eq!(
+        env.token_balance(&ata(&a.pubkey(), &usdc)),
+        alice - fee(alice, FEE_PUBLIC)
+    );
+}
+
+#[test]
+fn m1_guard_alone_cannot_keep_a_plan_alive_past_a_year() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(SOL);
+    let guard = env.guard.insecure_clone();
+    for _ in 0..52 {
+        env.advance(7 * DAY);
+        env.pulse(&guard).unwrap();
+    }
+    env.advance(2 * DAY);
+    let err = env.pulse(&guard).unwrap_err();
+    assert!(err.contains("OwnerConfirmationRequired"), "{err}");
+    env.advance(10 * DAY);
+    env.execute_sol(0, &b.pubkey()).unwrap();
+}
+
+#[test]
+fn m1_owner_wallet_action_restarts_the_guard_window() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(SOL);
+    let (guard, owner) = (env.guard.insecure_clone(), env.owner.insecure_clone());
+    env.advance(360 * DAY);
+    env.pulse(&owner).unwrap();
+    env.advance(300 * DAY);
+    env.pulse(&guard).unwrap();
+}
+
+#[test]
+fn l1_empty_payout_does_not_consume_the_tier() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = env.token_setup(0);
+    env.update_policy(
+        vec![rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            Some(usdc),
+            AmountMode::Percent,
+            10_000,
+        )],
+        None,
+    )
+    .unwrap();
+    env.advance(10 * DAY + 1);
+    let err = env.execute_token(0, &a.pubkey(), &usdc).unwrap_err();
+    assert!(err.contains("NothingToPay"), "{err}");
+    assert_eq!(env.vault().rules[0].executed_at, 0);
+}
+
+#[test]
+fn l2_editing_after_a_release_keeps_history_and_never_pays_twice() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+    ]);
+    env.deposit_sol(5 * SOL);
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    let paid_a = env.lamports(&a.pubkey());
+
+    // Owner returns and saves the plan again (only pending tiers are sent).
+    env.update_policy(
+        vec![rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        )],
+        None,
+    )
+    .unwrap();
+    let v = env.vault();
+    assert_eq!(v.rules.len(), 2);
+    assert!(v.rules[0].executed_at > 0, "history kept");
+    env.advance(30 * DAY);
+    assert!(env
+        .execute_sol(0, &a.pubkey())
+        .unwrap_err()
+        .contains("RuleAlreadyExecuted"));
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&a.pubkey()), paid_a, "A paid once");
+}
+
+#[test]
+fn completed_plan_can_be_rearmed_as_a_fresh_plan() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(SOL);
+    env.advance(10 * DAY + 1);
+    env.execute_sol(0, &b.pubkey()).unwrap();
+    env.update_policy(all_to(&b.pubkey()), None).unwrap();
+    let v = env.vault();
+    assert_eq!((v.rules.len(), v.rules[0].executed_at), (1, 0));
+}
+
+#[test]
+fn vault_cannot_be_its_own_beneficiary() {
+    let mut env = Env::new();
+    env.init_config();
+    let vault = env.vault_addr();
+    assert!(env.create_vault(all_to(&vault)).is_err());
+}
+
+#[test]
+fn skip_grace_is_owner_configured_and_bounded() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let tiers = || {
+        vec![
+            rule(
+                &a.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                None,
+                AmountMode::Fixed,
+                1_000,
+            ),
+            rule(
+                &b.pubkey(),
+                Rail::Solana,
+                10 * DAY,
+                None,
+                AmountMode::Percent,
+                10_000,
+            ),
+        ]
+    };
+    let mut env = ready(tiers());
+    let policy = |env: &Env, grace: i64| {
+        env.owner_ix(deadman::instruction::UpdatePolicy {
+            label: String::new(),
+            interval_secs: INTERVAL,
+            lock_secs: LOCK,
+            skip_grace_secs: grace,
+            rules: tiers(),
+            guardian: None,
+        })
+    };
+    let owner = env.owner.insecure_clone();
+    for bad in [59, 367 * DAY] {
+        let ix = policy(&env, bad);
+        assert!(env.send(ix, &[&owner]).is_err(), "grace {bad} out of range");
+    }
+    let ix = policy(&env, 2 * DAY);
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.vault().skip_grace_secs, 2 * DAY);
+
+    env.deposit_sol(SOL);
+    env.advance(10 * DAY + 1);
+    assert!(
+        env.execute_sol(0, &a.pubkey()).is_err(),
+        "dust to fresh account"
+    );
+    env.advance(DAY);
+    assert!(env.skip(0).unwrap_err().contains("SkipTooEarly"));
+    env.advance(DAY);
+    env.skip(0).unwrap();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+}
+
+// Regression tests for the re-audit of the fixes (NEW-1..NEW-3).
+
+#[test]
+fn new1_skipping_a_payable_lone_tier_cannot_strand_it() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(5 * SOL);
+    env.advance(10 * DAY + 1 + GRACE);
+    // A stranger skips the only tier although it could pay ...
+    let reserved = env.withdrawable();
+    env.skip(0).unwrap();
+    assert_eq!(env.vault().rules[0].reserved, reserved);
+    // ... and the beneficiary still claims all of it afterwards.
+    env.advance(400 * DAY);
+    env.execute_sol(0, &b.pubkey()).unwrap();
+    assert_eq!(
+        env.lamports(&b.pubkey()),
+        reserved - fee(reserved, FEE_PUBLIC)
+    );
+}
+
+#[test]
+fn new2_later_heir_cannot_take_a_skipped_share() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Percent,
+            5_000,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        ),
+    ]);
+    env.deposit_sol(10 * SOL);
+    env.advance(10 * DAY + 1 + GRACE);
+    let total = env.withdrawable();
+    env.skip(0).unwrap();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    let bob = total - total / 2;
+    assert_eq!(env.lamports(&b.pubkey()), bob - fee(bob, FEE_PUBLIC));
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    let alice = total / 2;
+    assert_eq!(env.lamports(&a.pubkey()), alice - fee(alice, FEE_PUBLIC));
+}
+
+#[test]
+fn new3_payout_to_a_non_ata_account_needs_the_beneficiary_signature() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = usdc_rules(&mut env, &a, &b);
+    env.advance(10 * DAY + 1);
+    // An executor creates a plain token account owned by Alice and tries to
+    // route her payout there.
+    let admin = env.admin.insecure_clone();
+    let other = litesvm_token::CreateAccount::new(&mut env.svm, &admin, &usdc)
+        .owner(&a.pubkey())
+        .send()
+        .unwrap();
+    let err = env
+        .execute_token_to(0, &a.pubkey(), &usdc, &other)
+        .unwrap_err();
+    assert!(err.contains("Unauthorized"), "{err}");
+
+    // Alice herself may choose that account.
+    env.svm.airdrop(&a.pubkey(), SOL).unwrap();
+    let vault = env.vault_addr();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::ExecuteTokenRule { index: 0 }.data(),
+        deadman::accounts::ExecuteTokenRule {
+            executor: a.pubkey(),
+            vault,
+            config: config_pda(),
+            mint: usdc,
+            vault_token: ata(&vault, &usdc),
+            beneficiary: a.pubkey(),
+            beneficiary_token: other,
+            treasury_token: ata(&env.treasury.pubkey(), &usdc),
+            token_program: TOKEN_ID,
+        }
+        .to_account_metas(None),
+    );
+    env.send(ix, &[&a]).unwrap();
+    assert!(env.token_balance(&other) > 0);
+}
+
+#[test]
+fn skipping_a_token_tier_needs_the_real_vault_account() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let usdc = usdc_rules(&mut env, &a, &b);
+    env.advance(10 * DAY + 1 + GRACE);
+    // An empty decoy account owned by the vault would reserve 0.
+    let admin = env.admin.insecure_clone();
+    let vault = env.vault_addr();
+    let decoy = litesvm_token::CreateAccount::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    assert!(env.skip_with(0, Some(decoy)).is_err());
+    assert!(env.skip(0).is_err(), "token tier needs its vault account");
+    env.skip_token(0, &usdc).unwrap();
+    assert_eq!(env.vault().rules[0].reserved, 100_000);
+}
+
+#[test]
+fn guard_cannot_check_in_after_a_skip_until_the_owner_confirms() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.advance(10 * DAY + 1 + GRACE);
+    env.skip(0).unwrap();
+    let (guard, owner) = (env.guard.insecure_clone(), env.owner.insecure_clone());
+    assert!(env
+        .pulse(&guard)
+        .unwrap_err()
+        .contains("OwnerConfirmationRequired"));
+    env.pulse(&owner).unwrap();
+    env.pulse(&guard).unwrap();
 }

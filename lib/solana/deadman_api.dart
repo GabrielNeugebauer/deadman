@@ -42,6 +42,8 @@ class RuleState extends RuleSpec {
     super.mint,
     required this.executedAt,
     required this.paid,
+    this.skippedAt = 0,
+    this.reserved = 0,
   });
 
   /// Unix seconds; 0 while pending.
@@ -50,7 +52,19 @@ class RuleState extends RuleSpec {
   /// Net amount the beneficiary received.
   final int paid;
 
+  /// Unix seconds when later tiers were allowed to run past this one because
+  /// it could not pay within the plan's grace period; 0 if never skipped. A
+  /// skipped tier stays claimable by its own beneficiary.
+  final int skippedAt;
+
+  /// Gross share set aside for a skipped tier (0 = recomputed when claimed).
+  final int reserved;
+
   bool get executed => executedAt != 0;
+  bool get skipped => skippedAt != 0;
+
+  /// Paid, or skipped: later tiers of the same asset may run.
+  bool get settled => executed || skipped;
 }
 
 /// Mirror of the on-chain `Vault` account plus its lamport balance.
@@ -64,7 +78,9 @@ class VaultState {
     required this.guardian,
     required this.intervalSecs,
     required this.lockSecs,
+    required this.skipGraceSecs,
     required this.lastPulse,
+    required this.ownerLastSeen,
     required this.lockedUntil,
     required this.guardianReadyAt,
     required this.totalPulses,
@@ -86,8 +102,16 @@ class VaultState {
   final int intervalSecs;
   final int lockSecs;
 
+  /// Owner-chosen time a due tier gets to pay before anyone may skip it.
+  final int skipGraceSecs;
+
   /// Unix seconds.
   final int lastPulse;
+
+  /// Last wallet-signed (owner) action. Guard-key check-ins keep the plan
+  /// alive only within [guardWindowSecs] of it, and not at all after a tier
+  /// released or was skipped since then.
+  final int ownerLastSeen;
   final int lockedUntil;
   final int guardianReadyAt;
   final int totalPulses;
@@ -101,30 +125,61 @@ class VaultState {
 
   int get pulseDue => lastPulse + intervalSecs;
 
-  /// Every tier has released; the program rejects further check-ins.
+  static const guardWindowSecs = 365 * 86400;
+
+  /// When guard-key check-ins stop being accepted without a wallet check-in.
+  int get guardWindowEnd => ownerLastSeen + guardWindowSecs;
+
+  /// The guard key may check in now (otherwise the owner's wallet must).
+  bool guardCanPulse(int now) =>
+      now <= guardWindowEnd &&
+      !rules.any(
+        (r) => r.executedAt > ownerLastSeen || r.skippedAt > ownerLastSeen,
+      );
+
+  /// Earlier tiers of rule [index]'s asset have all paid or been skipped.
+  bool _earlierSettled(int index) {
+    final mint = rules[index].mint;
+    for (var j = 0; j < index; j++) {
+      if (rules[j].mint == mint && !rules[j].settled) return false;
+    }
+    return true;
+  }
+
+  /// Rule [index] is pending, next for its asset, and still has not paid
+  /// after its grace period. Skipping reserves its share; it stays claimable.
+  bool canSkip(int index, int now) {
+    final r = rules[index];
+    if (r.settled || now <= ruleDueAt(index) + skipGraceSecs) return false;
+    return _earlierSettled(index);
+  }
+
+  /// Every tier has paid; the program rejects further check-ins. A skipped
+  /// but unclaimed tier keeps the plan open.
   bool get completed => rules.every((r) => r.executed);
   int ruleDueAt(int index) => lastPulse + rules[index].afterSecs;
   bool isLocked(int now) => now < lockedUntil;
 
-  /// Earliest pending rule deadline, or null when every rule has executed.
+  /// Earliest pending rule deadline, or null when every rule has paid or
+  /// been skipped.
   int? get nextRuleDue {
     int? next;
     for (var i = 0; i < rules.length; i++) {
-      if (rules[i].executed) continue;
+      if (rules[i].settled) continue;
       final due = ruleDueAt(i);
       if (next == null || due < next) next = due;
     }
     return next;
   }
 
-  /// Due, pending, and every earlier rule for the same asset has executed.
+  /// Unpaid and either skipped (claimable any time) or due with every
+  /// earlier rule for the same asset paid or skipped.
   bool canExecute(int index, int now) {
     final r = rules[index];
-    if (r.executed || now <= ruleDueAt(index)) return false;
-    for (var j = 0; j < index; j++) {
-      if (rules[j].mint == r.mint && !rules[j].executed) return false;
-    }
-    return true;
+    if (r.executed) return false;
+    if (r.skipped) return true;
+    if (now <= ruleDueAt(index)) return false;
+    return _earlierSettled(index);
   }
 }
 
@@ -151,6 +206,10 @@ abstract class DeadmanApi {
 
   Future<VaultState?> fetchVault(String owner, int planId);
 
+  /// Plan number for [owner]'s next new plan (never reuses an address that
+  /// already holds an account, even one in an older layout).
+  Future<int> nextFreePlanId(String owner);
+
   /// Every plan of [owner], sorted by plan id.
   Future<List<VaultState>> fetchVaults(String owner);
 
@@ -176,6 +235,7 @@ abstract class DeadmanApi {
     required String guard,
     required int intervalSecs,
     required int lockSecs,
+    required int skipGraceSecs,
     required List<RuleSpec> rules,
     int depositLamports = 0,
   });
@@ -208,12 +268,16 @@ abstract class DeadmanApi {
     required int amount,
   });
 
+  /// [rules] are the new pending tiers only: tiers that already released
+  /// stay on-chain as history and are not resent (unless every tier has
+  /// released, in which case [rules] starts a fresh plan).
   Future<Uint8List> buildUpdatePolicy({
     required String owner,
     required int planId,
     required String label,
     required int intervalSecs,
     required int lockSecs,
+    required int skipGraceSecs,
     required List<RuleSpec> rules,
     String? guardian,
   });
@@ -225,15 +289,32 @@ abstract class DeadmanApi {
     required String newGuard,
   });
 
+  /// Owner-signed lockdown, for plans this device's guard key cannot lock.
+  Future<Uint8List> buildLockdownByOwner({
+    required String owner,
+    required List<int> planIds,
+  });
+
   Future<Uint8List> buildPulseByOwner({
     required String owner,
     required List<int> planIds,
   });
 
   /// Executes rule [index] of a plan (SOL or token variant, chosen from the
-  /// rule). Also creates the treasury ATA for token rules.
+  /// rule). For token rules it also creates, idempotently, the treasury's
+  /// and the beneficiary's ATAs (paid by [executor]): the program pays into
+  /// any token account the beneficiary owns but no longer creates one.
   Future<Uint8List> buildExecuteRule({
     required String executor,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  });
+
+  /// Skips rule [index] (see [VaultState.canSkip]); anyone may sign. Token
+  /// tiers pass the vault's ATA so the program can reserve the tier's share.
+  Future<Uint8List> buildSkipRule({
+    required String caller,
     required String vaultOwner,
     required int planId,
     required int index,
@@ -255,6 +336,14 @@ abstract class DeadmanApi {
     Ed25519HDKeyPair guard, {
     required String vaultOwner,
     required List<int> planIds,
+  });
+
+  /// Skips a rule, signed by a local key (keeper).
+  Future<String> skipRuleWithKey(
+    Ed25519HDKeyPair caller, {
+    required String vaultOwner,
+    required int planId,
+    required int index,
   });
 
   /// Executes a rule signed by a local key (claim key or keeper).

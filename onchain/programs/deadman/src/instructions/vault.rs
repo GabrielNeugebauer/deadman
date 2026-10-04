@@ -26,6 +26,7 @@ pub struct CreateVault<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_create_vault(
     ctx: Context<CreateVault>,
     plan_id: u16,
@@ -33,6 +34,7 @@ pub fn handle_create_vault(
     guard: Pubkey,
     interval_secs: i64,
     lock_secs: i64,
+    skip_grace_secs: i64,
     rules: Vec<RuleInput>,
 ) -> Result<()> {
     let owner = ctx.accounts.owner.key();
@@ -47,8 +49,16 @@ pub fn handle_create_vault(
     vault.guard = guard;
     vault.bump = ctx.bumps.vault;
     vault.set_label(label)?;
-    vault.apply_policy(interval_secs, lock_secs, &rules, None)?;
-    vault.record_pulse(now)?;
+    let key = vault.key();
+    vault.apply_policy(
+        &key,
+        interval_secs,
+        lock_secs,
+        skip_grace_secs,
+        &rules,
+        None,
+    )?;
+    vault.record_owner_pulse(now)?;
 
     emit!(VaultCreated {
         vault: vault.key(),
@@ -72,13 +82,15 @@ pub struct OwnerAction<'info> {
     pub vault: Account<'info, Vault>,
 }
 
-/// Replaces every rule (all pending again). Blocked during lockdown so a
+/// Installs new pending tiers; tiers that paid or were skipped stay as
+/// history so they can never pay twice. Blocked during lockdown so a
 /// coercer cannot redirect the payouts.
 pub fn handle_update_policy(
     ctx: Context<OwnerAction>,
     label: String,
     interval_secs: i64,
     lock_secs: i64,
+    skip_grace_secs: i64,
     rules: Vec<RuleInput>,
     guardian: Option<Pubkey>,
 ) -> Result<()> {
@@ -86,8 +98,16 @@ pub fn handle_update_policy(
     let vault = &mut ctx.accounts.vault;
     vault.require_unlocked(now)?;
     vault.set_label(label)?;
-    vault.apply_policy(interval_secs, lock_secs, &rules, guardian)?;
-    vault.record_pulse(now)?;
+    let key = vault.key();
+    vault.apply_policy(
+        &key,
+        interval_secs,
+        lock_secs,
+        skip_grace_secs,
+        &rules,
+        guardian,
+    )?;
+    vault.record_owner_pulse(now)?;
     emit!(PolicyUpdated {
         vault: vault.key(),
         rules: vault.rules.len() as u8,
@@ -108,7 +128,7 @@ pub fn handle_set_guard(ctx: Context<OwnerAction>, new_guard: Pubkey) -> Result<
         DeadmanError::InvalidGuard
     );
     vault.guard = new_guard;
-    vault.record_pulse(now)
+    vault.record_owner_pulse(now)
 }
 
 #[derive(Accounts)]
@@ -129,7 +149,12 @@ pub fn handle_pulse(ctx: Context<Pulse>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
     require!(!vault.is_completed(), DeadmanError::PlanCompleted);
-    vault.record_pulse(now)?;
+    if ctx.accounts.signer.key() == vault.owner {
+        vault.record_owner_pulse(now)?;
+    } else {
+        vault.check_guard_pulse(now)?;
+        vault.record_pulse(now)?;
+    }
     emit!(Pulsed {
         vault: vault.key(),
         by: ctx.accounts.signer.key(),
@@ -209,7 +234,7 @@ pub fn handle_unlock(ctx: Context<Unlock>) -> Result<()> {
         DeadmanError::Unauthorized
     );
     vault.locked_until = now;
-    vault.record_pulse(now)?;
+    vault.record_owner_pulse(now)?;
     emit!(Unlocked {
         vault: vault.key(),
         at: now,

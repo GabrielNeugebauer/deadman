@@ -11,6 +11,7 @@ import '../solana/deadman_api.dart';
 import '../solana/deadman_client.dart';
 import '../wallet/mwa_wallet_bridge.dart';
 import '../wallet/wallet_bridge.dart';
+import 'lockdown_retry.dart';
 import 'reminders.dart';
 import 'secure_store.dart';
 
@@ -62,9 +63,19 @@ class SessionController extends Notifier<Session> {
 
   void lock() => state = Session(owner: state.owner);
 
-  Future<void> reset() async {
+  /// "Forget this device": PINs and the guard key go; receiving keys stay
+  /// unless [deleteReceivingKeys] (funds sent to them are then lost unless
+  /// the recovery phrase was saved).
+  Future<void> reset({bool deleteReceivingKeys = false}) async {
+    final store = ref.read(secureStoreProvider);
     await ref.read(prefsProvider).remove(_ownerKey);
-    await ref.read(secureStoreProvider).wipe();
+    if (deleteReceivingKeys) {
+      await store.wipeAll();
+    } else {
+      await store.wipeDevice();
+    }
+    ref.invalidate(guardAddressProvider);
+    ref.invalidate(claimProfilesProvider);
     state = const Session();
   }
 }
@@ -78,7 +89,8 @@ final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return const [];
   final vaults = await ref.watch(apiProvider).fetchVaults(owner);
-  final active = vaults.where((v) => !v.completed).toList();
+  // Plans with a tier still pending (skipped tiers only await a claim).
+  final active = vaults.where((v) => v.nextRuleDue != null).toList();
   if (active.isNotEmpty) {
     // Remind on the most urgent plan.
     final pulseDue = active.map((v) => v.pulseDue).reduce(min);
@@ -87,6 +99,28 @@ final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   }
   return vaults;
 });
+
+/// This device's guard key address, or null when it has none.
+final guardAddressProvider = FutureProvider<String?>(
+  (ref) async => (await ref.watch(secureStoreProvider).loadGuard())?.address,
+);
+
+/// Duress lockdown with persisted retry; one per app.
+final lockdownRetrierProvider = Provider(
+  (ref) => LockdownRetrier(
+    pending: PendingLockdown(ref.read(prefsProvider)),
+    attempt: (owner) async {
+      await lockGuardedPlans(
+        ref.read(apiProvider),
+        await ref.read(secureStoreProvider).loadGuard(),
+        owner,
+      );
+      ref.invalidate(vaultsProvider);
+    },
+    onPending: scheduleLockdownRetry,
+    onDone: cancelLockdownRetry,
+  ),
+);
 
 final feesProvider = FutureProvider(
   (ref) => ref.watch(apiProvider).fetchFees(),

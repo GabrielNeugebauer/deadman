@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/codec.dart';
@@ -114,6 +115,7 @@ void main() {
       expect(Disc.withdrawToken, ix('withdraw_token'));
       expect(Disc.executeSolRule, ix('execute_sol_rule'));
       expect(Disc.executeTokenRule, ix('execute_token_rule'));
+      expect(Disc.skipRule, ix('skip_rule'));
       expect(Disc.vaultAccount, acc('Vault'));
       expect(Disc.configAccount, acc('Config'));
     });
@@ -133,15 +135,55 @@ void main() {
         'guard',
         'interval_secs',
         'lock_secs',
+        'skip_grace_secs',
         'rules',
       ]);
       expect(args('update_policy'), [
         'label',
         'interval_secs',
         'lock_secs',
+        'skip_grace_secs',
         'rules',
         'guardian',
       ]);
+      expect(args('skip_rule'), ['index']);
+    });
+
+    test('IDL Rule field order matches the decoder', () {
+      final fields = [
+        for (final f
+            in ((loadIdl()['types'] as List).firstWhere(
+                  (t) => t['name'] == 'Rule',
+                )['type']['fields']
+                as List))
+          f['name'] as String,
+      ];
+      expect(fields, [
+        'beneficiary',
+        'rail',
+        'after_secs',
+        'mint',
+        'mode',
+        'amount',
+        'executed_at',
+        'paid',
+        'skipped_at',
+        'reserved',
+      ]);
+    });
+
+    test('IDL skip_rule takes an optional vault_token', () {
+      final accounts =
+          (loadIdl()['instructions'] as List).firstWhere(
+                (i) => i['name'] == 'skip_rule',
+              )['accounts']
+              as List;
+      expect(accounts.map((a) => a['name']), [
+        'caller',
+        'vault',
+        'vault_token',
+      ]);
+      expect(accounts.last['optional'], isTrue);
     });
 
     test('IDL enum variant order matches Rail and AmountMode', () {
@@ -182,6 +224,7 @@ void main() {
         guard: guard,
         intervalSecs: 86400,
         lockSecs: 3600,
+        skipGraceSecs: 604800,
         rules: [solFixed, tokenPercent],
       );
       expect(data, [
@@ -192,11 +235,12 @@ void main() {
         ...keyBytes(guard),
         ...le(8, 86400),
         ...le(8, 3600),
+        ...le(8, 604800),
         ...le(4, 2),
         ...fixedSolBytes,
         ...percentMintBytes,
       ]);
-      expect(data.length, 8 + 2 + 4 + 4 + 32 + 16 + 4 + 51 + 83);
+      expect(data.length, 8 + 2 + 4 + 4 + 32 + 24 + 4 + 51 + 83);
     });
 
     test('update_policy with guardian Some', () {
@@ -204,6 +248,7 @@ void main() {
         label: 'Fundo de emergência',
         intervalSecs: 60,
         lockSecs: 180,
+        skipGraceSecs: 120,
         rules: [solFixed, tokenPercent],
         guardian: guardian,
       );
@@ -215,6 +260,7 @@ void main() {
         ...label,
         ...le(8, 60),
         ...le(8, 180),
+        ...le(8, 120),
         ...le(4, 2),
         ...fixedSolBytes,
         ...percentMintBytes,
@@ -228,6 +274,7 @@ void main() {
         label: '',
         intervalSecs: 60,
         lockSecs: 180,
+        skipGraceSecs: 366 * 86400,
         rules: [tokenPercent],
       );
       expect(data, [
@@ -235,6 +282,7 @@ void main() {
         ...le(4, 0),
         ...le(8, 60),
         ...le(8, 180),
+        ...le(8, 366 * 86400),
         ...le(4, 1),
         ...percentMintBytes,
         0,
@@ -254,6 +302,8 @@ void main() {
       expect(encodeExecuteRule(3, token: false), [...Disc.executeSolRule, 3]);
       expect(encodeExecuteRule(7, token: true), [...Disc.executeTokenRule, 7]);
       expect(() => encodeExecuteRule(256, token: false), throwsArgumentError);
+      expect(encodeSkipRule(5), [...Disc.skipRule, 5]);
+      expect(() => encodeSkipRule(256), throwsArgumentError);
       expect(() => encodeWithdrawSol(-1), throwsArgumentError);
     });
 
@@ -266,15 +316,24 @@ void main() {
   });
 
   group('policy validation mirrors apply_policy', () {
-    int? check(List<RuleSpec> rules, {int interval = 86400, String? g}) =>
-        policyError(
-          owner: owner,
-          guard: guard,
-          intervalSecs: interval,
-          lockSecs: 3600,
-          rules: rules,
-          guardian: g,
-        );
+    final vault = vaultPda(owner, 0).address;
+    int? check(
+      List<RuleSpec> rules, {
+      int interval = 86400,
+      int grace = 30 * 86400,
+      int history = 0,
+      String? g,
+    }) => policyError(
+      owner: owner,
+      vault: vault,
+      guard: guard,
+      intervalSecs: interval,
+      lockSecs: 3600,
+      skipGraceSecs: grace,
+      rules: rules,
+      historyCount: history,
+      guardian: g,
+    );
     RuleSpec rule({
       String? to,
       int after = 172800,
@@ -305,6 +364,50 @@ void main() {
       expect(check([rule(to: guard)]), 6003);
       expect(check([solFixed], g: alice), 6004);
       expect(check([solFixed], g: owner), 6004);
+      expect(check([rule(to: vault)]), 6003, reason: 'FUNDS-8');
+    });
+
+    test('skip grace bounds are 60 s ..= 366 days', () {
+      expect(check([solFixed], grace: 59), 6002);
+      expect(check([solFixed], grace: 60), isNull);
+      expect(check([solFixed], grace: 366 * 86400), isNull);
+      expect(check([solFixed], grace: 366 * 86400 + 1), 6002);
+    });
+
+    test('released tiers kept as history count toward the 8-rule cap', () {
+      expect(check(List.filled(3, solFixed), history: 5), isNull);
+      expect(check(List.filled(3, solFixed), history: 6), 6003);
+      expect(check([], history: 2), 6003, reason: 'new rules are required');
+    });
+
+    test('policyHistoryCount: paid or skipped tiers, or none once all '
+        'paid', () {
+      RuleState r({bool done = false, bool skipped = false}) => RuleState(
+        beneficiary: alice,
+        rail: Rail.solana,
+        afterSecs: 172800,
+        mode: AmountMode.fixed,
+        amount: 1,
+        executedAt: done ? 5 : 0,
+        paid: 0,
+        skippedAt: skipped ? 4 : 0,
+      );
+      VaultState v(List<RuleState> rules) => decodeVault(
+        vaultBytes(owner: owner, guard: guard, rules: rules),
+        address: vault,
+        lamports: 0,
+        rentExemptMinimum: 0,
+      );
+      expect(policyHistoryCount(v([r(done: true), r(), r(done: true)])), 2);
+      expect(policyHistoryCount(v([r(done: true), r(done: true)])), 0);
+      expect(policyHistoryCount(v([r()])), 0);
+      // A skipped, unclaimed tier stays as history and keeps the plan open.
+      expect(policyHistoryCount(v([r(done: true), r(skipped: true), r()])), 2);
+      expect(policyHistoryCount(v([r(done: true), r(skipped: true)])), 2);
+      expect(
+        policyHistoryCount(v([r(done: true, skipped: true), r(done: true)])),
+        0,
+      );
     });
   });
 
@@ -329,60 +432,89 @@ void main() {
         executedAt: 0,
         paid: 0,
       ),
+      RuleState(
+        beneficiary: guardian,
+        rail: Rail.solana,
+        afterSecs: 2592000,
+        mode: AmountMode.fixed,
+        amount: 7,
+        executedAt: 0,
+        paid: 0,
+        skippedAt: 1790300000,
+        reserved: 123456789,
+      ),
     ];
 
-    test('decodes 2 rules (one executed) with guardian, plan id and label', () {
-      final v = decodeVault(
-        vaultBytes(
-          owner: owner,
-          planId: 7,
-          label: 'Crianças',
-          guard: guard,
-          guardian: guardian,
-          rules: rules,
-        ),
-        address: 'vault',
-        lamports: 3000000000,
-        rentExemptMinimum: 3194880,
-      );
-      expect(v.owner, owner);
-      expect(v.planId, 7);
-      expect(v.label, 'Crianças');
-      expect(v.guard, guard);
-      expect(v.guardian, guardian);
-      expect(v.intervalSecs, 86400);
-      expect(v.lockSecs, 3600);
-      expect(v.lastPulse, 1790000000);
-      expect(v.lockedUntil, 1790003600);
-      expect(v.guardianReadyAt, 1790007200);
-      expect(v.totalPulses, 42);
-      expect(v.streak, 7);
-      expect(v.bestStreak, 12);
-      expect(v.rules.length, 2);
+    test(
+      'decodes 3 rules (paid, pending, skipped) with the new vault fields',
+      () {
+        final v = decodeVault(
+          vaultBytes(
+            owner: owner,
+            planId: 7,
+            label: 'Crianças',
+            guard: guard,
+            guardian: guardian,
+            skipGraceSecs: 604800,
+            ownerLastSeen: 1789000000,
+            rules: rules,
+          ),
+          address: 'vault',
+          lamports: 3000000000,
+          rentExemptMinimum: 3194880,
+        );
+        expect(v.owner, owner);
+        expect(v.planId, 7);
+        expect(v.label, 'Crianças');
+        expect(v.guard, guard);
+        expect(v.guardian, guardian);
+        expect(v.intervalSecs, 86400);
+        expect(v.lockSecs, 3600);
+        expect(v.skipGraceSecs, 604800);
+        expect(v.lastPulse, 1790000000);
+        expect(v.ownerLastSeen, 1789000000);
+        expect(v.lockedUntil, 1790003600);
+        expect(v.guardianReadyAt, 1790007200);
+        expect(v.totalPulses, 42);
+        expect(v.streak, 7);
+        expect(v.bestStreak, 12);
+        expect(v.rules.length, 3);
 
-      final a = v.rules[0];
-      expect(a.beneficiary, alice);
-      expect(a.rail, Rail.solana);
-      expect(a.afterSecs, 172800);
-      expect(a.mint, isNull);
-      expect(a.mode, AmountMode.fixed);
-      expect(a.amount, 1500000000);
-      expect(a.executed, isTrue);
-      expect(a.executedAt, 1790172801);
-      expect(a.paid, 1470000000);
+        final a = v.rules[0];
+        expect(a.beneficiary, alice);
+        expect(a.rail, Rail.solana);
+        expect(a.afterSecs, 172800);
+        expect(a.mint, isNull);
+        expect(a.mode, AmountMode.fixed);
+        expect(a.amount, 1500000000);
+        expect(a.executed, isTrue);
+        expect(a.executedAt, 1790172801);
+        expect(a.paid, 1470000000);
+        expect(a.skipped, isFalse);
 
-      final b = v.rules[1];
-      expect(b.beneficiary, bob);
-      expect(b.rail, Rail.cloak);
-      expect(b.mint, usdc);
-      expect(b.mode, AmountMode.percent);
-      expect(b.amount, 10000);
-      expect(b.executed, isFalse);
-      expect(b.paid, 0);
+        final b = v.rules[1];
+        expect(b.beneficiary, bob);
+        expect(b.rail, Rail.cloak);
+        expect(b.mint, usdc);
+        expect(b.mode, AmountMode.percent);
+        expect(b.amount, 10000);
+        expect(b.executed, isFalse);
+        expect(b.paid, 0);
+        expect(b.skipped, isFalse);
 
-      expect(v.lamports, 3000000000);
-      expect(v.withdrawableLamports, 3000000000 - 3194880);
-    });
+        final c = v.rules[2];
+        expect(c.executed, isFalse);
+        expect(c.skipped, isTrue);
+        expect(c.skippedAt, 1790300000);
+        expect(c.reserved, 123456789);
+        expect(c.paid, 0);
+        expect(a.skippedAt, 0);
+        expect(a.reserved, 0);
+
+        expect(v.lamports, 3000000000);
+        expect(v.withdrawableLamports, 3000000000 - 3194880);
+      },
+    );
 
     test('decodes guardian None (fields shift by 32 bytes)', () {
       final v = decodeVault(
@@ -395,7 +527,9 @@ void main() {
       expect(v.planId, 0);
       expect(v.label, '');
       expect(v.intervalSecs, 86400);
-      expect(v.rules.map((r) => r.beneficiary), [alice, bob]);
+      expect(v.rules.map((r) => r.beneficiary), [alice, bob, guardian]);
+      expect(v.skipGraceSecs, 30 * 86400);
+      expect(v.ownerLastSeen, v.lastPulse);
       expect(v.withdrawableLamports, 0);
     });
 
@@ -412,8 +546,8 @@ void main() {
             decodeVault(short, address: 'x', lamports: 0, rentExemptMinimum: 0),
         throwsFormatException,
       );
-      // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 5*8 + 8 + 4 + 4 + 4 + 32.
-      final badRail = bytes()..[167] = 3;
+      // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 7*8 + 8 + 4 + 4 + 4 + 32.
+      final badRail = bytes()..[183] = 3;
       expect(
         () => decodeVault(
           badRail,
@@ -423,6 +557,36 @@ void main() {
         ),
         throwsFormatException,
       );
+      // AmountMode of rule 0: rail offset + 1 + 8 + 1 (no mint).
+      final badMode = bytes()..[183 + 10] = 2;
+      expect(
+        () => decodeVault(
+          badMode,
+          address: 'x',
+          lamports: 0,
+          rentExemptMinimum: 0,
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('rule layout: skipped_at then reserved after paid (83 bytes)', () {
+      // SOL rule: beneficiary 32, rail 1, after_secs 8, mint None 1, mode 1,
+      // amount 8, then executed_at, paid, skipped_at, reserved (8 each).
+      final bytes = Uint8List.fromList(
+        vaultBytes(owner: owner, guard: guard, rules: rules),
+      );
+      const start = 183 - 32; // beneficiary of rule 0
+      int at(int offset) => ByteData.sublistView(
+        bytes,
+        start + offset,
+        start + offset + 8,
+      ).getInt64(0, Endian.little);
+      expect(at(51), 1790172801, reason: 'executed_at');
+      expect(at(59), 1470000000, reason: 'paid');
+      expect(at(67), 0, reason: 'skipped_at');
+      expect(at(75), 0, reason: 'reserved');
+      expect(bytes.sublist(start + 83, start + 115), keyBytes(bob));
     });
 
     test('decodes Config, mint decimals and token amounts', () {
@@ -445,7 +609,12 @@ void main() {
   });
 
   group('VaultState schedule', () {
-    RuleState r(int after, {String? mint, bool done = false}) => RuleState(
+    RuleState r(
+      int after, {
+      String? mint,
+      bool done = false,
+      int skippedAt = 0,
+    }) => RuleState(
       beneficiary: alice,
       rail: Rail.solana,
       afterSecs: after,
@@ -454,6 +623,8 @@ void main() {
       amount: 1,
       executedAt: done ? 999 : 0,
       paid: 0,
+      skippedAt: skippedAt,
+      reserved: skippedAt == 0 ? 0 : 5,
     );
     VaultState vault(List<RuleState> rules) => VaultState(
       address: 'v',
@@ -464,7 +635,9 @@ void main() {
       guardian: null,
       intervalSecs: 60,
       lockSecs: 60,
+      skipGraceSecs: 100,
       lastPulse: 1000,
+      ownerLastSeen: 900,
       lockedUntil: 0,
       guardianReadyAt: 0,
       totalPulses: 1,
@@ -495,9 +668,82 @@ void main() {
       );
     });
 
+    test('canSkip: after due + grace, per-asset order', () {
+      expect(v.canSkip(1, 1400), isFalse, reason: 'needs now > due + grace');
+      expect(v.canSkip(1, 1401), isTrue);
+      expect(v.canSkip(3, 9999), isFalse, reason: 'rule 1 pending');
+      expect(v.canSkip(0, 9999), isFalse, reason: 'already executed');
+    });
+
+    test('guardCanPulse: within a year of the owner, no release since', () {
+      final open = vault([r(200), r(300)]);
+      const year = VaultState.guardWindowSecs;
+      expect(open.guardCanPulse(900 + year), isTrue);
+      expect(open.guardCanPulse(901 + year), isFalse);
+      expect(v.guardCanPulse(1000), isFalse, reason: 'tier ran at 999 > 900');
+    });
+
     test('completed once every rule has executed', () {
       expect(v.completed, isFalse);
       expect(vault([r(200, done: true), r(300, done: true)]).completed, isTrue);
+    });
+
+    group('skipped tiers', () {
+      // Tier 1 (SOL) was skipped at 1500; tier 3 (SOL) follows it.
+      final s = vault([
+        r(200, done: true),
+        r(300, skippedAt: 1500),
+        r(250, mint: usdc),
+        r(400),
+      ]);
+
+      test('a skipped tier is claimable at any time, until it pays', () {
+        expect(s.canExecute(1, 0), isTrue, reason: 'no due check');
+        expect(s.canExecute(1, 99999), isTrue);
+        final claimed = vault([r(300, done: true, skippedAt: 1500)]);
+        expect(claimed.canExecute(0, 99999), isFalse, reason: 'already paid');
+        // Skipped tiers are claimable even out of order: an unsettled
+        // earlier tier of the same asset does not block the claim.
+        final out = vault([r(200), r(300, skippedAt: 1500)]);
+        expect(out.canExecute(1, 0), isTrue);
+      });
+
+      test('later same-asset tiers treat a skipped tier as settled', () {
+        expect(s.canExecute(3, 1400), isFalse, reason: 'needs now > due');
+        expect(s.canExecute(3, 1401), isTrue);
+        expect(s.canSkip(3, 1501), isTrue);
+        expect(s.canSkip(3, 1500), isFalse, reason: 'needs now > due + grace');
+      });
+
+      test('a skipped tier is never skipped again', () {
+        expect(s.canSkip(1, 99999), isFalse);
+        expect(
+          vault([r(300, done: true, skippedAt: 1500)]).canSkip(0, 99999),
+          isFalse,
+        );
+      });
+
+      test('guard pulse is rejected after a skip the owner has not seen', () {
+        expect(s.guardCanPulse(1600), isFalse, reason: 'skipped 1500 > 900');
+        final seen = vault([r(300, skippedAt: 800), r(400)]);
+        expect(seen.guardCanPulse(1600), isTrue, reason: 'skipped 800 < 900');
+      });
+
+      test('a skipped but unpaid tier keeps the plan open', () {
+        final waiting = vault([r(200, done: true), r(300, skippedAt: 1500)]);
+        expect(waiting.completed, isFalse);
+        expect(waiting.nextRuleDue, isNull, reason: 'nothing left pending');
+        expect(
+          vault([r(200, done: true), r(300, done: true, skippedAt: 1500)])
+              .completed,
+          isTrue,
+        );
+      });
+
+      test('nextRuleDue ignores skipped tiers', () {
+        expect(s.nextRuleDue, 1250);
+        expect(vault([r(300, skippedAt: 1500), r(400)]).nextRuleDue, 1400);
+      });
     });
   });
 
@@ -533,7 +779,8 @@ void main() {
       expect(ixs.single.data.toList(), [...Disc.executeSolRule, 0]);
     });
 
-    test('execute_token_rule with the treasury ATA create prepended', () {
+    test('execute_token_rule: treasury and beneficiary ATA creates first, '
+        'no ATA or system program', () {
       final ixs = executeRuleIxs(
         executor: executor,
         vaultOwner: owner,
@@ -542,24 +789,25 @@ void main() {
         index: 1,
         treasury: treasury,
       );
-      expect(ixs, hasLength(2));
+      expect(ixs, hasLength(3));
 
-      final create = ixs[0];
-      expect(create.programId.toBase58(), ataProgramId);
-      expect(create.data.toList(), [1]);
-      expect(metas(create), [
-        (executor, true, true),
-        (ataAddress(treasury, usdc), true, false),
-        (treasury, false, false),
-        (usdc, false, false),
-        (systemProgramId, false, false),
-        (tokenProgramId, false, false),
-      ]);
+      for (final (create, owner) in [(ixs[0], treasury), (ixs[1], bob)]) {
+        expect(create.programId.toBase58(), ataProgramId);
+        expect(create.data.toList(), [1], reason: 'CreateIdempotent');
+        expect(metas(create), [
+          (executor, true, true),
+          (ataAddress(owner, usdc), true, false),
+          (owner, false, false),
+          (usdc, false, false),
+          (systemProgramId, false, false),
+          (tokenProgramId, false, false),
+        ]);
+      }
 
-      final exec = ixs[1];
+      final exec = ixs[2];
       expect(exec.programId.toBase58(), AppConfig.programId);
       expect(metas(exec), [
-        (executor, true, true),
+        (executor, false, true),
         (vault, true, false),
         (configPda().address, false, false),
         (usdc, false, false),
@@ -568,10 +816,40 @@ void main() {
         (ataAddress(bob, usdc), true, false),
         (ataAddress(treasury, usdc), true, false),
         (tokenProgramId, false, false),
-        (ataProgramId, false, false),
-        (systemProgramId, false, false),
       ]);
       expect(exec.data.toList(), [...Disc.executeTokenRule, 1]);
+    });
+
+    test('skip_rule SOL tier: vault_token omitted as the program id', () {
+      final ix = skipRuleIx(
+        caller: executor,
+        vaultOwner: owner,
+        planId: planId,
+        index: 2,
+      );
+      expect(ix.programId.toBase58(), AppConfig.programId);
+      expect(metas(ix), [
+        (executor, false, true),
+        (vault, true, false),
+        (AppConfig.programId, false, false),
+      ]);
+      expect(ix.data.toList(), [...Disc.skipRule, 2]);
+    });
+
+    test('skip_rule token tier: vault_token is the vault ATA', () {
+      final ix = skipRuleIx(
+        caller: executor,
+        vaultOwner: owner,
+        planId: planId,
+        index: 1,
+        mint: usdc,
+      );
+      expect(metas(ix), [
+        (executor, false, true),
+        (vault, true, false),
+        (ataAddress(vault, usdc), false, false),
+      ]);
+      expect(ix.data.toList(), [...Disc.skipRule, 1]);
     });
 
     test('execute_* account names and flags match the IDL', () {
@@ -614,6 +892,16 @@ void main() {
       expect(sol.accounts.map(f), flags('execute_sol_rule'));
       expect(token.accounts.map(f), flags('execute_token_rule'));
       expect(withdraw.accounts.map(f), flags('withdraw_token'));
+      for (final mint in [null, usdc]) {
+        final skip = skipRuleIx(
+          caller: executor,
+          vaultOwner: owner,
+          planId: planId,
+          index: 0,
+          mint: mint,
+        );
+        expect(skip.accounts.map(f), flags('skip_rule'));
+      }
     });
 
     test('deposit token: vault ATA create, then TransferChecked', () {
@@ -751,7 +1039,7 @@ void main() {
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(19));
+      expect(errors, hasLength(23));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -807,6 +1095,32 @@ void main() {
       expect(
         DeadmanException.program(DeadmanException.labelTooLong).name,
         'LabelTooLong',
+      );
+    });
+
+    test('new errors have names and user-facing messages', () {
+      for (final (code, name, words) in [
+        (6017, 'OwnerConfirmationRequired', 'wallet'),
+        (6018, 'NothingToPay', 'nothing to pay'),
+        (6019, 'BeneficiaryCannotReceive', 'cannot receive'),
+        (6020, 'SkipTooEarly', 'grace period'),
+        (6021, 'InvalidConfig', 'Treasury'),
+        (6022, 'MathOverflow', 'overflow'),
+      ]) {
+        final e = DeadmanException.fromTxError({
+          'InstructionError': [
+            0,
+            {'Custom': code},
+          ],
+        });
+        expect(e.name, name);
+        expect(e.message, contains(words));
+      }
+      expect(
+        DeadmanException.ownerConfirmationRequired,
+        DeadmanException.programErrors.entries
+            .firstWhere((e) => e.value.$1 == 'OwnerConfirmationRequired')
+            .key,
       );
     });
   });

@@ -5,50 +5,154 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
+import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/feedback.dart';
+import 'recovery_phrase_screen.dart';
 
-final _guardAddressProvider = FutureProvider<String?>(
-  (ref) async => (await ref.watch(secureStoreProvider).loadGuard())?.address,
-);
+Future<bool> _confirm(
+  BuildContext context,
+  String title,
+  String body,
+  String action,
+) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: DmColors.surface,
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    ) ??
+    false;
 
 class SettingsTab extends ConsumerWidget {
   const SettingsTab({super.key});
 
-  Future<bool> _confirm(
-    BuildContext context,
-    String title,
-    String body,
-    String action,
-  ) async =>
-      await showDialog<bool>(
+  Future<void> _panic(BuildContext context, WidgetRef ref) async {
+    final actions = ref.read(actionsProvider);
+    if (ref.read(sessionProvider).duress) {
+      // Retried in the background until it goes through; look normal.
+      await actions.duressLockdown().catchError((Object _) {});
+      if (context.mounted) toast(context, 'Vault locked down');
+      return;
+    }
+    LockReport? report;
+    String? unavailable;
+    try {
+      report = await actions.lockdown();
+    } on ActionError catch (e) {
+      unavailable = e.message;
+    } catch (e) {
+      if (context.mounted) toast(context, '$e', error: true);
+      return;
+    }
+    if (!context.mounted) return;
+    if (report != null && report.complete) {
+      toast(context, report.text);
+      return;
+    }
+    // Plans the guard key could not lock: offer the owner's wallet instead.
+    final remaining =
+        report?.uncovered ??
+        (ref.read(vaultsProvider).value ?? const <VaultState>[]);
+    if (remaining.isEmpty) {
+      toast(context, unavailable ?? report!.text, error: true);
+      return;
+    }
+    final names = remaining.map(planName).join(', ');
+    if (await _confirm(
+          context,
+          'Lock with your wallet?',
+          '${report == null ? unavailable! : report.text}\n\n'
+              'Lock $names by approving in your wallet?',
+          'Lock with wallet',
+        ) &&
+        context.mounted) {
+      await runGuarded(
+        context,
+        () => actions.lockdownByOwner([for (final v in remaining) v.planId]),
+        success: 'Locked $names with your wallet',
+      );
+    }
+  }
+
+  /// Two steps: PINs and guard by default; receiving keys only on an
+  /// explicit second confirmation.
+  Future<void> _forget(BuildContext context, WidgetRef ref) async {
+    if (!await _confirm(
+          context,
+          'Forget this device?',
+          'Deletes your PINs and this phone\'s guard key. Your plans stay on-chain, '
+              'but they keep the old guard key: after setting up again, use '
+              '"Move guard to this phone" or check-ins will not reach them.',
+          'Forget',
+        ) ||
+        !context.mounted) {
+      return;
+    }
+    var deleteKeys = false;
+    if (await ref.read(secureStoreProvider).hasReceivingKeys()) {
+      if (!context.mounted) return;
+      final choice = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           backgroundColor: DmColors.surface,
-          title: Text(title),
-          content: Text(body),
+          title: const Text('Keep receiving keys?'),
+          content: const Text(
+            'This phone holds the keys behind your claim codes. They are kept unless you '
+            'delete them here.\n\nIf you delete them, funds sent to your claim codes will be '
+            'lost unless you saved your recovery phrase.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: const Text('Keep them'),
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text(action),
+              style: TextButton.styleFrom(foregroundColor: DmColors.danger),
+              child: const Text('Also delete receiving keys'),
             ),
           ],
         ),
-      ) ??
-      false;
+      );
+      if (choice == null) return;
+      if (choice) {
+        if (!context.mounted) return;
+        deleteKeys = await _confirm(
+          context,
+          'Delete receiving keys?',
+          'Funds sent to your claim codes will be lost unless you saved your recovery phrase. '
+              'Older profiles not covered by the phrase cannot be recovered at all.',
+          'Delete',
+        );
+        if (!deleteKeys) return;
+      }
+    }
+    await ref
+        .read(sessionProvider.notifier)
+        .reset(deleteReceivingKeys: deleteKeys);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final owner = ref.watch(sessionProvider.select((s) => s.owner)) ?? '';
-    final guard = ref.watch(_guardAddressProvider).value;
+    final guard = ref.watch(guardAddressProvider).value;
     final actions = ref.read(actionsProvider);
 
     return SafeArea(
@@ -95,11 +199,7 @@ class SettingsTab extends ConsumerWidget {
                       'Lock down',
                     ) &&
                     context.mounted) {
-                  await runGuarded(
-                    context,
-                    actions.lockdown,
-                    success: 'Vault locked down',
-                  );
+                  await _panic(context, ref);
                 }
               },
             ),
@@ -109,27 +209,31 @@ class SettingsTab extends ConsumerWidget {
             child: ListTile(
               leading: const Icon(Icons.autorenew),
               title: const Text('Move guard to this phone'),
-              subtitle: const Text('Use after a lost or replaced device'),
+              subtitle: const Text(
+                'Use after a lost or replaced device, or after Forget this device',
+              ),
               onTap: () async {
                 if (await _confirm(
                       context,
-                      'Rotate guard key?',
-                      'A new device key is created here and the old one stops working. Approve in your wallet.',
-                      'Rotate',
+                      'Move guard to this phone?',
+                      'Every plan guarded by another key moves to this phone\'s guard key, and the old key '
+                          'stops working. Approve in your wallet.',
+                      'Move',
                     ) &&
                     context.mounted) {
-                  final ok = await runGuarded(
+                  await runGuarded(
                     context,
                     actions.rotateGuard,
-                    success: 'Guard key rotated',
+                    success: 'Guard moved to this phone',
                   );
-                  if (ok) ref.invalidate(_guardAddressProvider);
                 }
               },
             ),
           ),
           const SizedBox(height: 12),
           const _ReceivePrivatelyCard(),
+          const SizedBox(height: 12),
+          const _RecoveryCard(),
           const SizedBox(height: 12),
           const _FeesCard(),
           const SizedBox(height: 12),
@@ -148,19 +252,9 @@ class SettingsTab extends ConsumerWidget {
               leading: const Icon(Icons.logout, color: DmColors.muted),
               title: const Text('Forget this device'),
               subtitle: const Text(
-                'Deletes PINs and the guard key from this phone',
+                'Deletes PINs and the guard key. Receiving keys stay unless you choose to delete them.',
               ),
-              onTap: () async {
-                if (await _confirm(
-                      context,
-                      'Forget this device?',
-                      'Your vault stays on-chain. You will need to rotate the guard key to pulse from a new device.',
-                      'Forget',
-                    ) &&
-                    context.mounted) {
-                  await ref.read(sessionProvider.notifier).reset();
-                }
-              },
+              onTap: () => _forget(context, ref),
             ),
           ),
         ],
@@ -209,10 +303,30 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
       ),
     );
     if (dest == null || dest.isEmpty || !context.mounted) return;
-    await runGuarded(context, () async {
-      final code = await ref.read(actionsProvider).saveClaimProfile(rail, dest);
-      await Clipboard.setData(ClipboardData(text: code));
-    }, success: 'Claim code copied. Send it to the vault owner.');
+    if (current != null && current.isNotEmpty && current != dest) {
+      if (!await _confirm(
+            context,
+            'Change destination?',
+            'Payouts routed from now on go to\n$dest\ninstead of\n$current',
+            'Change',
+          ) ||
+          !context.mounted) {
+        return;
+      }
+    }
+    SavedClaim? saved;
+    final ok = await runGuarded(context, () async {
+      saved = await ref.read(actionsProvider).saveClaimProfile(rail, dest);
+      await Clipboard.setData(ClipboardData(text: saved!.profile.claimCode));
+    });
+    if (!ok || !context.mounted) return;
+    final phrase = saved!.unconfirmedPhrase;
+    if (phrase != null) {
+      await RecoveryPhrasePage.show(context, phrase, firstTime: true);
+    }
+    if (context.mounted) {
+      toast(context, 'Claim code copied. Send it to the vault owner.');
+    }
   }
 
   @override
@@ -249,8 +363,12 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
                     subtitle: Text(
                       p == null
                           ? 'Not set up'
-                          : 'Code ${short(p.key.address)} → ${short(p.destination)}',
+                          : p.destination.isEmpty
+                          ? 'Code ${short(p.key.address)} · restored, tap to set a destination'
+                          : 'Code ${short(p.key.address)} → ${short(p.destination)}'
+                                '${p.recoverable ? '' : '\nOlder key, not covered by your recovery phrase'}',
                     ),
+                    isThreeLine: p != null && !p.recoverable,
                     trailing: p == null
                         ? const Icon(Icons.add)
                         : IconButton(
@@ -271,6 +389,86 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Backup of the receiving keys: show or restore the recovery phrase.
+class _RecoveryCard extends ConsumerWidget {
+  const _RecoveryCard();
+
+  Future<void> _show(BuildContext context, WidgetRef ref) async {
+    String? phrase;
+    final ok = await runGuarded(
+      context,
+      () async =>
+          phrase = await ref.read(actionsProvider).revealRecoveryPhrase(),
+    );
+    if (ok && context.mounted) await RecoveryPhrasePage.show(context, phrase!);
+  }
+
+  Future<void> _restore(BuildContext context, WidgetRef ref) async {
+    final controller = TextEditingController();
+    final phrase = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: DmColors.surface,
+        title: const Text('Restore receiving profiles'),
+        content: TextField(
+          controller: controller,
+          minLines: 3,
+          maxLines: 4,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(
+            labelText: 'Your 12-word recovery phrase',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (phrase == null || phrase.trim().isEmpty || !context.mounted) return;
+    String? message;
+    final ok = await runGuarded(context, () async {
+      final r = await ref.read(actionsProvider).restoreFromPhrase(phrase);
+      String names(List<Rail> rails) => rails.map((r) => r.label).join(', ');
+      message = [
+        if (r.restored.isNotEmpty)
+          'Restored ${names(r.restored)}. Set a destination before routing.',
+        if (r.kept.isNotEmpty)
+          'Kept this phone\'s existing ${names(r.kept)} key (not from this phrase).',
+      ].join(' ');
+    });
+    if (ok && context.mounted) toast(context, message!);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => Card(
+    child: Column(
+      children: [
+        ListTile(
+          leading: const Icon(Icons.key),
+          title: const Text('Show recovery phrase'),
+          subtitle: const Text('Backs up the keys behind your claim codes'),
+          onTap: () => _show(context, ref),
+        ),
+        const Divider(height: 1, color: DmColors.line),
+        ListTile(
+          leading: const Icon(Icons.restore),
+          title: const Text('Restore receiving profiles from phrase'),
+          subtitle: const Text('On a new or reset phone'),
+          onTap: () => _restore(context, ref),
+        ),
+      ],
+    ),
+  );
 }
 
 class _FeesCard extends ConsumerWidget {

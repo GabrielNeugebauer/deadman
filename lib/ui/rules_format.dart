@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../solana/deadman_api.dart';
+import '../state/plan_math.dart';
 import 'format.dart';
 import 'theme.dart';
 
@@ -30,14 +31,32 @@ extension RailUi on Rail {
   };
 }
 
+String assetName(String? mint) => mint == null ? 'SOL' : short(mint);
+
+/// Percent tiers apply to what is left of the asset when the tier runs.
 String amountLabel(RuleSpec r) => switch (r.mode) {
   AmountMode.percent =>
-    '${r.amount / 100}%${r.mint == null ? ' of SOL' : ' of ${short(r.mint!)}'}',
+    '${percentText(r.amount / 10000)} of remaining ${assetName(r.mint)}',
   AmountMode.fixed =>
     r.mint == null
         ? '${sol(r.amount)} SOL'
         : '${r.amount} units ${short(r.mint!)}',
 };
+
+/// History label for a tier that is no longer pending.
+String doneLabel(RuleState r) =>
+    r.executed ? 'Released' : 'Skipped (reserved, still claimable)';
+
+/// The share set aside for a skipped tier.
+String reservedText(RuleState r) => r.reserved == 0
+    ? 'its share'
+    : r.mint == null
+    ? '${sol(r.reserved)} SOL'
+    : '${r.reserved} units ${short(r.mint!)}';
+
+/// Status of a tier that was skipped but not yet claimed.
+String skippedLabel(RuleState r) =>
+    'Skipped: ${reservedText(r)} reserved, claimable by ${short(r.beneficiary)}';
 
 /// Check-in cadence presets. Rules default to firing one grace period after
 /// a missed check-in; "Demo" exists so the switch can fire on camera.

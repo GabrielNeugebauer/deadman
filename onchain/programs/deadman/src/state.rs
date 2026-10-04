@@ -70,6 +70,13 @@ pub struct Rule {
     pub executed_at: i64,
     /// Net amount the beneficiary received.
     pub paid: u64,
+    /// When later tiers were allowed to run past this one because it could
+    /// not pay within the grace period; 0 if never skipped. A skipped tier
+    /// stays claimable by its own beneficiary.
+    pub skipped_at: i64,
+    /// Share set aside for a skipped tier, so skipping never moves value to
+    /// later tiers. 0 = recompute from the balance when claimed.
+    pub reserved: u64,
 }
 
 #[account]
@@ -85,7 +92,11 @@ pub struct Vault {
     /// Check-in cadence; drives reminders and the minimum rule delay.
     pub interval_secs: i64,
     pub lock_secs: i64,
+    /// Owner-chosen time a due tier gets to pay before anyone may skip it.
+    pub skip_grace_secs: i64,
     pub last_pulse: i64,
+    /// Last wallet-signed (owner) action; bounds guard-only check-ins.
+    pub owner_last_seen: i64,
     pub locked_until: i64,
     /// Earliest time the guardian may lock down again.
     pub guardian_ready_at: i64,
@@ -127,6 +138,31 @@ impl Vault {
             .ok_or_else(|| error!(DeadmanError::MathOverflow))
     }
 
+    /// A wallet-signed check-in: also restarts the guard-only window.
+    pub fn record_owner_pulse(&mut self, now: i64) -> Result<()> {
+        self.owner_last_seen = now;
+        self.record_pulse(now)
+    }
+
+    /// A guard key may keep the plan alive only within a year of the owner's
+    /// last wallet action, and never after a tier released or was skipped
+    /// without the owner confirming since: only the owner can stop later
+    /// tiers.
+    pub fn check_guard_pulse(&self, now: i64) -> Result<()> {
+        let window_end = self
+            .owner_last_seen
+            .checked_add(MAX_GUARD_ONLY_SECS)
+            .ok_or(DeadmanError::MathOverflow)?;
+        require!(
+            now <= window_end
+                && !self.rules.iter().any(|r| {
+                    r.executed_at > self.owner_last_seen || r.skipped_at > self.owner_last_seen
+                }),
+            DeadmanError::OwnerConfirmationRequired
+        );
+        Ok(())
+    }
+
     /// Resets every pending rule's clock and advances the daily streak.
     pub fn record_pulse(&mut self, now: i64) -> Result<()> {
         let day = now / SECS_PER_DAY;
@@ -150,38 +186,113 @@ impl Vault {
         Ok(())
     }
 
+    /// Earlier tiers of `mint` before `index` have all paid or been skipped.
+    fn earlier_settled(&self, index: usize, mint: Option<Pubkey>) -> bool {
+        self.rules[..index]
+            .iter()
+            .all(|r| r.mint != mint || r.executed_at != 0 || r.skipped_at != 0)
+    }
+
+    /// Sum of shares set aside for skipped, still unpaid tiers of `mint`,
+    /// excluding tier `except`.
+    pub fn reserved_for(&self, mint: Option<Pubkey>, except: usize) -> Result<u64> {
+        self.rules
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| {
+                *i != except && r.mint == mint && r.executed_at == 0 && r.skipped_at != 0
+            })
+            .try_fold(0u64, |acc, (_, r)| acc.checked_add(r.reserved))
+            .ok_or_else(|| error!(DeadmanError::MathOverflow))
+    }
+
+    /// Gross payout for tier `index` given the vault's whole balance of its
+    /// asset: a skipped tier gets its reserved share; any other tier works
+    /// on the balance minus every reserved share.
+    pub fn payout_gross(&self, index: usize, balance: u64) -> Result<u64> {
+        let rule = &self.rules[index];
+        if rule.skipped_at != 0 && rule.reserved > 0 {
+            return Ok(rule.reserved.min(balance));
+        }
+        let available = balance.saturating_sub(self.reserved_for(rule.mint, index)?);
+        rule_gross(rule, available)
+    }
+
     /// Checks that rule `index` may execute now for `mint`, enforcing the
-    /// per-asset order so percentages apply to a deterministic balance.
+    /// per-asset order so percentages apply to a deterministic balance. A
+    /// skipped tier was already due and in order, so it can be claimed at
+    /// any time afterwards.
     pub fn check_executable(&self, index: usize, mint: Option<Pubkey>, now: i64) -> Result<()> {
         require!(index < self.rules.len(), DeadmanError::InvalidRuleIndex);
         let rule = &self.rules[index];
         require!(rule.mint == mint, DeadmanError::WrongAsset);
         require!(rule.executed_at == 0, DeadmanError::RuleAlreadyExecuted);
-        require!(now > self.rule_due_at(index)?, DeadmanError::RuleNotDue);
-        require!(
-            self.rules[..index]
-                .iter()
-                .all(|r| r.mint != mint || r.executed_at != 0),
-            DeadmanError::RuleOutOfOrder
-        );
+        if rule.skipped_at == 0 {
+            require!(now > self.rule_due_at(index)?, DeadmanError::RuleNotDue);
+            require!(
+                self.earlier_settled(index, mint),
+                DeadmanError::RuleOutOfOrder
+            );
+        }
         Ok(())
     }
 
-    /// Validates and installs the full policy. Caller enforces auth.
+    /// Rule `index` is pending, next for its asset, and has been due for
+    /// longer than the skip grace period.
+    pub fn check_skippable(&self, index: usize, now: i64) -> Result<()> {
+        require!(index < self.rules.len(), DeadmanError::InvalidRuleIndex);
+        let mint = self.rules[index].mint;
+        require!(
+            self.rules[index].executed_at == 0 && self.rules[index].skipped_at == 0,
+            DeadmanError::RuleAlreadyExecuted
+        );
+        require!(
+            self.earlier_settled(index, mint),
+            DeadmanError::RuleOutOfOrder
+        );
+        let skippable_at = self
+            .rule_due_at(index)?
+            .checked_add(self.skip_grace_secs)
+            .ok_or(DeadmanError::MathOverflow)?;
+        require!(now > skippable_at, DeadmanError::SkipTooEarly);
+        Ok(())
+    }
+
+    /// Validates and installs the policy. Caller enforces auth.
+    ///
+    /// Tiers that already released stay in place as history (they can never
+    /// pay again) and `rules` becomes the new pending tiers after them. Once
+    /// every tier has released the plan starts over with only `rules`.
     pub fn apply_policy(
         &mut self,
+        vault: &Pubkey,
         interval_secs: i64,
         lock_secs: i64,
+        skip_grace_secs: i64,
         rules: &[RuleInput],
         guardian: Option<Pubkey>,
     ) -> Result<()> {
         require!(
             (MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&interval_secs)
-                && (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs),
+                && (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs)
+                && (MIN_SKIP_GRACE_SECS..=MAX_SKIP_GRACE_SECS).contains(&skip_grace_secs),
             DeadmanError::InvalidDuration
         );
+        let history: Vec<Rule> = if self.is_completed() {
+            Vec::new()
+        } else {
+            self.rules
+                .iter()
+                .filter(|r| r.executed_at != 0 || r.skipped_at != 0)
+                .copied()
+                .collect()
+        };
+        let total = history
+            .len()
+            .checked_add(rules.len())
+            .ok_or(DeadmanError::MathOverflow)?;
         require!(
-            !rules.is_empty() && rules.len() <= MAX_RULES,
+            !rules.is_empty() && total <= MAX_RULES,
             DeadmanError::InvalidRules
         );
         let min_delay = interval_secs
@@ -199,6 +310,7 @@ impl Vault {
                     && r.beneficiary != Pubkey::default()
                     && r.beneficiary != self.owner
                     && r.beneficiary != self.guard
+                    && r.beneficiary != *vault
                     && r.mint != Some(Pubkey::default()),
                 DeadmanError::InvalidRules
             );
@@ -215,20 +327,21 @@ impl Vault {
 
         self.interval_secs = interval_secs;
         self.lock_secs = lock_secs;
+        self.skip_grace_secs = skip_grace_secs;
         self.guardian = guardian;
-        self.rules = rules
-            .iter()
-            .map(|r| Rule {
-                beneficiary: r.beneficiary,
-                rail: r.rail,
-                after_secs: r.after_secs,
-                mint: r.mint,
-                mode: r.mode,
-                amount: r.amount,
-                executed_at: 0,
-                paid: 0,
-            })
-            .collect();
+        self.rules = history;
+        self.rules.extend(rules.iter().map(|r| Rule {
+            beneficiary: r.beneficiary,
+            rail: r.rail,
+            after_secs: r.after_secs,
+            mint: r.mint,
+            mode: r.mode,
+            amount: r.amount,
+            executed_at: 0,
+            paid: 0,
+            skipped_at: 0,
+            reserved: 0,
+        }));
         Ok(())
     }
 }

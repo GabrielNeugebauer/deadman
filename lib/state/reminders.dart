@@ -3,7 +3,10 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
+import 'lockdown_retry.dart';
+
 const _taskName = 'deadman.pulse-check';
+const _lockdownTask = 'deadman.lockdown-retry';
 const _dueKey = 'pulse_due_at';
 const _deadlineKey = 'deadline_at';
 
@@ -15,6 +18,7 @@ final _notifications = FlutterLocalNotificationsPlugin();
 void reminderDispatcher() {
   Workmanager().executeTask((task, _) async {
     WidgetsFlutterBinding.ensureInitialized();
+    if (task == _lockdownTask) return runPendingLockdownInBackground();
     final prefs = await SharedPreferences.getInstance();
     final due = prefs.getInt(_dueKey);
     final deadline = prefs.getInt(_deadlineKey);
@@ -49,6 +53,21 @@ Future<void> initReminders() async {
     existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
   );
 }
+
+/// Retries a pending duress lockdown in the background, with exponential
+/// backoff, until it succeeds (the task returns false on failure).
+Future<void> scheduleLockdownRetry() => Workmanager().registerOneOffTask(
+  _lockdownTask,
+  _lockdownTask,
+  initialDelay: const Duration(seconds: 30),
+  constraints: Constraints(networkType: NetworkType.connected),
+  existingWorkPolicy: ExistingWorkPolicy.keep,
+  backoffPolicy: BackoffPolicy.exponential,
+  backoffPolicyDelay: const Duration(seconds: 30),
+);
+
+Future<void> cancelLockdownRetry() =>
+    Workmanager().cancelByUniqueName(_lockdownTask);
 
 /// Cached so the background isolate can decide without RPC calls.
 Future<void> scheduleFrom({

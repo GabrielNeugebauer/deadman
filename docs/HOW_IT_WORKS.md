@@ -47,7 +47,7 @@ The Solana program is the only component that holds funds. Everything else signs
 | State          | **Riverpod 3**                                                                  | Async providers fit "fetch vault, refresh, invalidate after a transaction" without boilerplate.                                                                                                                                                                          |
 | Wallet         | **Mobile Wallet Adapter 2.2.0** through a **native Kotlin bridge**              | The only way to reach the Seed Vault is MWA → Seed Vault Wallet (keys never leave the secure element). The Dart MWA package (`solana_mobile_client`) has been unmaintained since May 2025, so we call the official Kotlin `clientlib-ktx` over a `MethodChannel`.        |
 | Solana client  | **`solana` Dart 0.32** + a hand-written Borsh codec                             | RPC and keypairs come from the package. Instruction and account encoding is written against the IDL and tested byte by byte (36 tests).                                                                                                                                  |
-| Device secrets | **flutter_secure_storage** (Android Keystore)                                   | Holds the guard key, claim keys and salted SHA-256 PIN hashes.                                                                                                                                                                                                           |
+| Device secrets | **flutter_secure_storage** (Android Keystore)                                   | Holds the guard key, the claim-key recovery phrase (claim keys derive from it) and salted SHA-256 PIN hashes.                                                                                                                                                            |
 | Biometrics     | **local_auth**                                                                  | A fingerprint gates every pulse.                                                                                                                                                                                                                                         |
 | Reminders      | **workmanager** + **flutter_local_notifications**                               | An hourly background check notifies you before a check-in is due. Android may delay it in Doze, which is acceptable: the on-chain timer is the source of truth, and each tier has a margin after the check-in deadline.                                                  |
 | Zcash rail     | **NEAR Intents 1Click API**                                                     | The only verified way (Oct 2026) to swap Solana assets into **shielded** ZEC (`u1` unified addresses) with a plain REST API, which works from Dart.                                                                                                                      |
@@ -83,10 +83,12 @@ beneficiary · rail (Solana | Cloak | Zcash) · after_secs of silence
 asset (SOL or a token mint) · Fixed amount or Percent of the balance at release time
 ```
 
-- **When a rule is due:** after `last_pulse + after_secs`. A pulse resets every pending rule, so if you come back after a long trip, the remaining tiers stop. Tiers that already paid stay paid.
-- **Order:** rules are sorted by delay. For the _same asset_, a rule can't run before the earlier ones. That makes "50% then 100% of the rest" mean the same thing no matter who executes first. Different assets don't block each other.
+- **When a rule is due:** after `last_pulse + after_secs`. A check-in resets every pending rule, so if you come back after a long trip, the remaining tiers stop. Tiers that already paid stay paid, and editing the plan keeps them as history (they can never pay twice).
+- **Who can check in:** the phone's guard key (fingerprint, free) for day-to-day check-ins, but only within **365 days of the owner's last wallet-signed action**, and never after a tier has released without the owner confirming since. After that, only a "Confirm with wallet" check-in counts, so someone holding the phone cannot keep a plan alive forever.
+- **Order:** rules are sorted by delay. For the _same asset_, a rule can't run before the earlier ones. Percent tiers apply to **what is left** of that asset when they run ("50% then 50%" pays 50% and 25%; make the last tier 100% so nothing is left behind). Different assets don't block each other.
+- **A tier that can't pay doesn't block the others:** payouts go to the beneficiary's standard token account (or another account it owns, if the beneficiary signs the release itself), and if a tier still can't pay after the plan's **grace period** (chosen by the owner, 1 minute to 366 days, 30 days by default), anyone can skip it: the later tiers may then run, but the skipped tier's share stays **reserved** for its own beneficiary, who can still claim it at any time. Skipping never moves value to anyone else.
 - **Who executes:** anyone. The destination is fixed in the rule, so the executor can't redirect anything. In practice it's the protocol keeper or a beneficiary.
-- **Fixed amounts** are capped at the balance. **Dust:** a payout too small to open a new account (under ~0.00089 SOL) is marked executed with 0 paid instead of failing and blocking later tiers. The editor refuses fixed SOL tiers under 0.001 SOL.
+- **Fixed amounts** are capped at the balance. A tier with nothing to pay, or a payout too small to open the beneficiary's account (under ~0.00089 SOL), stays pending instead of being used up; the grace-period skip handles it if it never becomes payable. The editor refuses fixed SOL tiers under 0.001 SOL.
 
 ### 3.4 Duress and lockdown
 
@@ -169,7 +171,9 @@ Open the app → enter PIN → tap **I'm alive** → fingerprint → the guard k
 
 ### 5.3 Duress
 
-Forced to open the app → type the **duress PIN** → the app opens normally while the guard key silently sends `lockdown` → withdrawals spin and fail with "Seed Vault timed out" → the vault stays frozen for the lock period, and the attacker can't edit the plan.
+Forced to open the app → type the **duress PIN** → the app opens normally while the guard key silently sends `lockdown` → withdrawals spin and fail with "Seed Vault timed out" → the vault stays frozen for the lock period, and the attacker can't edit the plan. If the lock can't be sent right away (no network, sponsor down), the app keeps retrying in the background until it lands, without showing anything. Receiving profiles and private routing are disabled in a duress session.
+
+**Panic** (Security tab) locks every plan this phone guards and says exactly which plans it could not lock; for those it offers to lock them with your wallet instead.
 
 ### 5.4 Release (you went silent)
 
@@ -181,7 +185,8 @@ sequenceDiagram
   participant B as Beneficiary key
   Note over P: now > last_pulse + after_secs
   K->>P: execute_sol_rule(i) / execute_token_rule(i)
-  P->>P: check due, not executed, earlier same-asset tiers done
+  P->>P: check due, not executed, earlier same-asset tiers done, payout > 0
+  Note over K,P: a tier that still can't pay after the plan's grace period<br/>can be skipped by anyone (skip_rule):<br/>later tiers continue, its share stays reserved and claimable
   P->>B: payout minus fee (+0.003 SOL stipend on private token tiers)
   P->>T: 2% or 5% fee
 ```
@@ -190,12 +195,14 @@ The beneficiary sees it in **Family Circle**. Solana-rail funds are already in t
 
 ### 5.5 Lost or replaced phone
 
-On the new phone: connect the same Seed Vault wallet, then Security → **Move guard to this phone**. One signature, allowed even during a lockdown. The old guard key stops working.
+On the new phone: connect the same Seed Vault wallet, then Security → **Move guard to this phone**. One signature, allowed even during a lockdown, covering every plan. The old guard key stops working. If you are a beneficiary on private rails, restore your receiving keys with Security → **Restore receiving profiles from phrase** (see 5.6).
+
+"Forget this device" deletes only the PINs and the guard key; deleting receiving keys takes a separate, explicit confirmation.
 
 ### 5.6 Being someone's beneficiary
 
 - **Solana rail:** give them your wallet address.
-- **Private rails:** Security → Receive privately, paste your Zcash or Cloak destination, and send them the claim code.
+- **Private rails:** Security → Receive privately, paste your Zcash or Cloak destination, and send them the claim code. The first time, the app shows a **12-word recovery phrase**: your claim keys are derived from it, so you can restore them on a new phone. Write it down; without it, a lost phone means payouts to those claim keys are lost.
 - **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns.
 
 ---
@@ -229,5 +236,5 @@ An honest note, since you said you know the risks: releases are rare by nature (
 - **Private token payouts:** the app's "Route privately" forwards SOL only; USDC/USDT paid to a claim key stays there until that is wired.
 - **Token-2022:** the program supports it (including transfer hooks), but the app's client is classic SPL only.
 - **Leftover funds:** tokens or SOL arriving after the last tier has fired stay in the vault.
-- **Stolen guard key:** it can delay inheritance by pulsing forever. Rotate it if your phone is lost.
+- **Stolen guard key:** it can delay inheritance by at most a year after the owner's last wallet action, and not at all once a tier has released. Rotate it if your phone is lost.
 - **NEAR Intents and Cloak** are third-party operators: they can see the claim key, amounts and IP, and NEAR has held funds for compliance before.

@@ -1,5 +1,6 @@
-# Deadman SPONSOR node (Kora 2.0.5), port 8080.
-# Free pricing: pays the network fee for guard-key `pulse` / `lockdown` only.
+# Deadman SPONSOR node (Kora 2.0.5), port 8090, API key required.
+# Only tool/kora_gateway.dart (public :8080) holds the key; it forwards guard-key
+# `pulse` / `lockdown` only. Free pricing: Kora pays the network fee.
 # The fee payer may not move SOL or tokens, create accounts or approve anything.
 # Schema: crates/lib/src/config.rs at tag v2.0.5.
 
@@ -8,8 +9,9 @@ rate_limit = 20                       # global requests/second for this node (no
 max_request_body_size = 65536
 
 [kora.auth]
-# No auth on devnet. To require a key, set KORA_API_KEY in the node's environment
-# (it overrides api_key here); clients then send the `x-api-key` header.
+# Kora 2.0.5 always binds 0.0.0.0, so the API key is what closes :8090.
+# scripts/kora_start.sh sets KORA_API_KEY from SPONSOR_API_KEY in kora/.env
+# (the env var overrides api_key here); the gateway sends it as `x-api-key`.
 
 [kora.cache]
 enabled = false
@@ -44,8 +46,8 @@ price_source = "Mock"                 # unused with Free pricing
 allow_durable_transactions = false
 
 # Checked against every instruction, including CPIs found by simulation.
-# Kora cannot filter by instruction discriminator, so any Deadman instruction that
-# needs no other program is sponsored; create_vault fails (its CPI hits System).
+# Kora cannot filter by instruction discriminator; the gateway does (pulse and
+# lockdown only). This list is the second line: create_vault fails here (System CPI).
 allowed_programs = [
     "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
     "ComputeBudget111111111111111111111111111111",  # Compute Budget
@@ -107,7 +109,7 @@ blocked_account_extensions = []
 [metrics]
 enabled = true
 endpoint = "/metrics"
-port = 8080                           # same as the RPC port: served at :8080/metrics
+port = 8090                           # same as the RPC port: served at :8090/metrics
 scrape_interval = 60
 
 [metrics.fee_payer_balance]
