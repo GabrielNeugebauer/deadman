@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
+import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../format.dart';
 import '../rules_format.dart';
@@ -87,8 +88,13 @@ class _Dashboard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
-    final active = plans.where((v) => !v.completed).toList();
+    final guard = ref.watch(guardAddressProvider);
+    // Plans with a pending tier; skipped tiers only await their claim.
+    final active = plans.where((v) => v.nextRuleDue != null).toList();
     final locked = plans.any((v) => v.isLocked(now)) && !duress;
+    final cover = guard.hasValue
+        ? PlanCoverage.of(plans, guard.value, now)
+        : null;
 
     final urgent = active.isEmpty
         ? null
@@ -105,7 +111,13 @@ class _Dashboard extends ConsumerWidget {
         ? DmColors.warn
         : DmColors.alive;
     final (big, label, progress) = urgent == null
-        ? ('Done', 'every plan released', 0.0)
+        ? (
+            'Done',
+            plans.every((v) => v.completed)
+                ? 'every plan released'
+                : 'no tier pending; reserved shares await claim',
+            0.0,
+          )
         : firing
         ? (span(now - next), 'tier due, releasing', 0.0)
         : inGrace
@@ -157,6 +169,10 @@ class _Dashboard extends ConsumerWidget {
         ),
         const SizedBox(height: 24),
         _PulseButton(color: color, activePlans: active.length),
+        if (cover != null && cover.otherGuard.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _OtherGuardBanner(plans: cover.otherGuard),
+        ],
         const SizedBox(height: 16),
         _StreakCard(plans: active.isEmpty ? plans : active),
         const SizedBox(height: 18),
@@ -173,7 +189,11 @@ class _Dashboard extends ConsumerWidget {
         ),
         const SizedBox(height: 6),
         for (final v in plans) ...[
-          _PlanCard(vault: v, now: now),
+          _PlanCard(
+            vault: v,
+            now: now,
+            otherGuard: cover?.otherGuard.contains(v) ?? false,
+          ),
           const SizedBox(height: 12),
         ],
       ],
@@ -196,14 +216,16 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
 
   Future<void> _pulse() async {
     setState(() => _busy = true);
-    await runGuarded(
+    PlanCoverage? cover;
+    final ok = await runGuarded(
       context,
-      () => ref.read(actionsProvider).pulse(),
-      success: widget.activePlans == 1
-          ? 'Pulse recorded on-chain'
-          : 'Pulse recorded on ${widget.activePlans} plans',
+      () async => cover = await ref.read(actionsProvider).pulse(),
     );
-    if (mounted) setState(() => _busy = false);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (ok && cover != null) {
+      toast(context, cover!.reportText(pulsed: true), error: !cover!.complete);
+    }
   }
 
   @override
@@ -275,11 +297,72 @@ class _StreakCard extends StatelessWidget {
   }
 }
 
+/// Plans this phone's guard key can't check in (e.g. after "Forget this
+/// device"): they would release while the owner is alive.
+class _OtherGuardBanner extends ConsumerStatefulWidget {
+  const _OtherGuardBanner({required this.plans});
+
+  final List<VaultState> plans;
+
+  @override
+  ConsumerState<_OtherGuardBanner> createState() => _OtherGuardBannerState();
+}
+
+class _OtherGuardBannerState extends ConsumerState<_OtherGuardBanner> {
+  bool _busy = false;
+
+  Future<void> _move() async {
+    setState(() => _busy = true);
+    await runGuarded(
+      context,
+      ref.read(actionsProvider).rotateGuard,
+      success: 'Guard moved to this phone',
+    );
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final n = widget.plans.length;
+    return Card(
+      color: DmColors.warn.withValues(alpha: 0.12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${n == 1 ? '1 plan is' : '$n plans are'} guarded by another device '
+              '(${widget.plans.map(planName).join(', ')}). "I\'m alive" can\'t check '
+              '${n == 1 ? 'it' : 'them'} in from this phone.',
+              style: const TextStyle(color: DmColors.warn, height: 1.35),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _busy ? null : _move,
+                child: const Text('Move guard to this phone'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _PlanCard extends ConsumerWidget {
-  const _PlanCard({required this.vault, required this.now});
+  const _PlanCard({
+    required this.vault,
+    required this.now,
+    required this.otherGuard,
+  });
 
   final VaultState vault;
   final int now;
+
+  /// Guarded by a key that isn't this phone's.
+  final bool otherGuard;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -322,11 +405,10 @@ class _PlanCard extends ConsumerWidget {
                     text: '$released/${vault.rules.length} RELEASED',
                     color: DmColors.warn,
                   ),
-                if (!vault.completed)
-                  TextButton(
-                    onPressed: () => openEditor(context, vault: vault),
-                    child: const Text('Edit'),
-                  ),
+                TextButton(
+                  onPressed: () => openEditor(context, vault: vault),
+                  child: Text(vault.completed ? 'Start again' : 'Edit'),
+                ),
               ],
             ),
             Text(
@@ -341,9 +423,17 @@ class _PlanCard extends ConsumerWidget {
                 child: Row(
                   children: [
                     Icon(
-                      r.executed ? Icons.check_circle : Icons.schedule,
+                      r.executed
+                          ? Icons.check_circle
+                          : r.skipped
+                          ? Icons.savings_outlined
+                          : Icons.schedule,
                       size: 18,
-                      color: r.executed ? DmColors.muted : r.rail.color,
+                      color: r.executed
+                          ? DmColors.muted
+                          : r.skipped
+                          ? DmColors.warn
+                          : r.rail.color,
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -354,7 +444,9 @@ class _PlanCard extends ConsumerWidget {
                           const SizedBox(height: 2),
                           Text(
                             r.executed
-                                ? 'Released ${ago(r.executedAt, now)}'
+                                ? '${doneLabel(r)} ${ago(r.executedAt, now)}'
+                                : r.skipped
+                                ? skippedLabel(r)
                                 : 'After ${span(r.afterSecs)} silent · '
                                       '${vault.ruleDueAt(i) > now ? 'in ${span(vault.ruleDueAt(i) - now)}' : 'due now'}',
                             style: const TextStyle(
@@ -387,6 +479,16 @@ class _PlanCard extends ConsumerWidget {
                   ],
                 ),
               ),
+            if (otherGuard)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: Text(
+                  'Guarded by another device',
+                  style: TextStyle(color: DmColors.warn),
+                ),
+              ),
+            if (needsWalletCheckIn(vault, now))
+              _WalletCheckIn(vault: vault, now: now),
             if (vault.isLocked(now) && !duress)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -441,6 +543,66 @@ class _PlanCard extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Guard-key check-ins stop a year after the owner's last wallet action,
+/// or once a tier has released since then.
+class _WalletCheckIn extends ConsumerStatefulWidget {
+  const _WalletCheckIn({required this.vault, required this.now});
+
+  final VaultState vault;
+  final int now;
+
+  @override
+  ConsumerState<_WalletCheckIn> createState() => _WalletCheckInState();
+}
+
+class _WalletCheckInState extends ConsumerState<_WalletCheckIn> {
+  bool _busy = false;
+
+  Future<void> _confirm() async {
+    setState(() => _busy = true);
+    await runGuarded(
+      context,
+      () => ref.read(actionsProvider).pulseByOwner([widget.vault.planId]),
+      success: 'Checked in with your wallet on ${planName(widget.vault)}',
+    );
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final v = widget.vault;
+    final stopped = !v.guardCanPulse(widget.now);
+    return Container(
+      margin: const EdgeInsets.only(top: 8, right: 10),
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 4),
+      decoration: BoxDecoration(
+        color: DmColors.warn.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            stopped
+                ? "This phone can no longer check in for this plan. Confirm with your wallet, or the next tier releases on schedule."
+                : 'This phone can check in for this plan for ${span(v.guardWindowEnd - widget.now)} more. '
+                      'Confirm with your wallet to extend it by a year.',
+            style: const TextStyle(color: DmColors.warn, height: 1.35),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _busy ? null : _confirm,
+              icon: const Icon(Icons.account_balance_wallet_outlined, size: 18),
+              label: const Text('Confirm with wallet'),
+            ),
+          ),
+        ],
       ),
     );
   }

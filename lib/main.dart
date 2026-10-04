@@ -9,11 +9,16 @@ import 'ui/app.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
-  runApp(
-    ProviderScope(
-      overrides: [prefsProvider.overrideWithValue(prefs)],
-      child: const DeadmanApp(),
-    ),
+  final container = ProviderContainer(
+    overrides: [prefsProvider.overrideWithValue(prefs)],
   );
-  initReminders().catchError((Object _) {});
+  runApp(
+    UncontrolledProviderScope(container: container, child: const DeadmanApp()),
+  );
+  await initReminders().catchError((Object _) {});
+  // A duress lockdown that had not gone through when the app was killed.
+  await container
+      .read(lockdownRetrierProvider)
+      .resume()
+      .catchError((Object _) {});
 }

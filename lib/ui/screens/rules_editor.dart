@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:solana/solana.dart';
 
 import '../../solana/deadman_api.dart';
+import '../../core/config.dart';
 import '../../state/actions.dart';
+import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../format.dart';
 import '../rules_format.dart';
@@ -75,6 +77,31 @@ class _Draft {
     beneficiary.text = parts[1];
   }
 
+  /// Lenient parse for the live share preview; null while incomplete.
+  TierAmount? preview() {
+    final after = int.tryParse(this.after.text.trim());
+    if (after == null || after <= 0) return null;
+    final int? amount;
+    if (mode == AmountMode.percent) {
+      final pct = double.tryParse(this.amount.text.replaceAll(',', '.'));
+      amount = pct == null || pct <= 0 || pct > 100
+          ? null
+          : (pct * 100).round();
+    } else {
+      final v = mint == null
+          ? parseSol(this.amount.text)
+          : int.tryParse(this.amount.text.trim());
+      amount = v == null || v <= 0 ? null : v;
+    }
+    if (amount == null) return null;
+    return TierAmount(
+      mint: mint,
+      mode: mode,
+      amount: amount,
+      afterSecs: after * unit.secs,
+    );
+  }
+
   /// Returns null and reports via [error] when invalid.
   RuleSpec? build(void Function(String) error) {
     applyClaimCode();
@@ -121,7 +148,9 @@ class _Draft {
   }
 }
 
-/// Creates the vault when [vault] is null, otherwise replaces its rules.
+/// Creates the vault when [vault] is null. Otherwise edits it: tiers that
+/// already released are shown read-only and only the pending tiers are
+/// sent; once every tier has released, saving starts a fresh plan.
 class RulesEditorPage extends ConsumerStatefulWidget {
   const RulesEditorPage({super.key, this.vault});
 
@@ -131,13 +160,20 @@ class RulesEditorPage extends ConsumerStatefulWidget {
   ConsumerState<RulesEditorPage> createState() => _RulesEditorPageState();
 }
 
+const _maxTiers = 8;
+
 class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   late Cadence _cadence = Cadence.of(
     widget.vault?.intervalSecs ?? Cadence.week.interval,
   );
-  late final List<_Draft> _drafts = widget.vault == null
+  late final _split = widget.vault == null
+      ? (history: const <RuleState>[], pending: const <RuleState>[])
+      : splitRules(widget.vault!);
+  late final List<_Draft> _drafts = _split.pending.isEmpty
       ? [_Draft(afterSecs: _cadence.release)]
-      : widget.vault!.rules.map(_Draft.of).toList();
+      : _split.pending.map(_Draft.of).toList();
+  late int _grace =
+      widget.vault?.skipGraceSecs ?? AppConfig.defaultSkipGraceSecs;
   late final _guardian = TextEditingController(
     text: widget.vault?.guardian ?? '',
   );
@@ -146,6 +182,63 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   bool _busy = false;
 
   bool get _creating => widget.vault == null;
+  bool get _fresh => widget.vault?.completed ?? false;
+  List<RuleState> get _history => _split.history;
+
+  void _setCadence(Cadence c) => setState(() {
+    final wasDemo = _cadence == Cadence.demo;
+    _cadence = c;
+    if (c == Cadence.demo && _grace == AppConfig.defaultSkipGraceSecs) {
+      _grace = 120;
+    } else if (wasDemo && c != Cadence.demo && _grace < 86400) {
+      _grace = AppConfig.defaultSkipGraceSecs;
+    }
+  });
+
+  /// Today's balance of an asset, for turning fixed tiers into shares.
+  int? _balanceOf(String? mint) {
+    if (mint != null) return null;
+    return _creating
+        ? parseSol(_deposit.text)
+        : widget.vault!.withdrawableLamports;
+  }
+
+  /// Assets whose last tier leaves something in the vault.
+  Future<bool> _confirmLeftovers(List<RuleSpec> rules) async {
+    final open = previewShares(
+      rules.map(TierAmount.of).toList(),
+      balanceOf: _balanceOf,
+    ).where((a) => !a.lastTakesAll).toList();
+    if (open.isEmpty) return true;
+    final lines = [
+      for (final a in open)
+        '• ${assetName(a.mint)}: ${a.leftover == null ? 'part of the balance' : '${percentText(a.leftover!)} of today\'s balance'} stays in the vault',
+    ];
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: DmColors.surface,
+            title: const Text('Funds will be left behind'),
+            content: Text(
+              '${lines.join('\n')}\n\n'
+              'The last tier for an asset should be 100% of what remains. '
+              'Anything left after it, and anything that arrives later, stays in the vault '
+              'once you are gone: nobody else can withdraw it.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Go back'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Save anyway'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
 
   Future<void> _save() async {
     void err(String m) => toast(context, m, error: true);
@@ -159,6 +252,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       rules.add(r);
     }
     rules.sort((a, b) => a.afterSecs.compareTo(b.afterSecs));
+    if (rules.length + _history.length > _maxTiers) {
+      return err(
+        'A plan holds at most $_maxTiers tiers, released ones included',
+      );
+    }
     final g = _guardian.text.trim();
     if (g.isNotEmpty && !isAddress(g)) {
       return err('Guardian address is invalid');
@@ -167,51 +265,89 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     if (utf8.encode(label).length > 32) {
       return err('Plan name must be 32 characters or fewer');
     }
+    if (!await _confirmLeftovers(rules) || !mounted) return;
 
     setState(() => _busy = true);
     final actions = ref.read(actionsProvider);
+    var unguarded = const <VaultState>[];
     final ok = await runGuarded(
       context,
-      () => _creating
-          ? actions.createVault(
+      () async => _creating
+          ? unguarded = await actions.createVault(
               label: label,
               rules: rules,
               intervalSecs: _cadence.interval,
               lockSecs: _cadence.lock,
+              skipGraceSecs: _grace,
               depositLamports: parseSol(_deposit.text) ?? 0,
             )
-          : actions.updatePolicy(
+          : await actions.updatePolicy(
               planId: widget.vault!.planId,
               label: label,
               intervalSecs: _cadence.interval,
               lockSecs: _cadence.lock,
+              skipGraceSecs: _grace,
               rules: rules,
               guardian: g.isEmpty ? null : g,
             ),
-      success: _creating ? 'Deadman armed' : 'Release plan updated',
     );
     if (!mounted) return;
     setState(() => _busy = false);
-    if (ok) Navigator.pop(context);
+    if (!ok) return;
+    toast(
+      context,
+      unguarded.isEmpty
+          ? (_creating ? 'Deadman armed' : 'Release plan updated')
+          : 'Deadman armed. ${unguarded.length == 1 ? '1 older plan is' : '${unguarded.length} older plans are'} '
+                'still guarded by another device (${unguarded.map(planName).join(', ')}): '
+                'use Security → Move guard to this phone.',
+      error: unguarded.isNotEmpty,
+    );
+    Navigator.pop(context);
   }
 
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final fees = ref.watch(feesProvider).value;
+    final previews = previewShares([
+      for (final d in _drafts) d.preview(),
+    ], balanceOf: _balanceOf);
+    final shareOf = <int, double?>{
+      for (final a in previews)
+        for (final s in a.tiers) s.index: s.share,
+    };
+    final choices = graceChoices(demo: _cadence == Cadence.demo);
+    if (!choices.any((c) => c.$1 == _grace)) {
+      choices.add((_grace, span(_grace)));
+    }
     return Scaffold(
       appBar: AppBar(
         backgroundColor: DmColors.bg,
-        title: Text(_creating ? 'New release plan' : 'Edit release plan'),
+        title: Text(
+          _creating
+              ? 'New release plan'
+              : _fresh
+              ? 'Start a new plan'
+              : 'Edit release plan',
+        ),
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 4, 20, 32),
         children: [
           Text(
             'Each tier releases an amount to someone after you have been silent for a while. '
-            'Tiers run in order; a single check-in resets every pending tier.',
+            'Tiers run in order; a single check-in resets every pending tier. '
+            'A percentage is taken from what is left of that asset when the tier runs.',
             style: t.bodyMedium?.copyWith(color: DmColors.muted, height: 1.4),
           ),
+          if (_fresh) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Every tier of this plan has released. Saving starts a fresh plan with new tiers.',
+              style: TextStyle(color: DmColors.warn, height: 1.4),
+            ),
+          ],
           const SizedBox(height: 18),
           TextField(
             controller: _label,
@@ -232,22 +368,49 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
                 ChoiceChip(
                   label: Text(c.label),
                   selected: _cadence == c,
-                  onSelected: (_) => setState(() => _cadence = c),
+                  onSelected: (_) => _setCadence(c),
                 ),
             ],
           ),
+          const SizedBox(height: 14),
+          const Text(
+            "If a tier can't pay, others continue after",
+            style: TextStyle(color: DmColors.muted),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final (secs, label) in choices)
+                ChoiceChip(
+                  label: Text(label),
+                  selected: _grace == secs,
+                  onSelected: (_) => setState(() => _grace = secs),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'A due tier that still cannot pay this long after it fell due can be skipped, '
+            'so one broken destination never blocks the rest. Its share stays reserved '
+            'for its beneficiary to claim.',
+            style: TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35),
+          ),
           const SizedBox(height: 18),
+          for (final (i, r) in _history.indexed)
+            _HistoryTile(index: i, rule: r),
           for (final (i, d) in _drafts.indexed)
             _TierCard(
-              index: i,
+              index: _history.length + i,
               draft: d,
               fees: fees,
+              share: shareOf[i],
               onRemove: _drafts.length > 1
                   ? () => setState(() => _drafts.removeAt(i))
                   : null,
               onChanged: () => setState(() {}),
             ),
-          if (_drafts.length < 8)
+          if (_drafts.length + _history.length < _maxTiers)
             OutlinedButton.icon(
               onPressed: () => setState(
                 () => _drafts.add(_Draft(afterSecs: _cadence.release * 2)),
@@ -255,10 +418,19 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
               icon: const Icon(Icons.add),
               label: const Text('Add tier'),
             ),
+          if (previews.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _SharePreview(
+              previews: previews,
+              drafts: _drafts,
+              offset: _history.length,
+            ),
+          ],
           const SizedBox(height: 18),
           if (_creating)
             TextField(
               controller: _deposit,
+              onChanged: (_) => setState(() {}),
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
@@ -306,11 +478,97 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   }
 }
 
+/// A tier that already released, or was skipped (its share reserved and
+/// still claimable): history, not editable.
+class _HistoryTile extends StatelessWidget {
+  const _HistoryTile({required this.index, required this.rule});
+
+  final int index;
+  final RuleState rule;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Opacity(
+      opacity: 0.55,
+      child: Card(
+        child: ListTile(
+          leading: Icon(
+            rule.executed ? Icons.check_circle : Icons.savings_outlined,
+            color: DmColors.muted,
+          ),
+          title: Text('Tier ${index + 1} · ${doneLabel(rule)}'),
+          subtitle: Text(
+            '${amountLabel(rule)} → ${short(rule.beneficiary)}\n'
+            '${rule.executed ? 'Kept as history; it will not pay again.' : 'Its share stays reserved until its beneficiary claims it.'}',
+          ),
+          isThreeLine: true,
+          trailing: RailBadge(rule.rail),
+        ),
+      ),
+    ),
+  );
+}
+
+/// Effective share of today's balance per asset: percentages compound.
+class _SharePreview extends StatelessWidget {
+  const _SharePreview({
+    required this.previews,
+    required this.drafts,
+    required this.offset,
+  });
+
+  final List<AssetPreview> previews;
+  final List<_Draft> drafts;
+
+  /// Number of history tiers shown before the drafts.
+  final int offset;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "Effective share of today's balance",
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
+          for (final a in previews) ...[
+            const SizedBox(height: 8),
+            Text(
+              '${assetName(a.mint)}: ${[for (final s in a.tiers) 'Tier ${offset + s.index + 1} ${s.share == null ? '?' : percentText(s.share!)}', if (a.leftover == null) '? left in vault' else '${percentText(a.leftover!)} left in vault'].join(' · ')}',
+              style: TextStyle(
+                color: a.lastTakesAll ? DmColors.muted : DmColors.warn,
+                height: 1.35,
+              ),
+            ),
+            if (!a.lastTakesAll)
+              const Padding(
+                padding: EdgeInsets.only(top: 2),
+                child: Text(
+                  'Make the last tier 100% of what remains, or the rest stays in the vault after you are gone.',
+                  style: TextStyle(
+                    color: DmColors.warn,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
 class _TierCard extends StatelessWidget {
   const _TierCard({
     required this.index,
     required this.draft,
     required this.fees,
+    required this.share,
     required this.onRemove,
     required this.onChanged,
   });
@@ -318,6 +576,9 @@ class _TierCard extends StatelessWidget {
   final int index;
   final _Draft draft;
   final FeeSchedule? fees;
+
+  /// Fraction of today's balance this tier pays, when known.
+  final double? share;
   final VoidCallback? onRemove;
   final VoidCallback onChanged;
 
@@ -405,6 +666,7 @@ class _TierCard extends StatelessWidget {
                           width: 72,
                           child: TextField(
                             controller: d.after,
+                            onChanged: (_) => onChanged(),
                             keyboardType: TextInputType.number,
                             textAlign: TextAlign.center,
                           ),
@@ -456,12 +718,13 @@ class _TierCard extends StatelessWidget {
                         Expanded(
                           child: TextField(
                             controller: d.amount,
+                            onChanged: (_) => onChanged(),
                             keyboardType: const TextInputType.numberWithOptions(
                               decimal: true,
                             ),
                             decoration: InputDecoration(
                               suffixText: d.mode == AmountMode.percent
-                                  ? '%'
+                                  ? '% of remaining'
                                   : d.mint == null
                                   ? 'SOL'
                                   : 'units',
@@ -470,6 +733,17 @@ class _TierCard extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (share != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          "≈ ${percentText(share!)} of today's ${assetName(d.mint)} balance",
+                          style: const TextStyle(
+                            color: DmColors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
                     const SizedBox(height: 8),
                     _AssetPicker(
                       mint: d.mint,

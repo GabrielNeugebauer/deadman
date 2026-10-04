@@ -34,6 +34,7 @@ pub mod deadman {
         instructions::config::handle_set_config(ctx, treasury, fee_bps_public, fee_bps_private)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_vault(
         ctx: Context<CreateVault>,
         plan_id: u16,
@@ -41,6 +42,7 @@ pub mod deadman {
         guard: Pubkey,
         interval_secs: i64,
         lock_secs: i64,
+        skip_grace_secs: i64,
         rules: Vec<RuleInput>,
     ) -> Result<()> {
         instructions::vault::handle_create_vault(
@@ -50,6 +52,7 @@ pub mod deadman {
             guard,
             interval_secs,
             lock_secs,
+            skip_grace_secs,
             rules,
         )
     }
@@ -59,6 +62,7 @@ pub mod deadman {
         label: String,
         interval_secs: i64,
         lock_secs: i64,
+        skip_grace_secs: i64,
         rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
     ) -> Result<()> {
@@ -67,6 +71,7 @@ pub mod deadman {
             label,
             interval_secs,
             lock_secs,
+            skip_grace_secs,
             rules,
             guardian,
         )
@@ -105,6 +110,10 @@ pub mod deadman {
 
     pub fn execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
         instructions::funds::handle_execute_sol_rule(ctx, index)
+    }
+
+    pub fn skip_rule(ctx: Context<SkipRule>, index: u8) -> Result<()> {
+        instructions::funds::handle_skip_rule(ctx, index)
     }
 
     pub fn execute_token_rule<'info>(

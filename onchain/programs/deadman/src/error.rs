@@ -36,6 +36,14 @@ pub enum DeadmanError {
     PlanCompleted,
     #[msg("Plan label is too long")]
     LabelTooLong,
+    #[msg("The owner's wallet must confirm before the guard key can check in again")]
+    OwnerConfirmationRequired,
+    #[msg("Nothing to pay for this tier yet")]
+    NothingToPay,
+    #[msg("Beneficiary account cannot receive this amount")]
+    BeneficiaryCannotReceive,
+    #[msg("This tier can only be skipped once the plan's grace period has passed")]
+    SkipTooEarly,
     #[msg("Treasury must be set")]
     InvalidConfig,
     #[msg("Arithmetic overflow")]

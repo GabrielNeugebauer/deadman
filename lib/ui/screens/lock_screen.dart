@@ -25,9 +25,16 @@ class LockScreen extends ConsumerWidget {
           ref.read(sessionProvider.notifier).unlock(duress: false);
           return true;
         case PinCheck.duress:
-          // Unlock first so the UI responds instantly; lockdown runs behind it.
+          // Unlock first so the UI responds instantly. The lockdown is
+          // persisted and retried with backoff (foreground and Workmanager)
+          // until it goes through; nothing is shown to the person watching.
           ref.read(sessionProvider.notifier).unlock(duress: true);
-          unawaited(ref.read(actionsProvider).lockdown().catchError((_) {}));
+          unawaited(
+            ref
+                .read(actionsProvider)
+                .duressLockdown()
+                .catchError((Object _) {}),
+          );
           return true;
       }
     }

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Start the Deadman Kora sponsor node (:8080) in the background. It pays
-# fees for guard-key check-ins and duress locks; owners pay their own SOL.
-# Needs kora/.env (KORA_SIGNER_PRIVATE_KEY, optional RPC_URL, SPONSOR_API_KEY),
-# the `kora` binary (kora-cli 2.0.5) and Docker for Redis.
+# Start the Deadman fee sponsor in the background: Kora on :8090 (API key
+# required) and the public gateway tool/kora_gateway.dart on :8080, which
+# forwards only guard-key pulse/lockdown. Owners pay their own SOL.
+# Needs kora/.env (KORA_SIGNER_PRIVATE_KEY, optional RPC_URL; SPONSOR_API_KEY
+# is generated on first run), the `kora` binary (kora-cli 2.0.5), Dart and
+# Docker for Redis.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,8 +14,15 @@ REDIS_NAME="deadman-kora-redis"
 mkdir -p "$LOGS"
 
 [[ -f "$KDIR/.env" ]] || { echo "missing $KDIR/.env (see docs/KORA.md)" >&2; exit 1; }
+if ! grep -qE '^SPONSOR_API_KEY=.+' "$KDIR/.env"; then
+  sed -i '/^SPONSOR_API_KEY=/d' "$KDIR/.env"
+  (umask 077; printf 'SPONSOR_API_KEY=%s\n' "$(openssl rand -hex 32)" >>"$KDIR/.env")
+  chmod 600 "$KDIR/.env"
+  echo "generated SPONSOR_API_KEY in kora/.env"
+fi
 set -a; source "$KDIR/.env"; set +a
 : "${KORA_SIGNER_PRIVATE_KEY:?KORA_SIGNER_PRIVATE_KEY not set in kora/.env}"
+: "${SPONSOR_API_KEY:?SPONSOR_API_KEY not set in kora/.env}"
 RPC_URL="${RPC_URL:-https://api.devnet.solana.com}"
 
 KORA_BIN="${KORA_BIN:-$(command -v kora || echo "$HOME/.cargo/bin/kora")}"
@@ -61,7 +70,36 @@ start_node() {
   exit 1
 }
 
-start_node sponsor 8080 "${SPONSOR_API_KEY:-}"
+start_node sponsor 8090 "$SPONSOR_API_KEY"
+
+# Public entry. It reads SPONSOR_API_KEY and RPC_URL from the environment.
+start_gateway() {
+  local pidf="$KDIR/gateway.pid"
+  if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+    echo "gateway already running (pid $(cat "$pidf"))"
+    return
+  fi
+  # Own process group (the Flutter `dart` wrapper forks the VM), so
+  # kora_stop.sh can stop both with one signal.
+  RPC_URL="$RPC_URL" GATEWAY_PORT=8080 KORA_UPSTREAM=http://127.0.0.1:8090 \
+    GATEWAY_STATE="$KDIR/gateway-usage.json" \
+    setsid bash -c 'cd "$1" && exec dart run tool/kora_gateway.dart' _ "$ROOT" \
+    </dev/null >>"$LOGS/gateway.log" 2>&1 &
+  echo $! >"$pidf"
+  for _ in $(seq 1 240); do
+    if curl -sf "http://127.0.0.1:8080/liveness" >/dev/null; then
+      echo "gateway up on :8080 (pid $(cat "$pidf")), log $LOGS/gateway.log"
+      return
+    fi
+    kill -0 "$(cat "$pidf")" 2>/dev/null || break
+    sleep 0.5
+  done
+  echo "gateway failed to start; last log lines:" >&2
+  tail -n 20 "$LOGS/gateway.log" >&2
+  exit 1
+}
+
+start_gateway
 
 LAN_IP="$(hostname -I | awk '{print $1}')"
-echo "sponsor:   http://$LAN_IP:8080"
+echo "sponsor (public gateway): http://$LAN_IP:8080"

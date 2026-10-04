@@ -34,4 +34,12 @@ class AppConfig {
 
   /// SOL sent to the device guard key at setup to pay pulse fees.
   static const guardFundingLamports = 10000000;
+
+  /// Program bounds for the owner-chosen skip grace period.
+  static const minSkipGraceSecs = 60;
+  static const maxSkipGraceSecs = 366 * 86400;
+  static const defaultSkipGraceSecs = 30 * 86400;
+
+  /// Warn this long before guard-key check-ins stop being accepted.
+  static const guardWindowWarnSecs = 30 * 86400;
 }

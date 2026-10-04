@@ -17,9 +17,11 @@ List<int> le(int bytes, int value) {
 
 List<int> keyBytes(String k) => Ed25519HDPublicKey.fromBase58(k).bytes;
 
-Map<String, dynamic> loadIdl() =>
-    jsonDecode(File('onchain/target/idl/deadman.json').readAsStringSync())
-        as Map<String, dynamic>;
+/// The built IDL, or the file named by `DEADMAN_IDL` when set.
+Map<String, dynamic> loadIdl() => jsonDecode(
+  File(Platform.environment['DEADMAN_IDL'] ?? 'onchain/target/idl/deadman.json')
+      .readAsStringSync(),
+) as Map<String, dynamic>;
 
 List<int> ruleInputBytes(RuleSpec r) => [
   ...keyBytes(r.beneficiary),
@@ -34,6 +36,8 @@ List<int> ruleStateBytes(RuleState r) => [
   ...ruleInputBytes(r),
   ...le(8, r.executedAt),
   ...le(8, r.paid),
+  ...le(8, r.skippedAt),
+  ...le(8, r.reserved),
 ];
 
 List<int> vaultBytes({
@@ -44,7 +48,9 @@ List<int> vaultBytes({
   String? guardian,
   int intervalSecs = 86400,
   int lockSecs = 3600,
+  int skipGraceSecs = 30 * 86400,
   int lastPulse = 1790000000,
+  int? ownerLastSeen,
   int lockedUntil = 1790003600,
   int guardianReadyAt = 1790007200,
   int totalPulses = 42,
@@ -59,7 +65,9 @@ List<int> vaultBytes({
   if (guardian == null) 0 else ...[1, ...keyBytes(guardian)],
   ...le(8, intervalSecs),
   ...le(8, lockSecs),
+  ...le(8, skipGraceSecs),
   ...le(8, lastPulse),
+  ...le(8, ownerLastSeen ?? lastPulse),
   ...le(8, lockedUntil),
   ...le(8, guardianReadyAt),
   ...le(8, totalPulses),

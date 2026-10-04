@@ -25,6 +25,14 @@ pub struct Pulsed {
 }
 
 #[event]
+pub struct RuleSkipped {
+    pub vault: Pubkey,
+    pub index: u8,
+    pub reserved: u64,
+    pub by: Pubkey,
+}
+
+#[event]
 pub struct LockedDown {
     pub vault: Pubkey,
     pub by: Pubkey,

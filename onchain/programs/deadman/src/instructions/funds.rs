@@ -1,6 +1,6 @@
 use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
 use anchor_spl::{
-    associated_token::AssociatedToken,
+    associated_token::get_associated_token_address_with_program_id,
     token_2022::spl_token_2022,
     token_interface::{Mint, TokenAccount, TokenInterface},
 };
@@ -9,7 +9,7 @@ use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{rule_gross, split_fee, Config, Vault},
+    state::{split_fee, Config, Vault},
 };
 
 fn withdrawable_lamports(vault: &AccountInfo) -> Result<u64> {
@@ -83,7 +83,7 @@ pub fn handle_withdraw_sol(ctx: Context<WithdrawSol>, amount: u64) -> Result<()>
     );
     vault.sub_lamports(amount)?;
     ctx.accounts.owner.add_lamports(amount)?;
-    vault.record_pulse(now)
+    vault.record_owner_pulse(now)
 }
 
 #[derive(Accounts)]
@@ -136,7 +136,7 @@ pub fn handle_withdraw_token<'info>(
         ctx.remaining_accounts,
         amount,
     )?;
-    ctx.accounts.vault.record_pulse(now)
+    ctx.accounts.vault.record_owner_pulse(now)
 }
 
 #[derive(Accounts)]
@@ -173,8 +173,10 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
         DeadmanError::Unauthorized
     );
 
-    let available = withdrawable_lamports(&vault_info)?;
-    let gross = rule_gross(&rule, available)?;
+    let balance = withdrawable_lamports(&vault_info)?;
+    let gross = ctx.accounts.vault.payout_gross(i, balance)?;
+    // An empty payout would burn the tier; leave it pending instead.
+    require!(gross > 0, DeadmanError::NothingToPay);
     let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail))?;
 
     let rent = Rent::get()?;
@@ -185,15 +187,14 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
         net = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
         fee = 0;
     }
-    // A brand-new account cannot be funded below rent exemption; leave the
-    // dust in the vault rather than failing and blocking later rules.
+    // A brand-new account cannot be funded below rent exemption. The tier
+    // stays pending (and can be skipped after the grace period) rather than
+    // being consumed with nothing paid.
     let beneficiary = &ctx.accounts.beneficiary;
-    if net > 0
-        && beneficiary.lamports().saturating_add(net) < rent.minimum_balance(beneficiary.data_len())
-    {
-        net = 0;
-        fee = 0;
-    }
+    require!(
+        beneficiary.lamports().saturating_add(net) >= rent.minimum_balance(beneficiary.data_len()),
+        DeadmanError::BeneficiaryCannotReceive
+    );
 
     let total = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
     ctx.accounts.vault.sub_lamports(total)?;
@@ -220,7 +221,6 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
 
 #[derive(Accounts)]
 pub struct ExecuteTokenRule<'info> {
-    #[account(mut)]
     pub executor: Signer<'info>,
     #[account(
         mut,
@@ -242,12 +242,13 @@ pub struct ExecuteTokenRule<'info> {
     /// CHECK: must equal the rule's beneficiary; receives the gas stipend.
     #[account(mut)]
     pub beneficiary: UncheckedAccount<'info>,
+    /// The beneficiary's ATA, or any other token account it owns when the
+    /// beneficiary signs (e.g. its ATA was frozen or reassigned).
     #[account(
-        init_if_needed,
-        payer = executor,
-        associated_token::mint = mint,
-        associated_token::authority = beneficiary,
-        associated_token::token_program = token_program
+        mut,
+        token::mint = mint,
+        token::authority = beneficiary,
+        token::token_program = token_program
     )]
     pub beneficiary_token: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
@@ -258,8 +259,6 @@ pub struct ExecuteTokenRule<'info> {
     )]
     pub treasury_token: Box<InterfaceAccount<'info, TokenAccount>>,
     pub token_program: Interface<'info, TokenInterface>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 /// Permissionless: pays a due token rule. Private rails also receive a small
@@ -279,7 +278,20 @@ pub fn handle_execute_token_rule<'info>(
         DeadmanError::Unauthorized
     );
 
-    let gross = rule_gross(&rule, a.vault_token.amount)?;
+    let canonical = get_associated_token_address_with_program_id(
+        &rule.beneficiary,
+        &a.mint.key(),
+        &a.token_program.key(),
+    );
+    // Only the beneficiary may redirect its payout away from its ATA, so an
+    // executor cannot pick an account the beneficiary cannot use.
+    require!(
+        a.beneficiary_token.key() == canonical || a.beneficiary.is_signer,
+        DeadmanError::Unauthorized
+    );
+
+    let gross = a.vault.payout_gross(i, a.vault_token.amount)?;
+    require!(gross > 0, DeadmanError::NothingToPay);
     let (net, fee) = split_fee(gross, a.config.fee_bps(rule.rail))?;
     vault_transfer(
         &a.token_program,
@@ -325,6 +337,61 @@ pub fn handle_execute_token_rule<'info>(
         amount: net,
         fee,
         by: ctx.accounts.executor.key(),
+    });
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct SkipRule<'info> {
+    /// Anyone: usually a later beneficiary or the keeper.
+    pub caller: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [VAULT_SEED, vault.owner.as_ref(), &vault.plan_id.to_le_bytes()],
+        bump = vault.bump
+    )]
+    pub vault: Box<Account<'info, Vault>>,
+    /// The vault's ATA of the tier's mint; required for token tiers so the
+    /// skipped share can be reserved from the real balance.
+    pub vault_token: Option<Box<InterfaceAccount<'info, TokenAccount>>>,
+}
+
+/// Permissionless: lets later tiers of the same asset run past a tier that
+/// still has not paid when the plan's grace period ends. The skipped tier's
+/// share is reserved for it and stays claimable by its own beneficiary, so a
+/// skip never moves value to anyone else or strands it.
+pub fn handle_skip_rule(ctx: Context<SkipRule>, index: u8) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    let i = usize::from(index);
+    ctx.accounts.vault.check_skippable(i, now)?;
+    let mint = ctx.accounts.vault.rules[i].mint;
+    let balance = match mint {
+        None => withdrawable_lamports(&ctx.accounts.vault.to_account_info())?,
+        Some(mint) => {
+            let token = ctx
+                .accounts
+                .vault_token
+                .as_ref()
+                .ok_or(DeadmanError::WrongAsset)?;
+            let expected = get_associated_token_address_with_program_id(
+                &ctx.accounts.vault.key(),
+                &mint,
+                token.to_account_info().owner,
+            );
+            require_keys_eq!(token.key(), expected, DeadmanError::WrongAsset);
+            token.amount
+        }
+    };
+    let reserved = ctx.accounts.vault.payout_gross(i, balance)?;
+
+    let vault = &mut ctx.accounts.vault;
+    vault.rules[i].skipped_at = now;
+    vault.rules[i].reserved = reserved;
+    emit!(RuleSkipped {
+        vault: vault.key(),
+        index,
+        reserved,
+        by: ctx.accounts.caller.key(),
     });
     Ok(())
 }

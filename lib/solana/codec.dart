@@ -22,6 +22,7 @@ abstract final class Disc {
   static const withdrawToken = [136, 235, 181, 5, 101, 109, 57, 81];
   static const executeSolRule = [27, 74, 220, 147, 58, 73, 241, 103];
   static const executeTokenRule = [172, 93, 237, 201, 225, 26, 97, 140];
+  static const skipRule = [240, 82, 139, 70, 215, 222, 129, 174];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
@@ -37,6 +38,8 @@ abstract final class Limits {
   static const maxIntervalSecs = 366 * 86400;
   static const minRuleMarginSecs = 60;
   static const maxRuleDelaySecs = 3 * 366 * 86400;
+  static const minSkipGraceSecs = 60;
+  static const maxSkipGraceSecs = 366 * 86400;
   static const minLockSecs = 60;
   static const maxLockSecs = 30 * 86400;
   static const privateGasStipend = 3000000;
@@ -177,6 +180,12 @@ class BorshReader {
   int i64() => _d.getInt64(_take(8), Endian.little);
   int u64() => _d.getUint64(_take(8), Endian.little);
 
+  bool boolean() => switch (u8()) {
+    0 => false,
+    1 => true,
+    final b => throw FormatException('Bad bool $b'),
+  };
+
   String pubkey() {
     final start = _take(32);
     return base58encode(_d.buffer.asUint8List(_d.offsetInBytes + start, 32));
@@ -216,6 +225,7 @@ Uint8List encodeCreateVault({
   required String guard,
   required int intervalSecs,
   required int lockSecs,
+  required int skipGraceSecs,
   required List<RuleSpec> rules,
 }) =>
     (BorshWriter()
@@ -225,6 +235,7 @@ Uint8List encodeCreateVault({
           ..pubkey(guard)
           ..i64(intervalSecs)
           ..i64(lockSecs)
+          ..i64(skipGraceSecs)
           ..ruleInputs(rules))
         .toBytes();
 
@@ -232,6 +243,7 @@ Uint8List encodeUpdatePolicy({
   required String label,
   required int intervalSecs,
   required int lockSecs,
+  required int skipGraceSecs,
   required List<RuleSpec> rules,
   String? guardian,
 }) =>
@@ -240,6 +252,7 @@ Uint8List encodeUpdatePolicy({
           ..string(label)
           ..i64(intervalSecs)
           ..i64(lockSecs)
+          ..i64(skipGraceSecs)
           ..ruleInputs(rules)
           ..optionPubkey(guardian))
         .toBytes();
@@ -268,24 +281,44 @@ Uint8List encodeExecuteRule(int index, {required bool token}) =>
           ..u8(index))
         .toBytes();
 
+Uint8List encodeSkipRule(int index) =>
+    (BorshWriter()
+          ..bytes(Disc.skipRule)
+          ..u8(index))
+        .toBytes();
+
+/// Tiers `update_policy` keeps as history in front of the new rules: every
+/// paid or skipped one, or none once every tier has paid.
+int policyHistoryCount(VaultState vault) =>
+    vault.completed ? 0 : vault.rules.where((r) => r.settled).length;
+
 /// Mirrors `Vault::apply_policy` (and the guard checks of `create_vault`).
 /// Returns the program error code the chain would raise, or null if valid.
 /// Pass [guard] only when known; the chain also checks it on update.
+/// [historyCount] is [policyHistoryCount] of the current vault on update
+/// (0 on create): history plus [rules] must fit in [Limits.maxRules].
 int? policyError({
   required String owner,
+  required String vault,
   String? guard,
   required int intervalSecs,
   required int lockSecs,
+  required int skipGraceSecs,
   required List<RuleSpec> rules,
+  int historyCount = 0,
   String? guardian,
 }) {
   if (intervalSecs < Limits.minIntervalSecs ||
       intervalSecs > Limits.maxIntervalSecs ||
       lockSecs < Limits.minLockSecs ||
-      lockSecs > Limits.maxLockSecs) {
+      lockSecs > Limits.maxLockSecs ||
+      skipGraceSecs < Limits.minSkipGraceSecs ||
+      skipGraceSecs > Limits.maxSkipGraceSecs) {
     return 6002;
   }
-  if (rules.isEmpty || rules.length > Limits.maxRules) return 6003;
+  if (rules.isEmpty || historyCount + rules.length > Limits.maxRules) {
+    return 6003;
+  }
   final minDelay = intervalSecs + Limits.minRuleMarginSecs;
   for (var i = 0; i < rules.length; i++) {
     final r = rules[i];
@@ -300,6 +333,7 @@ int? policyError({
         r.beneficiary == defaultPubkey ||
         r.beneficiary == owner ||
         r.beneficiary == guard ||
+        r.beneficiary == vault ||
         r.mint == defaultPubkey) {
       return 6003;
     }
@@ -338,7 +372,9 @@ VaultState decodeVault(
   final guardian = r.optionPubkey();
   final intervalSecs = r.i64();
   final lockSecs = r.i64();
+  final skipGraceSecs = r.i64();
   final lastPulse = r.i64();
+  final ownerLastSeen = r.i64();
   final lockedUntil = r.i64();
   final guardianReadyAt = r.i64();
   final totalPulses = r.u64();
@@ -357,6 +393,8 @@ VaultState decodeVault(
       amount: r.u64(),
       executedAt: r.i64(),
       paid: r.u64(),
+      skippedAt: r.i64(),
+      reserved: r.u64(),
     ),
   );
   final label = r.string();
@@ -370,7 +408,9 @@ VaultState decodeVault(
     guardian: guardian,
     intervalSecs: intervalSecs,
     lockSecs: lockSecs,
+    skipGraceSecs: skipGraceSecs,
     lastPulse: lastPulse,
+    ownerLastSeen: ownerLastSeen,
     lockedUntil: lockedUntil,
     guardianReadyAt: guardianReadyAt,
     totalPulses: totalPulses,
@@ -496,6 +536,25 @@ Instruction pulseOrLockdownIx({
   _w(vaultPda(vaultOwner, planId).address),
 ], lockdown ? Disc.lockdown : Disc.pulse);
 
+/// `skip_rule`: any signer may skip a tier past its grace period. For a
+/// token tier ([mint] set) `vault_token` is the vault's ATA, so the program
+/// can reserve the tier's share; for a SOL tier the optional account is
+/// omitted, which Anchor encodes as the program id in its slot.
+Instruction skipRuleIx({
+  required String caller,
+  required String vaultOwner,
+  required int planId,
+  required int index,
+  String? mint,
+}) {
+  final vault = vaultPda(vaultOwner, planId).address;
+  return deadmanIx([
+    _r(caller, signer: true),
+    _w(vault),
+    _r(mint == null ? AppConfig.programId : ataAddress(vault, mint)),
+  ], encodeSkipRule(index));
+}
+
 /// `create_vault`. [payer] funds the vault rent (the client passes the owner).
 Instruction createVaultIx({
   required String owner,
@@ -552,8 +611,10 @@ List<Instruction> withdrawTokenIxs({
   ];
 }
 
-/// `execute_sol_rule` or, for a token rule, a treasury ATA create followed by
-/// `execute_token_rule`. [treasury] comes from Config.
+/// `execute_sol_rule` or, for a token rule, idempotent creates of the
+/// treasury's and the beneficiary's ATAs (paid by [executor]; the program no
+/// longer creates either) followed by `execute_token_rule` paying into the
+/// beneficiary's ATA. [treasury] comes from Config.
 ///
 /// Token rules assume classic SPL Token mints. Token-2022 (different token
 /// program, ATA derivation and possibly transfer-hook remaining accounts) is
@@ -581,8 +642,9 @@ List<Instruction> executeRuleIxs({
   }
   return [
     createAtaIdempotentIx(payer: executor, owner: treasury, mint: mint),
+    createAtaIdempotentIx(payer: executor, owner: rule.beneficiary, mint: mint),
     deadmanIx([
-      _w(executor, signer: true),
+      _r(executor, signer: true),
       _w(vault),
       _r(configPda().address),
       _r(mint),
@@ -591,8 +653,6 @@ List<Instruction> executeRuleIxs({
       _w(ataAddress(rule.beneficiary, mint)),
       _w(ataAddress(treasury, mint)),
       _r(tokenProgramId),
-      _r(ataProgramId),
-      _r(systemProgramId),
     ], encodeExecuteRule(index, token: true)),
   ];
 }

@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
@@ -7,7 +5,10 @@ import 'package:local_auth/local_auth.dart';
 import '../rails/cloak_route.dart';
 import '../rails/cloak_webview_runtime.dart';
 import '../solana/deadman_api.dart';
+import 'lockdown_retry.dart';
+import 'plan_math.dart';
 import 'providers.dart';
+import 'secure_store.dart';
 
 class ActionError implements Exception {
   const ActionError(this.message);
@@ -19,6 +20,16 @@ class ActionError implements Exception {
 
 /// SOL left on a claim key after routing, to cover the routing tx fees.
 const _routeFeeReserve = 1000000;
+
+class SavedClaim {
+  const SavedClaim(this.profile, this.unconfirmedPhrase);
+
+  final ClaimProfile profile;
+
+  /// The recovery phrase, when the user has not yet confirmed writing it
+  /// down (show it now).
+  final String? unconfirmedPhrase;
+}
 
 /// User intents. Owner actions go through the Seed Vault wallet; pulse and
 /// panic use the on-device guard key behind a biometric check; private
@@ -67,20 +78,21 @@ class VaultActions {
   Future<List<VaultState>> _plans() => _api.fetchVaults(_owner);
 
   /// Creates a new plan with the next free id. Every plan uses this
-  /// device's guard key so one check-in covers all of them.
-  Future<void> createVault({
+  /// device's guard key so one check-in covers all of them. Returns the
+  /// active plans still guarded by another device (e.g. after "Forget this
+  /// device"): they need "Move guard to this phone".
+  Future<List<VaultState>> createVault({
     required String label,
     required List<RuleSpec> rules,
     required int intervalSecs,
     required int lockSecs,
+    required int skipGraceSecs,
     required int depositLamports,
   }) async {
     final store = ref.read(secureStoreProvider);
     final guard = await store.loadGuard() ?? await store.createGuard();
     final plans = await _plans();
-    final planId = plans.isEmpty
-        ? 0
-        : plans.map((v) => v.planId).reduce(max) + 1;
+    final planId = await _api.nextFreePlanId(_owner);
     await _signAndSend([
       await _api.buildCreateVault(
         owner: _owner,
@@ -89,46 +101,79 @@ class VaultActions {
         guard: guard.address,
         intervalSecs: intervalSecs,
         lockSecs: lockSecs,
+        skipGraceSecs: clampGrace(skipGraceSecs),
         rules: rules,
         depositLamports: depositLamports,
       ),
     ]);
+    ref.invalidate(guardAddressProvider);
+    return PlanCoverage.of(plans, guard.address, nowSecs()).otherGuard;
   }
 
-  Future<void> pulse() async {
-    if (!await _biometric('Confirm you are alive')) {
-      throw const ActionError('Biometric check failed');
-    }
+  /// Checks in, with the guard key, on exactly the active plans it can
+  /// pulse. The report names plans that need a wallet check-in or are
+  /// guarded by another device; throws when nothing could be pulsed.
+  Future<PlanCoverage> pulse() async {
     final guard = await ref.read(secureStoreProvider).loadGuard();
-    if (guard == null) {
-      throw const ActionError('Guard key missing on this device');
-    }
-    final active = [
-      for (final v in await _plans())
-        if (!v.completed && v.guard == guard.address) v.planId,
-    ];
-    if (active.isEmpty) {
+    final cover = PlanCoverage.of(await _plans(), guard?.address, nowSecs());
+    if (cover.isEmpty) {
       throw const ActionError(
         'Every plan has fully released; nothing to check in',
       );
     }
-    await _api.pulseWithGuard(guard, vaultOwner: _owner, planIds: active);
+    if (cover.guarded.isEmpty) {
+      throw ActionError(cover.reportText(pulsed: false));
+    }
+    if (!await _biometric('Confirm you are alive')) {
+      throw const ActionError('Biometric check failed');
+    }
+    await _api.pulseWithGuard(
+      guard!,
+      vaultOwner: _owner,
+      planIds: [for (final v in cover.guarded) v.planId],
+    );
     HapticFeedback.heavyImpact();
     _refresh();
+    return cover;
   }
 
-  /// Silent: no prompt, no haptics. Used by the duress PIN and Panic.
-  /// Locks every plan this device guards.
-  Future<void> lockdown() async {
-    final guard = await ref.read(secureStoreProvider).loadGuard();
-    if (guard == null) return;
-    final ids = [
-      for (final v in await _plans())
-        if (v.guard == guard.address) v.planId,
-    ];
-    if (ids.isEmpty) return;
-    await _api.lockdownWithGuard(guard, vaultOwner: _owner, planIds: ids);
-    _refresh();
+  /// Wallet-signed check-in, for plans the guard key can no longer pulse.
+  Future<void> pulseByOwner(List<int> planIds) async {
+    if (!await _biometric('Confirm you are alive')) {
+      throw const ActionError('Biometric check failed');
+    }
+    await _signAndSend([
+      await _api.buildPulseByOwner(owner: _owner, planIds: planIds),
+    ]);
+    HapticFeedback.heavyImpact();
+  }
+
+  /// Panic: locks every plan this device guards. Throws when nothing was
+  /// locked; the report names plans left unlocked.
+  Future<LockReport> lockdown() async {
+    try {
+      final report = await lockGuardedPlans(
+        _api,
+        await ref.read(secureStoreProvider).loadGuard(),
+        _owner,
+      );
+      _refresh();
+      return report;
+    } on LockdownUnavailable catch (e) {
+      throw ActionError(e.message);
+    }
+  }
+
+  /// Panic fallback: locks [planIds] with the owner's wallet signature.
+  Future<void> lockdownByOwner(List<int> planIds) async => _signAndSend([
+    await _api.buildLockdownByOwner(owner: _owner, planIds: planIds),
+  ]);
+
+  /// Duress PIN: silent, retried with backoff until it goes through.
+  Future<void> duressLockdown() async {
+    final owner = ref.read(sessionProvider).owner;
+    if (owner == null) return;
+    await ref.read(lockdownRetrierProvider).start(owner);
   }
 
   Future<void> deposit(int planId, int lamports) => _decoy(
@@ -151,11 +196,14 @@ class VaultActions {
     ]),
   );
 
+  /// [rules] are the new pending tiers only (see
+  /// [DeadmanApi.buildUpdatePolicy]).
   Future<void> updatePolicy({
     required int planId,
     required String label,
     required int intervalSecs,
     required int lockSecs,
+    required int skipGraceSecs,
     required List<RuleSpec> rules,
     String? guardian,
   }) => _decoy(
@@ -166,25 +214,36 @@ class VaultActions {
         label: label,
         intervalSecs: intervalSecs,
         lockSecs: lockSecs,
+        skipGraceSecs: clampGrace(skipGraceSecs),
         rules: rules,
         guardian: guardian,
       ),
     ]),
   );
 
-  /// Moves the guard of every plan to a fresh key on this device (e.g.
-  /// after losing a phone), in one wallet approval.
+  /// Moves every plan guarded by another key (a lost phone, or before
+  /// "Forget this device") to this device's guard key, in one wallet
+  /// approval. The old key stops working.
   Future<void> rotateGuard() async {
-    final ids = [for (final v in await _plans()) v.planId];
-    if (ids.isEmpty) throw const ActionError('You have no plans yet');
-    final fresh = await ref.read(secureStoreProvider).createGuard();
+    final plans = await _plans();
+    if (plans.isEmpty) throw const ActionError('You have no plans yet');
+    final store = ref.read(secureStoreProvider);
+    final guard = await store.loadGuard() ?? await store.createGuard();
+    final ids = [
+      for (final v in plans)
+        if (v.guard != guard.address) v.planId,
+    ];
+    if (ids.isEmpty) {
+      throw const ActionError('Every plan is already guarded by this phone');
+    }
     await _signAndSend([
       await _api.buildSetGuard(
         owner: _owner,
         planIds: ids,
-        newGuard: fresh.address,
+        newGuard: guard.address,
       ),
     ]);
+    ref.invalidate(guardAddressProvider);
   }
 
   /// Executes a due rule from the connected wallet. Anyone may execute;
@@ -198,26 +257,94 @@ class VaultActions {
     ),
   ]);
 
+  /// Skips a due tier that could not pay within the plan's grace period,
+  /// so later tiers for that asset can run. Anyone may skip; the tier's
+  /// share stays reserved and its beneficiary can still claim it.
+  Future<void> skipRule(VaultState vault, int index) async => _signAndSend([
+    await _api.buildSkipRule(
+      caller: _owner,
+      vaultOwner: vault.owner,
+      planId: vault.planId,
+      index: index,
+    ),
+  ]);
+
   /// Creates or updates this device's receiving profile for a private rail.
-  Future<String> saveClaimProfile(Rail rail, String destination) async {
-    final d = destination.trim();
-    if (rail == Rail.zcash && !d.startsWith('u1')) {
+  /// Behind the duress decoy and a biometric check, asked again (with its
+  /// own reason) when an existing destination changes.
+  Future<SavedClaim> saveClaimProfile(Rail rail, String destination) =>
+      _decoy(() async {
+        final d = destination.trim();
+        if (rail == Rail.zcash && !d.startsWith('u1')) {
+          throw const ActionError(
+            'Use a unified u1… Zcash address so the payout lands shielded',
+          );
+        }
+        final store = ref.read(secureStoreProvider);
+        final existing = await store.loadClaim(rail);
+        final changing =
+            existing != null &&
+            existing.destination.isNotEmpty &&
+            existing.destination != d;
+        if (!await _biometric(
+          changing
+              ? 'Confirm changing where your ${rail.name} inheritance goes'
+              : 'Confirm your ${rail.name} receiving profile',
+        )) {
+          throw const ActionError('Biometric check failed');
+        }
+        final p = await store.saveClaim(rail, d);
+        ref.invalidate(claimProfilesProvider);
+        final unconfirmed = p.recoverable && !await store.phraseConfirmed()
+            ? await store.loadPhrase()
+            : null;
+        return SavedClaim(p, unconfirmed);
+      });
+
+  /// The recovery phrase for this device's receiving profiles.
+  Future<String> revealRecoveryPhrase() => _decoy(() async {
+    final store = ref.read(secureStoreProvider);
+    final phrase = await store.loadPhrase();
+    if (phrase == null) {
       throw const ActionError(
-        'Use a unified u1… Zcash address so the payout lands shielded',
+        'No recovery phrase yet. It is created with your first receiving profile.',
       );
     }
-    final p = await ref
-        .read(secureStoreProvider)
-        .saveClaim(rail, destination.trim());
-    ref.invalidate(claimProfilesProvider);
-    return p.claimCode;
-  }
+    if (!await _biometric('Show your recovery phrase')) {
+      throw const ActionError('Biometric check failed');
+    }
+    return phrase;
+  });
+
+  Future<void> confirmPhraseSaved() =>
+      ref.read(secureStoreProvider).markPhraseConfirmed();
+
+  Future<RestoreResult> restoreFromPhrase(String phrase) => _decoy(() async {
+    if (!SecureStore.isValidPhrase(phrase)) {
+      throw const ActionError('That is not a valid 12-word recovery phrase');
+    }
+    if (!await _biometric('Restore your receiving profiles')) {
+      throw const ActionError('Biometric check failed');
+    }
+    try {
+      final r = await ref.read(secureStoreProvider).restoreFromPhrase(phrase);
+      ref.invalidate(claimProfilesProvider);
+      return r;
+    } on StateError catch (e) {
+      throw ActionError(e.message);
+    }
+  });
 
   /// Forwards SOL that landed on a claim key to its private destination.
-  Future<String> routePrivately(Rail rail) async {
+  Future<String> routePrivately(Rail rail) => _decoy(() async {
     final profile = await ref.read(secureStoreProvider).loadClaim(rail);
     if (profile == null) {
       throw const ActionError('No receiving profile for this rail');
+    }
+    if (profile.destination.isEmpty) {
+      throw ActionError(
+        'Set your ${rail.name} destination first (Security → Receive privately)',
+      );
     }
     final route = rail == Rail.cloak
         ? CloakRoute(runtime: await CloakWebViewRuntime.start())
@@ -230,6 +357,9 @@ class VaultActions {
     final balance = await _api.balance(profile.key.address);
     final amount = balance - _routeFeeReserve;
     if (amount <= 0) throw const ActionError('Nothing to route yet');
+    if (!await _biometric('Confirm routing your inheritance')) {
+      throw const ActionError('Biometric check failed');
+    }
     final quote = await route.quote(
       claimKey: profile.key.address,
       inputMint: null,
@@ -239,7 +369,7 @@ class VaultActions {
     final id = await route.execute(claimKey: profile.key, quote: quote);
     ref.invalidate(watchedVaultsProvider);
     return id;
-  }
+  });
 
   /// Swaps wallet SOL into the yield token, then deposits it into a plan.
   /// The swap goes through Jupiter's /execute: some routes need Jupiter's
@@ -268,12 +398,12 @@ class VaultActions {
 
   /// Under duress, fund-moving actions look like a flaky wallet instead of
   /// revealing the on-chain lock to the person holding the phone.
-  Future<void> _decoy(Future<void> Function() action) async {
+  Future<T> _decoy<T>(Future<T> Function() action) async {
     if (ref.read(sessionProvider).duress) {
       await Future<void>.delayed(const Duration(seconds: 4));
       throw const ActionError('Seed Vault timed out. Try again later.');
     }
-    await action();
+    return action();
   }
 }
 
