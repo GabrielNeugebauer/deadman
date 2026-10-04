@@ -33,5 +33,8 @@ pub const MAX_VEST_SECS: i64 = 20 * 366 * SECS_PER_DAY;
 pub const MAX_VEST_START_SKEW_SECS: i64 = 366 * SECS_PER_DAY;
 
 /// SOL sent along with token payouts on private rails so a fresh claim key
-/// can pay the fees to route its funds onward.
-pub const PRIVATE_GAS_STIPEND: u64 = 3_000_000;
+/// can pay to route its funds onward. A Cloak SPL deposit needs about
+/// 0.01 SOL on the claim key plus fees; a Zcash (1Click) deposit needs the
+/// deposit address's ATA rent plus fees.
+pub const CLOAK_GAS_STIPEND: u64 = 12_000_000;
+pub const ZCASH_GAS_STIPEND: u64 = 3_000_000;

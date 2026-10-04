@@ -63,8 +63,9 @@ List<int> vaultBytes({
   bool revocable = false,
   int revokedAt = 0,
   String? rentPayer,
+  int rentPaid = 0,
   List<RuleState> rules = const [],
-}) => [
+}) => _padVault([
   ...Disc.vaultAccount,
   ...keyBytes(owner),
   ...le(2, planId),
@@ -85,11 +86,19 @@ List<int> vaultBytes({
   if (revocable) 1 else 0,
   ...le(8, revokedAt),
   ...keyBytes(rentPayer ?? owner),
+  ...le(8, rentPaid),
   ...le(4, rules.length),
   for (final r in rules) ...ruleStateBytes(r),
   ...le(4, utf8.encode(label).length),
   ...utf8.encode(label),
   254,
+  ...List<int>.filled(64, 0), // _reserved
+]);
+
+/// Unused rule and label space stays zeroed up to the fixed account size.
+List<int> _padVault(List<int> bytes) => [
+  ...bytes,
+  ...List<int>.filled(vaultAccountSize - bytes.length, 0),
 ];
 
 List<int> configBytes({

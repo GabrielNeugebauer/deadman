@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Bundles @cloak.dev/sdk for Deadman's headless WebView into assets/cloak/cloak.js",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "smoke": "node smoke.mjs"
   },
   "dependencies": {
     "@cloak.dev/sdk": "0.2.5",
@@ -15,6 +16,7 @@
     "events": "3.3.0"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "playwright": "1.63.0"
   }
 }

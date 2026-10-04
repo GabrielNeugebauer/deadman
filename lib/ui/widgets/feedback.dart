@@ -34,8 +34,8 @@ Future<bool> runGuarded(
 /// Program errors whose raw message doesn't tell the user what to do.
 const friendlyErrors = {
   'OwnerConfirmationRequired': 'This phone can no longer check in for this plan. Tap Confirm with wallet on it.',
-  'NothingToPay': 'This tier has nothing to pay yet. If it still cannot pay after the plan\'s grace period, it can be skipped.',
-  'BeneficiaryCannotReceive': 'The beneficiary\'s account cannot receive this payout. After the plan\'s grace period anyone can skip the tier so later tiers continue; its share stays reserved for the beneficiary to claim.',
+  'NothingToPay': 'This tier has nothing to pay yet: the plan holds none of its asset. If it still cannot pay after the plan\'s grace period, Deadman skips it automatically and keeps its share reserved.',
+  'BeneficiaryCannotReceive': 'The beneficiary\'s account cannot receive this payout. After the plan\'s grace period Deadman skips the tier automatically so later tiers continue; its share stays reserved for the beneficiary to claim.',
   'SkipTooEarly': 'Too early to skip: this tier still has time to pay within the plan\'s grace period.',
   'WrongPlanKind': 'That action does not apply to this kind of plan: vesting plans have no check-ins or tiers, and inheritance plans have no schedules.',
   'InvalidVesting': 'Check each schedule: it needs a total, a cliff no longer than its duration, and a start within a year.',

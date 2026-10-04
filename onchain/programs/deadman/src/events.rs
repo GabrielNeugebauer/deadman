@@ -62,3 +62,12 @@ pub struct RuleExecuted {
     pub fee: u64,
     pub by: Pubkey,
 }
+
+#[event]
+pub struct LegacyVaultRecovered {
+    pub vault: Pubkey,
+    pub owner: Pubkey,
+    pub plan_id: u16,
+    pub data_len: u32,
+    pub lamports: u64,
+}

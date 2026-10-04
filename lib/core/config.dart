@@ -26,6 +26,13 @@ class AppConfig {
   static const appIdentityUri = 'https://deadman.app';
   static const appIconPath = 'favicon.ico';
 
+  /// Where the web app sends people for the Android app.
+  static const androidAppUrl = String.fromEnvironment(
+    'ANDROID_APP_URL',
+    defaultValue:
+        'https://github.com/GabrielNeugebauer/deadman/releases/latest',
+  );
+
   /// Kora node that sponsors guard-key transactions (pulse, lockdown) for
   /// free, so the guard key never needs SOL. Empty = guard pays its own fee.
   static const koraSponsorUrl = String.fromEnvironment('KORA_SPONSOR_URL');
@@ -37,13 +44,33 @@ class AppConfig {
   /// Security tab). Empty = owners always pay in SOL.
   static const koraPaymasterUrl = String.fromEnvironment('KORA_PAYMASTER_URL');
 
-  /// USDC mint: Circle's devnet USDC by default on devnet. Override with
-  /// `--dart-define=USDC_MINT=...` (e.g. a test mint).
+  /// The paymaster's fee payer, which must also be its payment address
+  /// (audit M-3): the app refuses a paymaster that answers with another
+  /// key, so a tampered response cannot redirect the fee. Defaults to the
+  /// Deadman devnet signer; a mainnet build must set KORA_PAYMASTER_SIGNER,
+  /// or paying fees in USDC is refused.
+  static const koraPaymasterSigner = String.fromEnvironment(
+    'KORA_PAYMASTER_SIGNER',
+    defaultValue: isMainnet
+        ? ''
+        : 'HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL',
+  );
+
+  /// The most the app pays the paymaster for one transaction, in base units
+  /// of the fee token (3 USDC); a higher quote is refused.
+  static const koraMaxFee = int.fromEnvironment(
+    'KORA_MAX_FEE',
+    defaultValue: 3000000,
+  );
+
+  /// USDC mint. On devnet: our devnet test USDC, accepted by the devnet
+  /// paymaster. Circle devnet USDC via
+  /// `--dart-define=USDC_MINT=4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`.
   static const usdcMint = String.fromEnvironment(
     'USDC_MINT',
     defaultValue: isMainnet
         ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
-        : '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+        : 'Ew8Z6hhRp7MFK8KJAxRqaBQvBEjtRj4Y4K4YhWsPMFGk',
   );
   static const usdcDecimals = 6;
 

@@ -365,6 +365,19 @@ void main() {
       expect(() => small.acquire('c', ['z']), rejects('sponsor reached'));
     });
 
+    test('n slots at once, and release gives them back', () {
+      final l = UsageLimiter(perVault: 0, perSigner: 3, global: 4);
+      final at = l.acquire('a', const [], n: 2);
+      expect(() => l.check('a', const [], n: 2), rejects('reached 3'));
+      l.check('a', const []);
+      l.acquire('b', const [], n: 2);
+      expect(() => l.check('c', const []), rejects('cap of 4'));
+      l.release('a', const [], at, n: 2);
+      expect(l.toJson()['global'], hasLength(2));
+      expect((l.toJson()['signers']! as Map).keys, ['b']);
+      l.acquire('a', const [], n: 2);
+    });
+
     test('a rejected transaction records nothing', () {
       final l = UsageLimiter(perVault: 1, clock: () => 5000)
         ..acquire('g', ['full']);
@@ -598,6 +611,79 @@ Instruction ataCreateIdempotent(String payer, String wallet) => Instruction(
   data: ByteArray([1]),
 );
 
+/// An SPL token account as the RPC returns it; [state] 1 = initialized,
+/// 2 = frozen.
+VaultAccount tokenAccount(
+  String holder,
+  int amount, {
+  String mint = usdc,
+  int state = 1,
+}) => (
+  owner: tokenProgramId,
+  data: Uint8List.fromList(
+    tokenAccountBytes(mint: mint, owner: holder, amount: amount)..[108] = state,
+  ),
+);
+
+String usdcAta(String holder) =>
+    associatedTokenAddress(holder, usdc, tokenProgramId);
+
+PaymasterRoute pmRoute({
+  UsageLimiter? limiter,
+  UsageLimiter? creates,
+  UsageLimiter? atas,
+  Map<String, VaultAccount?> chain = const {},
+  Map<PaymasterTier, Uri> upstreams = const {},
+}) => PaymasterRoute(
+  policy: pmPolicy,
+  limiter: limiter ?? UsageLimiter(perVault: 0),
+  creates: creates ?? UsageLimiter(perVault: 0),
+  atas: atas ?? UsageLimiter(perVault: 0),
+  fetchAccounts: (addresses) async => [for (final a in addresses) chain[a]],
+  upstreams: upstreams,
+);
+
+Instruction ataCreateFor(String payer, String wallet, String mint) =>
+    Instruction(
+      programId: pk(ataProgramId),
+      accounts: [
+        rw(payer, signer: true),
+        rw(associatedTokenAddress(wallet, mint, tokenProgramId)),
+        ro(wallet),
+        ro(mint),
+        ro(systemProgramId),
+        ro(tokenProgramId),
+      ],
+      data: ByteArray([1]),
+    );
+
+/// `execute_token_rule` / `release_vested_token` accounts, as the client
+/// builds them.
+Instruction payoutIx(
+  String executor,
+  String vaultOwner,
+  String beneficiary,
+  String treasury,
+  List<int> disc, {
+  String mint = usdc,
+}) {
+  final vault = vaultPda(vaultOwner, 0).address;
+  return deadmanIx(
+    [
+      ro(executor, signer: true),
+      rw(vault),
+      ro(configPda().address),
+      ro(mint),
+      rw(associatedTokenAddress(vault, mint, tokenProgramId)),
+      rw(beneficiary),
+      rw(associatedTokenAddress(beneficiary, mint, tokenProgramId)),
+      rw(associatedTokenAddress(treasury, mint, tokenProgramId)),
+      ro(tokenProgramId),
+    ],
+    [...disc, 0],
+  );
+}
+
 void paymasterTests() {
   late Ed25519HDKeyPair owner;
 
@@ -722,11 +808,165 @@ void paymasterTests() {
       );
     });
 
+    group('Kora-funded token accounts (M-1)', () {
+      final other = key(60);
+
+      Future<PaymasterRequest> check(List<Instruction> ixs) async =>
+          validatePaymasterTx(
+            await wire(
+              [...ixs, pay(owner.address, amount: 1000000)],
+              signers: [owner],
+            ),
+            pmPolicy,
+          );
+
+      test(
+        'PoC: two Kora-paid ATAs on the signer own wallet are refused',
+        () async {
+          await expectLater(
+            check([
+              ataCreateFor(kora, owner.address, usdc),
+              ataCreateFor(kora, owner.address, other),
+            ]),
+            throwsA(
+              isA<GatewayRejection>().having(
+                (e) => e.message,
+                'message',
+                allOf(
+                  contains('only funds a token account the transaction pays'),
+                  contains(owner.address),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+
+      test('a Kora-paid ATA needs a deposit of its own mint', () async {
+        final vault = vaultPda(owner.address, 0).address;
+        // Deposit of another mint (or none) does not justify it.
+        await expectLater(
+          check([
+            ataCreateFor(kora, vault, other),
+            transferChecked(
+              source: usdcAta(owner.address),
+              dest: usdcAta(vault),
+              authority: owner.address,
+            ),
+          ]),
+          rejects('only funds a token account'),
+        );
+        // A zero deposit does not either.
+        await expectLater(
+          check([
+            ataCreateIdempotent(kora, vault),
+            transferChecked(
+              source: usdcAta(owner.address),
+              dest: usdcAta(vault),
+              authority: owner.address,
+              amount: 0,
+            ),
+          ]),
+          rejects('only funds a token account'),
+        );
+      });
+
+      test('a deposit ATA of a vault created in the same transaction '
+          'needs no on-chain check', () async {
+        final vault = vaultPda(owner.address, 0).address;
+        final r = validatePaymasterTx(
+          await wire(
+            [
+              createVault(owner.address, kora),
+              ataCreateIdempotent(kora, vault),
+              transferChecked(
+                source: usdcAta(owner.address),
+                dest: usdcAta(vault),
+                authority: owner.address,
+              ),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          ),
+          pmPolicy,
+        );
+        expect(r.tier, PaymasterTier.plan);
+        expect(r.koraAtas, 1);
+        expect(r.vaultChecks, isEmpty);
+      });
+
+      test('a deposit ATA outside a Deadman instruction is checked on '
+          'chain', () async {
+        final r = await check([
+          ataCreateFor(kora, other, usdc),
+          transferChecked(
+            source: usdcAta(owner.address),
+            dest: usdcAta(other),
+            authority: owner.address,
+          ),
+        ]);
+        expect(r.vaultChecks, [other]);
+      });
+
+      for (final (name, disc) in [
+        ('execute_token_rule', Disc.executeTokenRule),
+        ('release_vested_token', Disc.releaseVestedToken),
+      ]) {
+        test(
+          '$name: Kora may open the beneficiary and treasury ATAs',
+          () async {
+            final treasury = key(61);
+            final r = await check([
+              ataCreateFor(kora, treasury, usdc),
+              ataCreateFor(kora, owner.address, usdc),
+              payoutIx(owner.address, key(62), owner.address, treasury, disc),
+            ]);
+            expect(r.koraAtas, 2);
+            expect(r.vaultChecks, isEmpty);
+            // Not the ATA of a wallet that is not the beneficiary, nor of
+            // another mint.
+            await expectLater(
+              check([
+                ataCreateFor(kora, other, usdc),
+                payoutIx(owner.address, key(62), owner.address, treasury, disc),
+              ]),
+              rejects('only funds a token account'),
+            );
+            await expectLater(
+              check([
+                ataCreateFor(kora, owner.address, other),
+                payoutIx(owner.address, key(62), owner.address, treasury, disc),
+              ]),
+              rejects('only funds a token account'),
+            );
+          },
+        );
+      }
+
+      test("withdraw_token: Kora never opens the owner's ATA", () async {
+        final vault = vaultPda(owner.address, 0).address;
+        await expectLater(
+          check([
+            ataCreateIdempotent(kora, owner.address),
+            deadmanIx(
+              [
+                rw(owner.address, signer: true),
+                rw(vault),
+                ro(usdc),
+                rw(usdcAta(vault)),
+                rw(usdcAta(owner.address)),
+                ro(tokenProgramId),
+              ],
+              [...Disc.withdrawToken, ...le(8, 5)],
+            ),
+          ]),
+          rejects('only funds a token account'),
+        );
+      });
+    });
+
     test('routes each tier to its own Kora node', () async {
-      final route = PaymasterRoute(
-        policy: pmPolicy,
-        limiter: UsageLimiter(perVault: 0, perSigner: 9, global: 9),
-        creates: UsageLimiter(perVault: 0, perSigner: 9, global: 9),
+      final route = pmRoute(
         upstreams: {
           PaymasterTier.basic: Uri.parse('http://basic'),
           PaymasterTier.plan: Uri.parse('http://plan'),
@@ -975,8 +1215,7 @@ void paymasterTests() {
 
   group('PaymasterRoute', () {
     test('rate-limits Kora-funded vaults separately', () async {
-      final route = PaymasterRoute(
-        policy: pmPolicy,
+      final route = pmRoute(
         limiter: UsageLimiter(perVault: 0, perSigner: 60, clock: () => 5000),
         creates: UsageLimiter(
           perVault: 0,
@@ -985,12 +1224,13 @@ void paymasterTests() {
           signerLabel: 'owner',
           unit: 'paymaster-funded vaults',
         ),
+        chain: {usdcAta(owner.address): tokenAccount(owner.address, 9000000)},
       );
       final create = await wire(
         [createVault(owner.address, kora), pay(owner.address)],
         signers: [owner],
       );
-      expect(await route.admit(create), contains('tier=plan'));
+      expect((await route.admit(create)).summary, contains('tier=plan'));
       await expectLater(
         route.admit(create),
         rejects('reached 1 paymaster-funded vaults'),
@@ -1006,55 +1246,304 @@ void paymasterTests() {
         ],
         signers: [owner],
       );
-      expect(await route.admit(deposit), contains('tier=basic'));
+      expect((await route.admit(deposit)).summary, contains('tier=basic'));
     });
 
     test('rejects an unsigned transaction before counting it', () async {
       final limiter = UsageLimiter(perVault: 0, perSigner: 1);
-      final route = PaymasterRoute(
-        policy: pmPolicy,
-        limiter: limiter,
-        creates: UsageLimiter(perVault: 0),
-      );
+      final route = pmRoute(limiter: limiter);
       final tx = await wire([pay(owner.address)]);
       await expectLater(route.admit(tx), rejects('Invalid owner signature'));
       expect(limiter.toJson()['global'], isEmpty);
     });
 
+    test('caps Kora-funded token accounts per owner, one slot each', () async {
+      final vault = vaultPda(owner.address, 0).address;
+      final atas = UsageLimiter(
+        perVault: 0,
+        perSigner: 2,
+        signerLabel: 'owner',
+        unit: 'paymaster-funded token accounts',
+      );
+      final route = pmRoute(
+        atas: atas,
+        chain: {
+          usdcAta(owner.address): tokenAccount(owner.address, 90000000),
+          vault: vaultAccount(guard: key(63)),
+        },
+      );
+      Future<Uint8List> deposit(String mint) async => wire(
+        [
+          ataCreateFor(kora, vault, mint),
+          transferChecked(
+            source: associatedTokenAddress(owner.address, mint, tokenProgramId),
+            dest: associatedTokenAddress(vault, mint, tokenProgramId),
+            authority: owner.address,
+            mint: mint,
+          ),
+          pay(owner.address, amount: 1000000),
+        ],
+        signers: [owner],
+      );
+      final a = await route.admit(await deposit(usdc));
+      expect(a.summary, contains('koraAtas=1'));
+      await route.admit(await deposit(key(64)));
+      await expectLater(
+        route.admit(await deposit(key(65))),
+        rejects('reached 2 paymaster-funded token accounts'),
+      );
+      a.release();
+      expect(
+        (await route.admit(await deposit(key(65)))).summary,
+        contains('tier=account'),
+      );
+    });
+
+    test('a Kora-funded deposit ATA must belong to a Deadman vault', () async {
+      final notVault = key(66);
+      final route = pmRoute(
+        chain: {
+          usdcAta(owner.address): tokenAccount(owner.address, 9000000),
+          notVault: (owner: systemProgramId, data: Uint8List(0)),
+        },
+      );
+      final tx = await wire(
+        [
+          ataCreateFor(kora, notVault, usdc),
+          transferChecked(
+            source: usdcAta(owner.address),
+            dest: usdcAta(notVault),
+            authority: owner.address,
+          ),
+          pay(owner.address, amount: 1000000),
+        ],
+        signers: [owner],
+      );
+      await expectLater(route.admit(tx), rejects('$notVault is not one'));
+    });
+
+    group('payment account pre-check (M-2)', () {
+      late UsageLimiter limiter;
+      setUp(() => limiter = UsageLimiter(perVault: 0));
+
+      Future<void> expectRefused(
+        Map<String, VaultAccount?> chain,
+        List<Instruction> ixs,
+        Pattern message,
+      ) async {
+        final tx = await wire(ixs, signers: [owner]);
+        await expectLater(
+          pmRoute(limiter: limiter, chain: chain).admit(tx),
+          rejects(message),
+        );
+        expect(limiter.toJson()['global'], isEmpty);
+      }
+
+      List<Instruction> basic() => [pay(owner.address, amount: 20000)];
+
+      test('missing, foreign, wrong-mint or frozen accounts', () async {
+        final src = usdcAta(owner.address);
+        await expectRefused({}, basic(), 'does not exist');
+        await expectRefused(
+          {src: tokenAccount(key(67), 20000)},
+          basic(),
+          'is not an unfrozen',
+        );
+        await expectRefused(
+          {src: tokenAccount(owner.address, 20000, mint: key(68))},
+          basic(),
+          'is not an unfrozen',
+        );
+        await expectRefused(
+          {src: tokenAccount(owner.address, 20000, state: 2)},
+          basic(),
+          'is not an unfrozen',
+        );
+      });
+
+      test('the balance must cover every transfer out of it', () async {
+        final src = usdcAta(owner.address);
+        await expectRefused(
+          {src: tokenAccount(owner.address, 19999)},
+          basic(),
+          'holds 19999, the transaction needs 20000',
+        );
+        final vault = vaultPda(owner.address, 0).address;
+        await expectRefused(
+          {src: tokenAccount(owner.address, 25000)},
+          [
+            transferChecked(
+              source: src,
+              dest: usdcAta(vault),
+              authority: owner.address,
+              amount: 5001,
+            ),
+            ...basic(),
+          ],
+          'needs 25001',
+        );
+        final ok = await pmRoute(
+          limiter: limiter,
+          chain: {src: tokenAccount(owner.address, 20000)},
+        ).admit(await wire(basic(), signers: [owner]));
+        expect(ok.summary, contains('tier=basic'));
+        expect(limiter.toJson()['global'], hasLength(1));
+        ok.release();
+        expect(limiter.toJson()['global'], isEmpty);
+      });
+
+      test('a withdrawal into the payment account counts, even into one the '
+          'transaction opens', () async {
+        final vault = vaultPda(owner.address, 0).address;
+        final withdraw = deadmanIx(
+          [
+            rw(owner.address, signer: true),
+            rw(vault),
+            ro(usdc),
+            rw(usdcAta(vault)),
+            rw(usdcAta(owner.address)),
+            ro(tokenProgramId),
+          ],
+          [...Disc.withdrawToken, ...le(8, 20000)],
+        );
+        final route = pmRoute(
+          chain: {usdcAta(owner.address): tokenAccount(owner.address, 0)},
+        );
+        await route.admit(await wire([withdraw, ...basic()], signers: [owner]));
+        await expectLater(
+          pmRoute().admit(await wire([withdraw, ...basic()], signers: [owner])),
+          rejects('does not exist'),
+        );
+        final opened = await pmRoute().admit(
+          await wire(
+            [
+              ataCreateIdempotent(owner.address, owner.address),
+              withdraw,
+              ...basic(),
+            ],
+            signers: [owner],
+          ),
+        );
+        expect(opened.summary, contains('tier=basic'));
+      });
+    });
+
     test('estimates reject an unknown fee_token', () {
       final tx = base64Encode(Uint8List(0));
       expect(
-        () => PaymasterRoute(
-          policy: pmPolicy,
-          limiter: UsageLimiter(),
-          creates: UsageLimiter(),
-        ).admitEstimate(tx, key(50)),
+        () => pmRoute().admitEstimate(tx, key(50)),
         rejects('fee_token must be one of'),
       );
     });
+  });
+
+  group('loadPaymentAtas', () {
+    late FakeRpc rpc;
+    setUp(() async {
+      rpc = await FakeRpc.start();
+      rpc.accounts[usdc] = FakeAccount(tokenProgramId, mintBytes(6));
+    });
+    tearDown(() => rpc.close());
+
+    Map<String, dynamic> config(Map<String, Object> price) => {
+      'validation_config': {
+        'price': price,
+        'allowed_spl_paid_tokens': [usdc],
+      },
+    };
+
+    test('fixed: each tier price in the mint decimals', () async {
+      final atas = await loadPaymentAtas(rpc.client().rpcClient, {
+        for (final (tier, amount) in [
+          (PaymasterTier.plan, 3000000),
+          (PaymasterTier.basic, 20000),
+        ])
+          tier: config({'type': 'fixed', 'amount': amount, 'token': usdc}),
+      }, kora);
+      expect(atas[payAta]!.minAmounts, {
+        PaymasterTier.plan: 3000000,
+        PaymasterTier.basic: 20000,
+      });
+    });
+
+    test(
+      'margin (mainnet): no gateway floor, Kora prices the outflow',
+      () async {
+        final margin = config({'type': 'margin', 'margin': 0.15});
+        final atas = await loadPaymentAtas(rpc.client().rpcClient, {
+          for (final tier in PaymasterTier.values) tier: margin,
+        }, kora);
+        expect(atas[payAta]!.mint, usdc);
+        expect(atas[payAta]!.minAmounts, isEmpty);
+        final tx = await wire([pay(key(2), amount: 1)], signers: const []);
+        expect(
+          validatePaymasterTx(
+            tx,
+            PaymasterPolicy(koraPayer: kora, paymentAtas: atas),
+          ).tier,
+          PaymasterTier.basic,
+        );
+        await expectLater(
+          loadPaymentAtas(rpc.client().rpcClient, {
+            PaymasterTier.plan: margin,
+            PaymasterTier.basic: config({
+              'type': 'fixed',
+              'amount': 1,
+              'token': usdc,
+            }),
+          }, kora),
+          throwsA(isA<StateError>()),
+        );
+        await expectLater(
+          loadPaymentAtas(rpc.client().rpcClient, {
+            PaymasterTier.plan: config({'type': 'free'}),
+          }, kora),
+          throwsA(isA<StateError>()),
+        );
+      },
+    );
   });
 
   group('paymaster over HTTP', () {
     late HttpServer upstream;
     late HttpServer server;
     late List<Map<String, dynamic>> forwarded;
+    late UsageLimiter limiter;
+    late UsageLimiter creates;
+    late Map<String, VaultAccount?> chain;
+    String? failSend;
+    int? sendStatus;
 
     setUp(() async {
       forwarded = [];
+      chain = {};
+      failSend = null;
+      sendStatus = null;
+      limiter = UsageLimiter(perVault: 0);
+      creates = UsageLimiter(perVault: 0, perSigner: 3, global: 20);
       upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       upstream.listen((req) async {
         final body =
             jsonDecode(await utf8.decodeStream(req)) as Map<String, dynamic>;
         forwarded.add(body);
+        final send = body['method'] == 'signAndSendTransaction';
+        if (send && sendStatus != null) {
+          req.response.statusCode = sendStatus!;
+          await req.response.close();
+          return;
+        }
         req.response
           ..headers.contentType = ContentType.json
           ..write(
             jsonEncode({
               'jsonrpc': '2.0',
               'id': body['id'],
-              'result': body['method'] == 'estimateTransactionFee'
-                  ? {'fee_in_lamports': 300000, 'fee_in_token': 3000000}
-                  : {'signature': 'sig', 'signed_transaction': 'x'},
+              if (send && failSend != null)
+                'error': {'code': -32000, 'message': failSend}
+              else
+                'result': body['method'] == 'estimateTransactionFee'
+                    ? {'fee_in_lamports': 300000, 'fee_in_token': 3000000}
+                    : {'signature': 'sig', 'signed_transaction': 'x'},
             }),
           );
         await req.response.close();
@@ -1064,8 +1553,12 @@ void paymasterTests() {
         apiKey: 'pm-secret',
         route: PaymasterRoute(
           policy: pmPolicy,
-          limiter: UsageLimiter(perVault: 0),
-          creates: UsageLimiter(perVault: 0),
+          limiter: limiter,
+          creates: creates,
+          atas: UsageLimiter(perVault: 0),
+          fetchAccounts: (addresses) async => [
+            for (final a in addresses) chain[a],
+          ],
         ),
         payerSigner: {'signer_address': kora, 'payment_address': kora},
         log: (_) {},
@@ -1100,6 +1593,7 @@ void paymasterTests() {
 
     test('forwards a paid create_vault, refuses an unpaid one', () async {
       final owner = await keypair(24);
+      chain[usdcAta(owner.address)] = tokenAccount(owner.address, 3000000);
       final unpaid = base64Encode(
         await wire([createVault(owner.address, kora)], signers: [owner]),
       );
@@ -1126,6 +1620,51 @@ void paymasterTests() {
       final r2 = await call('signAndSendTransaction', {'transaction': paid});
       expect(r2['result']['signature'], 'sig');
       expect(forwarded.last['params'], {'transaction': paid});
+    });
+
+    test('gives the quota back when Kora rejects the transaction', () async {
+      final owner = await keypair(25);
+      chain[usdcAta(owner.address)] = tokenAccount(owner.address, 9000000);
+      final paid = base64Encode(
+        await wire(
+          [createVault(owner.address, kora), pay(owner.address)],
+          signers: [owner],
+        ),
+      );
+      failSend = 'Invalid transaction: simulation failed';
+      final r1 = await call('signAndSendTransaction', {'transaction': paid});
+      expect(r1['error']['message'], contains('simulation failed'));
+      sendStatus = 503;
+      final r2 = await call('signAndSendTransaction', {'transaction': paid});
+      expect(r2['error']['message'], contains('temporarily unavailable'));
+      expect(forwarded, hasLength(2));
+      expect(limiter.toJson()['global'], isEmpty);
+      expect(creates.toJson()['global'], isEmpty);
+
+      failSend = null;
+      sendStatus = null;
+      final r3 = await call('signAndSendTransaction', {'transaction': paid});
+      expect(r3['result']['signature'], 'sig');
+      expect(limiter.toJson()['global'], hasLength(1));
+      expect(creates.toJson()['global'], hasLength(1));
+    });
+
+    test('M-2 PoC: 21 unfunded wallets never reach Kora nor fill the vault '
+        'quota', () async {
+      for (var i = 0; i < 21; i++) {
+        final w = await keypair(100 + i);
+        final tx = base64Encode(
+          await wire(
+            [createVault(w.address, kora), pay(w.address)],
+            signers: [w],
+          ),
+        );
+        final r = await call('signAndSendTransaction', {'transaction': tx});
+        expect(r['error']['message'], contains('does not exist'));
+      }
+      expect(forwarded, isEmpty);
+      expect(creates.toJson()['global'], isEmpty);
+      expect(limiter.toJson()['global'], isEmpty);
     });
 
     test('refuses sponsor-only and admin methods', () async {

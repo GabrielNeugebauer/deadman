@@ -200,4 +200,65 @@ void main() {
     expect(clampGrace(1), 60);
     expect(clampGrace(400 * 86400), 366 * 86400);
   });
+
+  group('funds a tier can pay from', () {
+    final usdc = addr(60);
+
+    test('payoutGross mirrors the program: reserved shares come first', () {
+      final v = vault(
+        rules: [
+          rule(seed: 11, skippedAt: 900, reserved: 300),
+          rule(seed: 12, mode: AmountMode.fixed, amount: 500),
+          rule(seed: 13, amount: 5000),
+        ],
+      );
+      expect(v.reservedFor(null), 300);
+      expect(v.reservedFor(null, except: 0), 0);
+      expect(v.payoutGross(0, 1000), 300);
+      expect(v.payoutGross(0, 100), 100);
+      expect(v.payoutGross(1, 1000), 500);
+      expect(v.payoutGross(1, 600), 300);
+      expect(v.payoutGross(2, 1000), 350);
+      expect(v.payoutGross(2, 300), 0);
+    });
+
+    test('SOL tiers: withdrawable minus what is reserved for others', () {
+      final reservedOnly = vault(
+        withdrawableLamports: 300,
+        rules: [
+          rule(seed: 11, skippedAt: 900, reserved: 300),
+          rule(seed: 12),
+        ],
+      );
+      expect(tierFunded(reservedOnly, 0, null), isTrue);
+      expect(tierFunded(reservedOnly, 1, null), isFalse);
+      expect(unfundedAssets(reservedOnly, null), [null]);
+      expect(tierFunded(vault(withdrawableLamports: 1), 0, null), isTrue);
+    });
+
+    test('token tiers: the vault balance of the tier mint; unknown = null', () {
+      final v = vault(
+        withdrawableLamports: 1000,
+        rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+      );
+      expect(tierFunded(v, 1, null), isNull);
+      expect(tierFunded(v, 1, const {}), isNull);
+      expect(tierFunded(v, 1, {usdc: 0}), isFalse);
+      expect(tierFunded(v, 1, {usdc: 5}), isTrue);
+      expect(unfundedAssets(v, {usdc: 0}), [usdc]);
+      expect(unfundedAssets(v, {usdc: 5}), isEmpty);
+      expect(unfundedAssets(v, null), isEmpty);
+    });
+
+    test('paid tiers never count as unfunded', () {
+      final v = vault(rules: [rule(seed: 11, mint: usdc, executedAt: 900)]);
+      expect(unfundedAssets(v, {usdc: 0}), isEmpty);
+    });
+
+    test('vesting: any balance of the schedule asset', () {
+      final v = vestingVault(schedules: [schedule(mint: usdc)]);
+      expect(tierFunded(v, 0, {usdc: 0}), isFalse);
+      expect(tierFunded(v, 0, {usdc: 1}), isTrue);
+    });
+  });
 }

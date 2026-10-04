@@ -55,4 +55,18 @@ void main() {
     expect(unitLabel(usdc), 'USDC');
     expect(unitLabel(addr(7)), 'units');
   });
+
+  test("devnet: test USDC is 'USDC'; Circle's devnet mint reads clearly", () {
+    expect(AppConfig.isMainnet, isFalse);
+    expect(usdc, 'Ew8Z6hhRp7MFK8KJAxRqaBQvBEjtRj4Y4K4YhWsPMFGk');
+    expect(assetSymbol(usdc), 'USDC');
+    expect(assetSymbol(circleDevnetUsdcMint), 'USDC (Circle)');
+    expect(amountText(1500000, circleDevnetUsdcMint), '1.5 USDC (Circle)');
+    expect(parseAmount('2.5', circleDevnetUsdcMint), 2500000);
+    expect(presetAssets.map((a) => a.mint), isNot(contains(circleDevnetUsdcMint)));
+    final other = addr(61);
+    expect(assetInfo(other).decimals, 0);
+    expect(assetInfo(other).symbol, assetSymbol(other));
+    expect(assetInfo(null), solAsset);
+  });
 }

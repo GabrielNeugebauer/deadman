@@ -1,8 +1,8 @@
 use {
     anchor_lang::{
         prelude::Pubkey,
-        solana_program::{clock::Clock, instruction::Instruction, system_program},
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        solana_program::{clock::Clock, instruction::Instruction, rent::Rent, system_program},
+        AccountDeserialize, Discriminator, InstructionData, ToAccountMetas,
     },
     anchor_spl::associated_token::get_associated_token_address_with_program_id,
     deadman::VestingInput,
@@ -25,7 +25,8 @@ const LOCK: i64 = 3 * DAY;
 const GRACE: i64 = 30 * DAY;
 const FEE_PUBLIC: u16 = 200;
 const FEE_PRIVATE: u16 = 500;
-const STIPEND: u64 = 3_000_000;
+const ZCASH_STIPEND: u64 = 3_000_000;
+const CLOAK_STIPEND: u64 = 12_000_000;
 
 struct Env {
     svm: LiteSVM,
@@ -179,7 +180,11 @@ impl Env {
     fn withdrawable(&self) -> u64 {
         let v = self.vault_addr();
         let acc = self.svm.get_account(&v).unwrap();
-        acc.lamports - self.svm.minimum_balance_for_rent_exemption(acc.data.len())
+        let rent = self
+            .svm
+            .minimum_balance_for_rent_exemption(acc.data.len())
+            .max(self.vault().rent_paid);
+        acc.lamports - rent
     }
 
     fn config_ix(&self, signer: &Pubkey, public: u16, private: u16) -> Instruction {
@@ -844,7 +849,7 @@ fn private_token_rule_sends_gas_stipend() {
     env.deposit_sol(SOL);
     env.advance(10 * DAY + 1);
     env.execute_token(0, &c.pubkey(), &usdc).unwrap();
-    assert_eq!(env.lamports(&c.pubkey()), STIPEND);
+    assert_eq!(env.lamports(&c.pubkey()), ZCASH_STIPEND);
 }
 
 #[test]
@@ -1884,4 +1889,414 @@ fn vesting_schedules_are_validated() {
         vec![schedule(&b.pubkey(), None, SOL, 0, DAY)],
     )
     .unwrap();
+}
+
+// Mainnet layout: per-rail stipends, stored rent, reserved space and
+// recovery of accounts left in older layouts.
+
+fn private_token_env(rail: Rail, c: &Pubkey, sol: u64) -> (Env, Pubkey) {
+    let mut env = ready(all_to(&Keypair::new().pubkey()));
+    let usdc = env.token_setup(50_000_000);
+    env.update_policy(
+        vec![rule(
+            c,
+            rail,
+            10 * DAY,
+            Some(usdc),
+            AmountMode::Percent,
+            10_000,
+        )],
+        None,
+    )
+    .unwrap();
+    if sol > 0 {
+        env.deposit_sol(sol);
+    }
+    env.advance(10 * DAY + 1);
+    (env, usdc)
+}
+
+#[test]
+fn cloak_token_payout_sends_the_larger_stipend() {
+    let c = Keypair::new();
+    let (mut env, usdc) = private_token_env(Rail::Cloak, &c.pubkey(), SOL);
+    env.execute_token(0, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), CLOAK_STIPEND);
+}
+
+#[test]
+fn stipend_only_tops_up_a_poor_claim_key_from_spare_sol() {
+    // A claim key that already holds the stipend gets nothing more.
+    let c = Keypair::new();
+    let (mut env, usdc) = private_token_env(Rail::Cloak, &c.pubkey(), SOL);
+    env.svm.airdrop(&c.pubkey(), CLOAK_STIPEND).unwrap();
+    let before = env.lamports(&env.vault_addr());
+    env.execute_token(0, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), CLOAK_STIPEND);
+    assert_eq!(env.lamports(&env.vault_addr()), before);
+
+    // A vault with less spare SOL than the stipend pays the tokens only.
+    let d = Keypair::new();
+    let (mut env, usdc) = private_token_env(Rail::Cloak, &d.pubkey(), CLOAK_STIPEND - 1);
+    env.execute_token(0, &d.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&d.pubkey()), 0);
+    assert_eq!(env.withdrawable(), CLOAK_STIPEND - 1);
+}
+
+#[test]
+fn vesting_stipend_never_uses_sol_owed_to_other_schedules() {
+    let b = Keypair::new();
+    let c = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let usdc = env.token_setup(1_000_000);
+    let now = env.now();
+    let mut token = schedule(&c.pubkey(), Some(usdc), 1_000_000, 0, 10 * DAY);
+    token.rail = Rail::Cloak;
+    env.create_vesting(
+        now,
+        false,
+        vec![schedule(&b.pubkey(), None, SOL, 0, 10 * DAY), token],
+    )
+    .unwrap();
+    let vault = env.vault_addr();
+    let admin = env.admin.insecure_clone();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    MintTo::new(&mut env.svm, &admin, &usdc, &ata(&vault, &usdc), 1_000_000)
+        .send()
+        .unwrap();
+    // Only the SOL owed to `b` plus less than a stipend is spare.
+    env.deposit_sol(SOL + CLOAK_STIPEND - 1);
+    env.advance(5 * DAY);
+    env.release_token(1, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), 0);
+    assert_eq!(env.withdrawable(), SOL + CLOAK_STIPEND - 1);
+
+    env.deposit_sol(1);
+    env.advance(DAY);
+    env.release_token(1, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), CLOAK_STIPEND);
+    assert_eq!(env.withdrawable(), SOL);
+}
+
+fn sponsored_env(sponsor: &Keypair) -> Env {
+    let mut env = Env::new();
+    env.init_config();
+    env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::CreateVault {
+            plan_id: 0,
+            label: String::new(),
+            guard: env.guard.pubkey(),
+            interval_secs: INTERVAL,
+            lock_secs: LOCK,
+            skip_grace_secs: GRACE,
+            rules: all_to(&Keypair::new().pubkey()),
+        }
+        .data(),
+        deadman::accounts::CreateVault {
+            owner: env.owner.pubkey(),
+            payer: sponsor.pubkey(),
+            vault: env.vault_addr(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let owner = env.owner.insecure_clone();
+    env.send(ix, &[sponsor, &owner]).unwrap();
+    env
+}
+
+const DEFAULT_LAMPORTS_PER_BYTE: u64 = 6_960;
+
+fn set_rent(env: &mut Env, lamports_per_byte: u64) {
+    env.svm
+        .set_sysvar(&Rent::with_lamports_per_byte(lamports_per_byte));
+}
+
+#[test]
+fn rent_paid_is_stored_and_survives_a_rent_cut() {
+    let sponsor = Keypair::new();
+    let mut env = sponsored_env(&sponsor);
+    let rent = env.svm.minimum_balance_for_rent_exemption(Vault::SPACE);
+    assert_eq!(env.vault().rent_paid, rent);
+    assert_eq!(env.lamports(&env.vault_addr()), rent);
+    env.deposit_sol(SOL);
+
+    // Rent halves: the sponsor's deposit is still not withdrawable.
+    set_rent(&mut env, DEFAULT_LAMPORTS_PER_BYTE / 2);
+    assert!(env.svm.minimum_balance_for_rent_exemption(Vault::SPACE) < rent);
+    assert!(env
+        .withdraw_sol(SOL + 1)
+        .unwrap_err()
+        .contains("InsufficientFunds"));
+    env.withdraw_sol(SOL / 2).unwrap();
+
+    // Close: exactly the deposited rent back to the sponsor.
+    let (s0, o0) = (
+        env.lamports(&sponsor.pubkey()),
+        env.lamports(&env.owner.pubkey()),
+    );
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&sponsor.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&sponsor.pubkey()) - s0, rent);
+    assert_eq!(env.lamports(&env.owner.pubkey()) + 5_000 - o0, SOL / 2);
+}
+
+#[test]
+fn a_rent_rise_keeps_the_account_rent_exempt() {
+    let sponsor = Keypair::new();
+    let mut env = sponsored_env(&sponsor);
+    let paid = env.vault().rent_paid;
+    env.deposit_sol(SOL);
+    set_rent(&mut env, DEFAULT_LAMPORTS_PER_BYTE * 2);
+    let now_min = env.svm.minimum_balance_for_rent_exemption(Vault::SPACE);
+    assert!(now_min > paid);
+    let free = paid + SOL - now_min;
+    assert!(env
+        .withdraw_sol(free + 1)
+        .unwrap_err()
+        .contains("InsufficientFunds"));
+    env.withdraw_sol(free).unwrap();
+
+    // The sponsor still gets only what it paid; the owner the rest.
+    let (s0, o0) = (
+        env.lamports(&sponsor.pubkey()),
+        env.lamports(&env.owner.pubkey()),
+    );
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&sponsor.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&sponsor.pubkey()) - s0, paid);
+    assert_eq!(
+        env.lamports(&env.owner.pubkey()) + 5_000 - o0,
+        now_min - paid
+    );
+}
+
+#[test]
+fn vault_layout_keeps_client_offsets_and_reserved_space() {
+    let b = Keypair::new();
+    let guardian = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    env.plan = 0x1234;
+    env.create_vault(all_to(&b.pubkey())).unwrap();
+    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
+        .unwrap();
+    let data = env.svm.get_account(&env.vault_addr()).unwrap().data;
+    assert_eq!(Vault::SPACE, 1390);
+    assert_eq!(data.len(), Vault::SPACE);
+    assert_eq!(&data[..8], Vault::DISCRIMINATOR);
+    assert_eq!(&data[8..40], env.owner.pubkey().as_ref());
+    assert_eq!(&data[40..42], &0x1234u16.to_le_bytes());
+    assert_eq!(&data[42..74], env.guard.pubkey().as_ref());
+    assert_eq!(data[74], 1);
+    assert_eq!(&data[75..107], guardian.pubkey().as_ref());
+    let v = env.vault();
+    assert_eq!(v._reserved, [0u8; 63]);
+    assert_eq!(v.stipend_paid, 0);
+    assert!(v.rent_paid > 0);
+}
+
+impl Env {
+    fn recover_ix(&self, owner: &Pubkey, legacy: &Pubkey, plan_id: u16) -> Instruction {
+        Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::RecoverLegacyVault { plan_id }.data(),
+            deadman::accounts::RecoverLegacyVault {
+                owner: *owner,
+                legacy: *legacy,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    fn recover(&mut self, plan_id: u16) -> Result<u64, String> {
+        let owner = self.owner.insecure_clone();
+        let ix = self.recover_ix(
+            &owner.pubkey(),
+            &vault_pda(&owner.pubkey(), plan_id),
+            plan_id,
+        );
+        self.send(ix, &[&owner])
+    }
+
+    /// Puts `data` at `address`, owned by `program_owner`.
+    fn put_legacy(
+        &mut self,
+        address: &Pubkey,
+        data: Vec<u8>,
+        program_owner: Pubkey,
+        lamports: u64,
+    ) {
+        // Any fetched account gives us the SDK's Account type to fill in.
+        let mut acc = self.svm.get_account(&self.owner.pubkey()).unwrap();
+        acc.lamports = lamports;
+        acc.data = data;
+        acc.owner = program_owner;
+        self.svm.set_account(*address, acc).unwrap();
+    }
+}
+
+/// Bytes of a vault of `owner` and `plan_id` in an older, `len`-byte layout.
+fn legacy_bytes(disc: &[u8], owner: &Pubkey, plan_id: u16, len: usize) -> Vec<u8> {
+    let mut data = vec![7u8; len];
+    data[..8].copy_from_slice(disc);
+    data[8..40].copy_from_slice(owner.as_ref());
+    data[40..42].copy_from_slice(&plan_id.to_le_bytes());
+    data
+}
+
+#[test]
+fn legacy_vault_is_recovered_to_its_owner() {
+    let mut env = Env::new();
+    env.init_config();
+    let owner = env.owner.pubkey();
+    // Devnet holds plans 0, 1 and 42801 in 958/996/1318-byte layouts.
+    for (plan, len) in [(0u16, 958usize), (1, 996), (42_801, 1318)] {
+        let addr = vault_pda(&owner, plan);
+        env.put_legacy(
+            &addr,
+            legacy_bytes(Vault::DISCRIMINATOR, &owner, plan, len),
+            deadman::id(),
+            SOL / 10,
+        );
+        let before = env.lamports(&owner);
+        env.recover(plan).unwrap();
+        assert_eq!(env.lamports(&owner) + 5_000 - before, SOL / 10);
+        assert_eq!(env.lamports(&addr), 0);
+    }
+    // The freed address hosts a new plan.
+    env.plan = 1;
+    env.create_vault(all_to(&Keypair::new().pubkey())).unwrap();
+    assert_eq!(env.vault().plan_id, 1);
+}
+
+#[test]
+fn recovery_rejects_anything_but_the_callers_legacy_vault() {
+    let mut env = ready(all_to(&Keypair::new().pubkey()));
+    let owner = env.owner.pubkey();
+    // A current-layout vault.
+    assert!(env.recover(0).unwrap_err().contains("NotLegacyVault"));
+
+    // Another wallet cannot recover the owner's legacy plan: the address
+    // is derived from the signer.
+    let addr = vault_pda(&owner, 5);
+    env.put_legacy(
+        &addr,
+        legacy_bytes(Vault::DISCRIMINATOR, &owner, 5, 958),
+        deadman::id(),
+        SOL,
+    );
+    let thief = env.keeper.insecure_clone();
+    let ix = env.recover_ix(&thief.pubkey(), &addr, 5);
+    assert!(env
+        .send(ix, &[&thief])
+        .unwrap_err()
+        .contains("ConstraintSeeds"));
+
+    // Bytes naming another owner at the owner's address.
+    let addr6 = vault_pda(&owner, 6);
+    env.put_legacy(
+        &addr6,
+        legacy_bytes(Vault::DISCRIMINATOR, &thief.pubkey(), 6, 958),
+        deadman::id(),
+        SOL,
+    );
+    assert!(env.recover(6).unwrap_err().contains("Unauthorized"));
+
+    // Wrong plan id in the bytes.
+    let addr7 = vault_pda(&owner, 7);
+    env.put_legacy(
+        &addr7,
+        legacy_bytes(Vault::DISCRIMINATOR, &owner, 8, 958),
+        deadman::id(),
+        SOL,
+    );
+    assert!(env.recover(7).unwrap_err().contains("NotLegacyVault"));
+
+    // Not a vault discriminator.
+    let addr9 = vault_pda(&owner, 9);
+    env.put_legacy(
+        &addr9,
+        legacy_bytes(Config::DISCRIMINATOR, &owner, 9, 958),
+        deadman::id(),
+        SOL,
+    );
+    assert!(env.recover(9).unwrap_err().contains("NotLegacyVault"));
+
+    // Not owned by the program.
+    let addr10 = vault_pda(&owner, 10);
+    env.put_legacy(
+        &addr10,
+        legacy_bytes(Vault::DISCRIMINATOR, &owner, 10, 958),
+        system_program::ID,
+        SOL,
+    );
+    assert!(env.recover(10).unwrap_err().contains("NotLegacyVault"));
+
+    // Valid bytes at an address that is not the plan's PDA.
+    let stray = Keypair::new().pubkey();
+    env.put_legacy(
+        &stray,
+        legacy_bytes(Vault::DISCRIMINATOR, &owner, 5, 958),
+        deadman::id(),
+        SOL,
+    );
+    let me = env.owner.insecure_clone();
+    let ix = env.recover_ix(&owner, &stray, 5);
+    assert!(env
+        .send(ix, &[&me])
+        .unwrap_err()
+        .contains("ConstraintSeeds"));
+
+    // Nothing moved; the real legacy plan still recovers.
+    assert_eq!(env.lamports(&addr), SOL);
+    env.recover(5).unwrap();
+    assert_eq!(env.lamports(&addr), 0);
+}
+
+#[test]
+fn vesting_stipend_is_paid_once_per_schedule() {
+    let c = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let usdc = env.token_setup(1_000_000);
+    let now = env.now();
+    let mut token = schedule(&c.pubkey(), Some(usdc), 1_000_000, 0, 10 * DAY);
+    token.rail = Rail::Cloak;
+    env.create_vesting(now, true, vec![token]).unwrap();
+    let vault = env.vault_addr();
+    let admin = env.admin.insecure_clone();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    MintTo::new(&mut env.svm, &admin, &usdc, &ata(&vault, &usdc), 1_000_000)
+        .send()
+        .unwrap();
+    env.deposit_sol(10 * CLOAK_STIPEND);
+
+    env.advance(DAY);
+    env.release_token(0, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), CLOAK_STIPEND);
+    assert_eq!(env.vault().stipend_paid, 1);
+    // The beneficiary spends the stipend; later releases do not refill it.
+    let sink = Keypair::new().pubkey();
+    let ix = anchor_lang::solana_program::system_instruction::transfer(
+        &c.pubkey(),
+        &sink,
+        CLOAK_STIPEND - 5000,
+    );
+    env.send(ix, &[&c]).unwrap();
+    let spare = env.withdrawable();
+    env.advance(DAY);
+    env.release_token(0, &c.pubkey(), &usdc).unwrap();
+    assert_eq!(env.withdrawable(), spare);
 }

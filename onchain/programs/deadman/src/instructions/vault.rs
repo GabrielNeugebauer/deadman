@@ -18,12 +18,17 @@ pub struct CreateVault<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + Vault::INIT_SPACE,
+        space = Vault::SPACE,
         seeds = [VAULT_SEED, owner.key().as_ref(), &plan_id.to_le_bytes()],
         bump
     )]
     pub vault: Account<'info, Vault>,
     pub system_program: Program<'info, System>,
+}
+
+/// Rent deposited by `init` for the account's actual size.
+fn init_rent(vault: &Account<Vault>) -> Result<u64> {
+    Ok(Rent::get()?.minimum_balance(vault.to_account_info().data_len()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50,6 +55,7 @@ pub fn handle_create_vault(
     vault.bump = ctx.bumps.vault;
     vault.kind = PlanKind::Inheritance;
     vault.rent_payer = ctx.accounts.payer.key();
+    vault.rent_paid = init_rent(vault)?;
     vault.set_label(label)?;
     let key = vault.key();
     vault.apply_policy(
@@ -264,9 +270,10 @@ pub struct CloseVault<'info> {
     pub rent_payer: UncheckedAccount<'info>,
 }
 
-/// The owner gets back everything above the rent; the rent goes back to
-/// whoever paid it (the owner, or a fee sponsor). Vesting plans close only
-/// once nothing is owed to their beneficiaries.
+/// The rent payer (the owner, or a fee sponsor) gets back exactly the rent
+/// it deposited and the owner everything else, even if the rent sysvar
+/// changed since. Vesting plans close only once nothing is owed to their
+/// beneficiaries.
 pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &ctx.accounts.vault;
@@ -279,9 +286,10 @@ pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
             );
         }
     }
-    let info = vault.to_account_info();
-    let rent = Rent::get()?.minimum_balance(info.data_len());
-    let excess = info.lamports().saturating_sub(rent);
+    let excess = vault
+        .to_account_info()
+        .lamports()
+        .saturating_sub(vault.rent_paid);
     if excess > 0 && ctx.accounts.rent_payer.key() != ctx.accounts.owner.key() {
         ctx.accounts.vault.sub_lamports(excess)?;
         ctx.accounts.owner.add_lamports(excess)?;
@@ -322,6 +330,7 @@ pub fn handle_create_vesting(
     vault.revocable = revocable;
     vault.lock_secs = lock_secs;
     vault.rent_payer = ctx.accounts.payer.key();
+    vault.rent_paid = init_rent(vault)?;
     vault.set_label(label)?;
     let key = vault.key();
     vault.apply_vesting(&key, now, start_at, &schedules)?;
@@ -350,6 +359,60 @@ pub fn handle_revoke_vesting(ctx: Context<OwnerAction>) -> Result<()> {
     emit!(VestingRevoked {
         vault: vault.key(),
         at: now,
+    });
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(plan_id: u16)]
+pub struct RecoverLegacyVault<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    /// CHECK: a vault in an older layout that no longer decodes as `Vault`;
+    /// pinned to this owner's plan address here and its bytes are checked
+    /// in the handler.
+    #[account(
+        mut,
+        owner = crate::ID @ DeadmanError::NotLegacyVault,
+        seeds = [VAULT_SEED, owner.key().as_ref(), &plan_id.to_le_bytes()],
+        bump
+    )]
+    pub legacy: UncheckedAccount<'info>,
+}
+
+/// Closes a plan account left in an older layout by a program upgrade,
+/// which no other instruction can read: every lamport goes to the owner
+/// recorded in it. Tokens in that plan's token accounts are not moved; a
+/// later plan at the same address controls them again.
+pub fn handle_recover_legacy_vault(ctx: Context<RecoverLegacyVault>, plan_id: u16) -> Result<()> {
+    let owner = &ctx.accounts.owner;
+    let legacy = ctx.accounts.legacy.to_account_info();
+    let data_len = legacy.data_len();
+    {
+        let data = legacy.try_borrow_data()?;
+        require!(
+            data_len != Vault::SPACE
+                && data_len >= 42
+                && data[..8] == *Vault::DISCRIMINATOR
+                && data[40..42] == plan_id.to_le_bytes(),
+            DeadmanError::NotLegacyVault
+        );
+        require!(
+            data[8..40] == owner.key().to_bytes(),
+            DeadmanError::Unauthorized
+        );
+    }
+    let lamports = legacy.lamports();
+    legacy.sub_lamports(lamports)?;
+    owner.add_lamports(lamports)?;
+    legacy.assign(&System::id());
+    legacy.resize(0)?;
+    emit!(LegacyVaultRecovered {
+        vault: legacy.key(),
+        owner: owner.key(),
+        plan_id,
+        data_len: u32::try_from(data_len).map_err(|_| DeadmanError::MathOverflow)?,
+        lamports,
     });
     Ok(())
 }

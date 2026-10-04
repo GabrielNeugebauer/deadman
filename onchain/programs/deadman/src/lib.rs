@@ -153,4 +153,8 @@ pub mod deadman {
     ) -> Result<()> {
         instructions::funds::handle_execute_token_rule(ctx, index)
     }
+
+    pub fn recover_legacy_vault(ctx: Context<RecoverLegacyVault>, plan_id: u16) -> Result<()> {
+        instructions::vault::handle_recover_legacy_vault(ctx, plan_id)
+    }
 }

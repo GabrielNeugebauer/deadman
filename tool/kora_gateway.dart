@@ -4,9 +4,12 @@
 // - :8080 -> sponsor (:8090, free): only a guard key's Deadman `pulse` /
 //   `lockdown` on vaults it guards, rate-limited per vault, per guard key and
 //   globally.
-// - :8081 -> paymaster (:8091, fixed USDC price): owner-signed Deadman,
+// - :8081 -> paymaster (:8091-8093, USDC: one fixed-price node per tier on
+//   devnet, one margin-priced node on mainnet): owner-signed Deadman,
 //   deposit and payment instructions; the last instruction must pay the
-//   paymaster in USDC. Rate-limited per owner and globally.
+//   paymaster in USDC. Kora funds only the vault, beneficiary and treasury
+//   token accounts the transaction pays into. Rate-limited per owner and
+//   globally; quota comes back when Kora rejects the transaction.
 //
 // dart run tool/kora_gateway.dart
 //
@@ -18,7 +21,9 @@
 // PAYMASTER_UPSTREAM (http://127.0.0.1:8091), PAYMASTER_STATE
 // (kora/paymaster-usage.json), PAYMASTER_PER_OWNER (60), PAYMASTER_GLOBAL
 // (2000), PAYMASTER_CREATES_STATE (kora/paymaster-creates.json),
-// PAYMASTER_CREATES_PER_OWNER (3), PAYMASTER_CREATES_GLOBAL (20).
+// PAYMASTER_CREATES_PER_OWNER (3), PAYMASTER_CREATES_GLOBAL (20),
+// PAYMASTER_ATAS_STATE (kora/paymaster-atas.json), PAYMASTER_ATAS_PER_OWNER
+// (6), PAYMASTER_ATAS_GLOBAL (100).
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -541,6 +546,10 @@ class PaymasterRequest {
     required this.payment,
     required this.message,
     required this.signature,
+    this.paymentSource,
+    this.paymentSourceNeeds,
+    this.paymentSourceCreated = false,
+    this.vaultChecks = const [],
   });
 
   /// The one non-Kora signer (vault owner, executor or depositor).
@@ -566,7 +575,23 @@ class PaymasterRequest {
   final Payment? payment;
   final Uint8List message;
   final Uint8List signature;
+
+  /// The token account the payment comes from, and what it must hold before
+  /// the transaction: every transfer out of it (the payment included) minus
+  /// what a `withdraw_token` in the transaction pays into it.
+  final String? paymentSource;
+  final BigInt? paymentSourceNeeds;
+
+  /// Whether an ATA create in the transaction opens [paymentSource].
+  final bool paymentSourceCreated;
+
+  /// Wallets of Kora-funded deposit ATAs that no Deadman instruction in the
+  /// transaction names as its vault; each must be a Deadman vault on chain.
+  final List<String> vaultChecks;
 }
+
+/// A token account the transaction asks Kora to open.
+typedef _KoraAta = ({String ata, String wallet, String mint});
 
 /// Checks a wire transaction against the paymaster policy. Pure; the owner
 /// signature is verified separately. With [requirePayment] false (fee
@@ -589,7 +614,14 @@ PaymasterRequest validatePaymasterTx(
   final budget = _Budget();
   final names = <String>[];
   var koraCreates = 0;
-  var koraAtas = 0;
+  final koraAtas = <_KoraAta>[];
+  final createdAtas = <String>{};
+  // What may justify a Kora-funded ATA (audit M-1).
+  final deposits = <(String, String)>{}; // (destination ATA, mint)
+  final vaults = <String>{}; // vault account of each Deadman instruction
+  final payouts = <(String, String?, String)>{}; // (ATA, wallet?, mint)
+  final outflow = <String, BigInt>{};
+  final credits = <String, BigInt>{};
   Payment? lastPayment;
   for (var i = 0; i < ixs.length; i++) {
     final ix = ixs[i];
@@ -616,11 +648,15 @@ PaymasterRequest validatePaymasterTx(
           'Associated token accounts are paid by the owner or the paymaster',
         );
       }
-      if (a[0] == kora && ++koraAtas > PaymasterPolicy.maxKoraAtas) {
-        _reject(
-          'At most ${PaymasterPolicy.maxKoraAtas} paymaster-funded token '
-          'accounts per transaction',
-        );
+      createdAtas.add(keys[a[1]]);
+      if (a[0] == kora) {
+        koraAtas.add((ata: keys[a[1]], wallet: keys[a[2]], mint: keys[a[3]]));
+        if (koraAtas.length > PaymasterPolicy.maxKoraAtas) {
+          _reject(
+            'At most ${PaymasterPolicy.maxKoraAtas} paymaster-funded token '
+            'accounts per transaction',
+          );
+        }
       }
       names.add('ata.create_idempotent');
     } else if (program == tokenProgramId || program == token2022ProgramId) {
@@ -647,17 +683,21 @@ PaymasterRequest validatePaymasterTx(
           "Token transfers must be authorized by the transaction's owner",
         );
       }
+      final value = _uLe(d.sublist(1, 9));
+      outflow.update(keys[a[0]], (v) => v + value, ifAbsent: () => value);
+      if (mint != null && value > BigInt.zero) {
+        deposits.add((keys[destination], keys[mint]));
+      }
       final ata = policy.paymentAtas[keys[destination]];
       if (ata != null) {
         if (ata.tokenProgram != program ||
             (mint != null && keys[mint] != ata.mint)) {
           _reject('Payment to ${keys[destination]} uses the wrong mint');
         }
-        final amount = _uLe(d.sublist(1, 9));
         lastPayment = (
           mint: ata.mint,
           destination: keys[destination],
-          amount: amount.isValidInt ? amount.toInt() : -1,
+          amount: value.isValidInt ? value.toInt() : -1,
         );
       }
     } else if (program == systemProgramId) {
@@ -716,6 +756,22 @@ PaymasterRequest validatePaymasterTx(
           _reject('At most one paymaster-funded vault per transaction');
         }
       }
+      vaults.add(keys[a[spec.koraSlot == 1 ? 2 : 1]]);
+      if (name == 'withdraw_token' && d.length >= 16) {
+        // [owner, vault, mint, vault_token, owner_token, token_program]
+        final amount = _uLe(d.sublist(8, 16));
+        credits.update(keys[a[4]], (v) => v + amount, ifAbsent: () => amount);
+      }
+      if (name == 'execute_token_rule' || name == 'release_vested_token') {
+        // [executor, vault, config, mint, vault_token, beneficiary,
+        //  beneficiary_token, treasury_token, token_program]. The program
+        // binds treasury_token to Config.treasury and beneficiary_token to
+        // the beneficiary.
+        final mint = keys[a[3]];
+        payouts
+          ..add((keys[a[6]], keys[a[5]], mint))
+          ..add((keys[a[7]], null, mint));
+      }
       names.add('deadman.$name');
     } else {
       _reject('Program $program is not allowed by the paymaster');
@@ -727,9 +783,28 @@ PaymasterRequest validatePaymasterTx(
       '${policy.paymentAtas.keys.join(' or ')}',
     );
   }
+  // Kora funds only token accounts the transaction pays into (audit M-1):
+  // a vault's ATA with a deposit of that mint, or a payout's beneficiary or
+  // treasury ATA. Never an account its signer could close for the rent.
+  final vaultChecks = <String>[];
+  for (final c in koraAtas) {
+    final payout = payouts.any(
+      (p) => p.$1 == c.ata && p.$3 == c.mint && (p.$2 ?? c.wallet) == c.wallet,
+    );
+    if (payout) continue;
+    if (!deposits.contains((c.ata, c.mint))) {
+      _reject(
+        'The paymaster only funds a token account the transaction pays '
+        "into: a plan vault's (with a deposit of that mint) or a payout's "
+        'beneficiary or treasury. ${c.wallet} (mint ${c.mint}) is neither',
+      );
+    }
+    if (!vaults.contains(c.wallet)) vaultChecks.add(c.wallet);
+  }
+
   final tier = koraCreates > 0
       ? PaymasterTier.plan
-      : koraAtas > 0
+      : koraAtas.isNotEmpty
       ? PaymasterTier.account
       : PaymasterTier.basic;
   if (lastPayment != null) {
@@ -748,15 +823,22 @@ PaymasterRequest validatePaymasterTx(
     maxCuLimit: PaymasterPolicy.maxCuLimit,
     maxFeeLamports: PaymasterPolicy.maxFeeLamports,
   );
+  final source = lastPayment == null ? null : keys[ixs.last.accounts[0]];
   return PaymasterRequest(
     signer: keys[owner],
     instructions: names,
     koraFundsRent: koraCreates > 0,
-    koraAtas: koraAtas,
+    koraAtas: koraAtas.length,
     feeLamports: fee,
     payment: lastPayment,
     message: tx.message,
     signature: tx.signatures[owner],
+    paymentSource: source,
+    paymentSourceNeeds: source == null
+        ? null
+        : outflow[source]! - (credits[source] ?? BigInt.zero),
+    paymentSourceCreated: createdAtas.contains(source),
+    vaultChecks: vaultChecks.toSet().toList(),
   );
 }
 
@@ -801,22 +883,22 @@ class UsageLimiter {
 
   static int _systemNow() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-  /// Throws if this transaction would exceed a limit; records nothing.
-  void check(String signer, List<String> vaults) {
+  /// Throws if [n] more transactions would exceed a limit; records nothing.
+  void check(String signer, List<String> vaults, {int n = 1}) {
     final now = _now();
     _prune(now);
     String retry(List<int> hits) => DateTime.fromMillisecondsSinceEpoch(
       (hits.first + windowSecs) * 1000,
       isUtc: true,
     ).toIso8601String();
-    if (_global.length >= global) {
+    if (_global.length + n > global) {
       _reject(
         'Rate limit: $service reached its cap of $global $unit per 24h; '
         'retry after ${retry(_global)}',
       );
     }
     final s = _signers[signer] ?? const [];
-    if (s.length >= perSigner) {
+    if (s.length + n > perSigner) {
       _reject(
         'Rate limit: $signerLabel $signer reached $perSigner $unit per 24h; '
         'retry after ${retry(s)}',
@@ -824,7 +906,7 @@ class UsageLimiter {
     }
     for (final v in vaults) {
       final hits = _vaults[v] ?? const [];
-      if (hits.length >= perVault) {
+      if (hits.length + n > perVault) {
         _reject(
           'Rate limit: vault $v reached $perVault $unit per 24h; '
           'retry after ${retry(hits)}',
@@ -833,16 +915,38 @@ class UsageLimiter {
     }
   }
 
-  /// [check], then records the transaction. Synchronous, so concurrent
-  /// requests cannot both pass the last free slot.
-  void acquire(String signer, List<String> vaults) {
-    check(signer, vaults);
+  /// [check], then records [n] transactions and returns their timestamp
+  /// for [release]. Synchronous, so concurrent requests cannot both pass the
+  /// last free slot.
+  int acquire(String signer, List<String> vaults, {int n = 1}) {
+    check(signer, vaults, n: n);
     final now = _now();
-    _global.add(now);
-    (_signers[signer] ??= []).add(now);
-    for (final v in vaults.toSet()) {
-      (_vaults[v] ??= []).add(now);
+    for (var i = 0; i < n; i++) {
+      _global.add(now);
+      (_signers[signer] ??= []).add(now);
+      for (final v in vaults.toSet()) {
+        (_vaults[v] ??= []).add(now);
+      }
     }
+    _save();
+    return now;
+  }
+
+  /// Gives back [n] slots taken by [acquire] at [at] (the upstream rejected
+  /// the transaction, so it cost nothing).
+  void release(String signer, List<String> vaults, int at, {int n = 1}) {
+    void drop(List<int>? hits) {
+      for (var i = 0; i < n; i++) {
+        hits?.remove(at);
+      }
+    }
+
+    drop(_global);
+    drop(_signers[signer]);
+    for (final v in vaults.toSet()) {
+      drop(_vaults[v]);
+    }
+    _prune(_now());
     _save();
   }
 
@@ -904,14 +1008,18 @@ class _IpLimiter {
 // ---------------------------------------------------------------------------
 // Routes and HTTP
 
+/// An admitted transaction: a log [summary], and [release], which gives
+/// back the quota it reserved when the upstream Kora rejects it.
+typedef Admission = ({String summary, void Function() release});
+
 /// What one public listener admits.
 abstract interface class GatewayRoute {
   /// "sponsor" or "paymaster".
   String get name;
   Set<String> get methods;
 
-  /// Validates [wire] and reserves rate-limit quota; returns a log summary.
-  Future<String> admit(List<int> wire);
+  /// Validates [wire] and reserves rate-limit quota.
+  Future<Admission> admit(List<int> wire);
 
   /// Validates an `estimateTransactionFee` request; returns the params to
   /// forward.
@@ -943,16 +1051,20 @@ class SponsorRoute implements GatewayRoute {
   Set<String> get methods => sponsorMethods;
 
   @override
-  Future<String> admit(List<int> wire) async {
+  Future<Admission> admit(List<int> wire) async {
     final request = validateSponsorTx(wire, policy);
     if (!await verifyGuardSignature(request)) {
       _reject('Invalid guard signature');
     }
     limiter.check(request.signer, request.vaults);
     checkVaultAccounts(request, await fetchAccounts(request.vaults), policy);
-    limiter.acquire(request.signer, request.vaults);
-    return 'signer=${request.signer} vaults=${request.vaults.join(',')} '
-        'fee<=${request.feeLamports}';
+    final at = limiter.acquire(request.signer, request.vaults);
+    return (
+      summary:
+          'signer=${request.signer} vaults=${request.vaults.join(',')} '
+          'fee<=${request.feeLamports}',
+      release: () => limiter.release(request.signer, request.vaults, at),
+    );
   }
 
   @override
@@ -971,6 +1083,8 @@ class PaymasterRoute implements GatewayRoute {
     required this.policy,
     required this.limiter,
     required this.creates,
+    required this.atas,
+    required this.fetchAccounts,
     this.upstreams = const {},
   });
 
@@ -986,23 +1100,110 @@ class PaymasterRoute implements GatewayRoute {
   /// Kora-funded vault creations (rent float), per owner and global.
   final UsageLimiter creates;
 
+  /// Kora-funded token accounts (rent spent for good), per owner and
+  /// global; each ATA is one slot.
+  final UsageLimiter atas;
+
+  /// Loads the payment source and any vault to verify (getMultipleAccounts).
+  final Future<List<VaultAccount?>> Function(List<String>) fetchAccounts;
+
   @override
   String get name => 'paymaster';
 
   @override
   Set<String> get methods => paymasterMethods;
 
+  /// Quota is checked first, then the accounts, and taken only once both
+  /// pass; the gateway gives it back if Kora rejects the transaction.
   @override
-  Future<String> admit(List<int> wire) async {
+  Future<Admission> admit(List<int> wire) async {
     final r = validatePaymasterTx(wire, policy);
     if (!await verifyOwnerSignature(r)) _reject('Invalid owner signature');
-    limiter.check(r.signer, const []);
-    if (r.koraFundsRent) creates.acquire(r.signer, const []);
-    limiter.acquire(r.signer, const []);
+    void checkQuotas() {
+      limiter.check(r.signer, const []);
+      if (r.koraFundsRent) creates.check(r.signer, const []);
+      if (r.koraAtas > 0) atas.check(r.signer, const [], n: r.koraAtas);
+    }
+
+    checkQuotas();
+    await _checkAccounts(r);
+    // Synchronous from here on, so no other request takes a slot between
+    // the checks and the acquires.
+    checkQuotas();
+    final at = limiter.acquire(r.signer, const []);
+    final createAt = r.koraFundsRent
+        ? creates.acquire(r.signer, const [])
+        : null;
+    final atasAt = r.koraAtas > 0
+        ? atas.acquire(r.signer, const [], n: r.koraAtas)
+        : null;
     final p = r.payment!;
-    return 'owner=${r.signer} ixs=${r.instructions.join(',')} '
-        'tier=${r.tier.name} fee<=${r.feeLamports} '
-        'paid=${p.amount} ${p.mint}';
+    return (
+      summary:
+          'owner=${r.signer} ixs=${r.instructions.join(',')} '
+          'tier=${r.tier.name} koraAtas=${r.koraAtas} '
+          'fee<=${r.feeLamports} paid=${p.amount} ${p.mint}',
+      release: () {
+        limiter.release(r.signer, const [], at);
+        if (createAt != null) creates.release(r.signer, const [], createAt);
+        if (atasAt != null) {
+          atas.release(r.signer, const [], atasAt, n: r.koraAtas);
+        }
+      },
+    );
+  }
+
+  /// The payment can succeed (audit M-2): its source is the owner's
+  /// unfrozen token account of the payment mint and holds what the
+  /// transaction takes from it. Kora-funded deposit ATAs belong to Deadman
+  /// vaults (audit M-1).
+  Future<void> _checkAccounts(PaymasterRequest r) async {
+    final source = r.paymentSource!;
+    final payment = r.payment!;
+    final ata = policy.paymentAtas[payment.destination]!;
+    final accounts = await fetchAccounts([source, ...r.vaultChecks]);
+    if (accounts.length != 1 + r.vaultChecks.length) {
+      _reject('Could not load the payment account');
+    }
+    final a = accounts[0];
+    var held = BigInt.zero;
+    if (a == null) {
+      if (!r.paymentSourceCreated) {
+        _reject('The payment account $source does not exist');
+      }
+    } else {
+      final d = a.data;
+      if (a.owner != ata.tokenProgram ||
+          d.length < 165 ||
+          base58encode(d.sublist(0, 32)) != ata.mint ||
+          base58encode(d.sublist(32, 64)) != r.signer ||
+          d[108] != 1) {
+        _reject(
+          'The payment account $source is not an unfrozen ${ata.mint} '
+          'account of ${r.signer}',
+        );
+      }
+      held = _uLe(d.sublist(64, 72));
+    }
+    final needs = r.paymentSourceNeeds!;
+    if (held < needs) {
+      _reject(
+        'The payment account $source holds $held, the transaction needs '
+        '$needs (${ata.mint} base units)',
+      );
+    }
+    for (var i = 0; i < r.vaultChecks.length; i++) {
+      final v = accounts[i + 1];
+      if (v == null ||
+          v.owner != policy.programId ||
+          v.data.length < 8 ||
+          !_eq(v.data.sublist(0, 8), Disc.vaultAccount)) {
+        _reject(
+          'The paymaster only funds token accounts of Deadman vaults; '
+          '${r.vaultChecks[i]} is not one',
+        );
+      }
+    }
   }
 
   @override
@@ -1209,9 +1410,9 @@ class KoraGateway {
       _send(res, id, error: 'params.transaction must be a base64 transaction');
       return;
     }
-    final String summary;
+    final Admission admission;
     try {
-      summary = await route.admit(base64Decode(tx));
+      admission = await route.admit(base64Decode(tx));
     } on FormatException {
       _send(res, id, error: 'params.transaction is not valid base64');
       return;
@@ -1220,13 +1421,26 @@ class KoraGateway {
       _send(res, id, error: e.message);
       return;
     }
-    final r = await _forward('signAndSendTransaction', {
-      'transaction': tx,
-    }, to: route.upstreamFor(base64Decode(tx)));
-    final outcome = r['error'] is Map
-        ? 'kora error: ${(r['error'] as Map)['message']}'
-        : 'sent ${(r['result'] as Map?)?['signature']}';
-    log('${_ts()} ${route.name} $ip $summary $outcome');
+    // Kora's verdict decides whether the quota stays spent (audit M-2): a
+    // rejection (or an HTTP refusal) gives it back, so wallets that cannot
+    // pay cannot use it up. A timeout or a dropped connection keeps it,
+    // since the transaction may have been sent.
+    final Map<String, dynamic> r;
+    try {
+      r = await _forward('signAndSendTransaction', {
+        'transaction': tx,
+      }, to: route.upstreamFor(base64Decode(tx)));
+    } on UpstreamHttpError {
+      admission.release();
+      rethrow;
+    }
+    final signature = (r['result'] as Map?)?['signature'];
+    final sent = r['error'] is! Map && signature is String;
+    if (!sent) admission.release();
+    final outcome = sent
+        ? 'sent $signature'
+        : 'kora error: ${(r['error'] as Map?)?['message']} (quota released)';
+    log('${_ts()} ${route.name} $ip ${admission.summary} $outcome');
     _relay(res, id, r);
   }
 
@@ -1276,6 +1490,12 @@ class KoraGateway {
   static String _ts() => DateTime.now().toUtc().toIso8601String();
 }
 
+/// A Kora node answered with a non-200 status, i.e. it did not process the
+/// call.
+class UpstreamHttpError extends StateError {
+  UpstreamHttpError(super.message);
+}
+
 /// One JSON-RPC call to a Kora node with its API key.
 Future<Map<String, dynamic>> koraCall(
   http.Client client,
@@ -1297,7 +1517,7 @@ Future<Map<String, dynamic>> koraCall(
       )
       .timeout(const Duration(seconds: 90));
   if (r.statusCode != 200) {
-    throw StateError('upstream $method returned HTTP ${r.statusCode}');
+    throw UpstreamHttpError('upstream $method returned HTTP ${r.statusCode}');
   }
   return jsonDecode(r.body) as Map<String, dynamic>;
 }
@@ -1331,30 +1551,42 @@ String associatedTokenAddress(String owner, String mint, String tokenProgram) =>
       Ed25519HDPublicKey.fromBase58(mint).bytes,
     ], programId: ataProgramId).address;
 
-/// Payment ATAs for every `allowed_spl_paid_tokens` mint, with each tier
-/// node's fixed price ([koraConfigs], `getConfig` results) converted to each
-/// mint's decimals. All tiers must accept the same mints in the same token.
+/// Payment ATAs for every `allowed_spl_paid_tokens` mint. With `fixed`
+/// pricing (devnet, one node per tier), each tier node's price
+/// ([koraConfigs], `getConfig` results) is converted to each mint's decimals
+/// and all tiers must accept the same mints in the same token. With
+/// `margin` pricing (mainnet, one node for every tier) there is no fixed
+/// floor: Kora prices the fee plus its outflow at the oracle price and
+/// checks the payment itself.
 Future<Map<String, PaymentAta>> loadPaymentAtas(
   RpcClient rpc,
   Map<PaymasterTier, Map<String, dynamic>> koraConfigs,
   String paymentAddress,
 ) async {
   final prices = <PaymasterTier, int>{};
-  late Map<String, dynamic> price;
+  final types = <Object?>{};
+  Map<String, dynamic>? price;
   late List<String> mints;
   for (final e in koraConfigs.entries) {
     final v = e.value['validation_config'] as Map<String, dynamic>;
-    price = v['price'] as Map<String, dynamic>;
-    if (price['type'] != 'fixed') {
-      throw StateError('paymaster pricing must be fixed, got ${price['type']}');
+    final p = v['price'] as Map<String, dynamic>;
+    types.add(p['type']);
+    if (p['type'] == 'fixed') {
+      price = p;
+      prices[e.key] = p['amount'] as int;
+    } else if (p['type'] != 'margin') {
+      throw StateError(
+        'paymaster pricing must be fixed or margin, got ${p['type']}',
+      );
     }
-    prices[e.key] = price['amount'] as int;
     mints = (v['allowed_spl_paid_tokens'] as List).cast<String>();
   }
-  final infos = await rpcAccountFetcher(rpc)([
-    price['token'] as String,
-    ...mints,
-  ]);
+  if (types.length != 1) {
+    throw StateError('paymaster tiers mix pricing types: $types');
+  }
+  final priceToken = price?['token'] as String?;
+  final infos = await rpcAccountFetcher(rpc)([?priceToken, ...mints]);
+  final mintInfos = priceToken == null ? infos : infos.sublist(1);
   int decimals(VaultAccount? m, String mint) {
     if (m == null ||
         (m.owner != tokenProgramId && m.owner != token2022ProgramId) ||
@@ -1364,11 +1596,11 @@ Future<Map<String, PaymentAta>> loadPaymentAtas(
     return m.data[44];
   }
 
-  final priceDecimals = decimals(infos[0], price['token'] as String);
+  final priceDecimals = priceToken == null ? 0 : decimals(infos[0], priceToken);
   final out = <String, PaymentAta>{};
   for (var i = 0; i < mints.length; i++) {
     final mint = mints[i];
-    final m = infos[i + 1];
+    final m = mintInfos[i];
     final scale = decimals(m, mint) - priceDecimals;
     int convert(int price) {
       final amount = BigInt.from(price);
@@ -1489,6 +1721,7 @@ Future<void> main() async {
           paymentAtas: atas,
         ),
         upstreams: tiers,
+        fetchAccounts: rpcAccountFetcher(rpc),
         limiter: UsageLimiter(
           perVault: 0,
           perSigner: envInt('PAYMASTER_PER_OWNER', 60),
@@ -1508,6 +1741,15 @@ Future<void> main() async {
           service: 'the paymaster',
           signerLabel: 'owner',
           unit: 'paymaster-funded vaults',
+        ),
+        atas: UsageLimiter(
+          perVault: 0,
+          perSigner: envInt('PAYMASTER_ATAS_PER_OWNER', 6),
+          global: envInt('PAYMASTER_ATAS_GLOBAL', 100),
+          file: File(env['PAYMASTER_ATAS_STATE'] ?? 'kora/paymaster-atas.json'),
+          service: 'the paymaster',
+          signerLabel: 'owner',
+          unit: 'paymaster-funded token accounts',
         ),
       ),
       payerSigner: pmPayer,

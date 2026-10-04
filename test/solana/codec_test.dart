@@ -542,7 +542,8 @@ void main() {
         () => decodeVault(bad, address: 'x', lamports: 0, rentExemptMinimum: 0),
         throwsFormatException,
       );
-      final short = bytes().sublist(0, bytes().length - 1);
+      // Cut inside rule 0 (the zero padding after the label is not data).
+      final short = bytes().sublist(0, 260);
       expect(
         () =>
             decodeVault(short, address: 'x', lamports: 0, rentExemptMinimum: 0),
@@ -550,8 +551,8 @@ void main() {
       );
       // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 7*8 + 8 + 4 + 4
       // + kind 1 + start_at 8 + revocable 1 + revoked_at 8 + rent_payer 32
-      // + 4 + 32.
-      final badRail = bytes()..[233] = 3;
+      // + rent_paid 8 + 4 + 32.
+      final badRail = bytes()..[241] = 3;
       expect(
         () => decodeVault(
           badRail,
@@ -562,7 +563,7 @@ void main() {
         throwsFormatException,
       );
       // AmountMode of rule 0: rail offset + 1 + 8 + 1 (no mint).
-      final badMode = bytes()..[233 + 10] = 2;
+      final badMode = bytes()..[241 + 10] = 2;
       expect(
         () => decodeVault(
           badMode,
@@ -582,7 +583,7 @@ void main() {
       final bytes = Uint8List.fromList(
         vaultBytes(owner: owner, guard: guard, rules: rules),
       );
-      const start = 233 - 32; // beneficiary of rule 0
+      const start = 241 - 32; // beneficiary of rule 0
       int at(int offset) => ByteData.sublistView(
         bytes,
         start + offset,
@@ -1047,7 +1048,7 @@ void main() {
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(28));
+      expect(errors, hasLength(29));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -1246,9 +1247,12 @@ void main() {
         'revocable',
         'revoked_at',
         'rent_payer',
+        'rent_paid',
         'rules',
         'label',
         'bump',
+        'stipend_paid',
+        '_reserved',
       ]);
       final kinds = [
         for (final v
@@ -1588,6 +1592,68 @@ void main() {
       }
       expect(check(schedules: [s(cliff: 100, duration: 100)]), isNull);
       expect(check(schedules: [s(duration: 20 * 366 * 86400)]), isNull);
+    });
+  });
+
+  group('mainnet layout', () {
+    Map<String, dynamic> idlIx(String name) =>
+        (loadIdl()['instructions'] as List).firstWhere((i) => i['name'] == name)
+            as Map<String, dynamic>;
+
+    test('recover_legacy_vault matches the IDL', () {
+      final idl = idlIx('recover_legacy_vault');
+      expect(Disc.recoverLegacyVault, List<int>.from(idl['discriminator']));
+      expect((idl['args'] as List).map((a) => a['name']), ['plan_id']);
+      final ix = recoverLegacyVaultIx(owner: owner, planId: 42801);
+      expect(
+        ix.accounts.map(
+          (a) => (a.pubKey.toBase58(), a.isWriteable, a.isSigner),
+        ),
+        [(owner, true, true), (vaultPda(owner, 42801).address, true, false)],
+      );
+      expect((idl['accounts'] as List).map((a) => a['name']), [
+        'owner',
+        'legacy',
+      ]);
+      expect(ix.data.toList(), [...Disc.recoverLegacyVault, 0x31, 0xa7]);
+    });
+
+    test('fixtures are exactly one Vault account long', () {
+      for (final guardian in [null, key(9)]) {
+        final bytes = vaultBytes(
+          owner: owner,
+          planId: 0x1234,
+          guard: guard,
+          guardian: guardian,
+        );
+        expect(bytes, hasLength(vaultAccountSize));
+        expect(bytes.sublist(8, 40), keyBytes(owner));
+        expect(bytes.sublist(40, 42), [0x34, 0x12]);
+        expect(bytes.sublist(42, 74), keyBytes(guard));
+        expect(bytes[74], guardian == null ? 0 : 1);
+      }
+    });
+
+    test('withdrawable keeps the larger of rent paid and the current rent', () {
+      VaultState v(int rentPaid, int minimum) => decodeVault(
+        vaultBytes(owner: owner, guard: guard, rentPaid: rentPaid),
+        address: 'vault',
+        lamports: 10000000,
+        rentExemptMinimum: minimum,
+      );
+      expect(v(7711440, 7711440).withdrawableLamports, 2288560);
+      expect(v(7711440, 7711440).rentPaid, 7711440);
+      // Rent cut: the sponsor's deposit stays locked.
+      expect(v(7711440, 3855720).withdrawableLamports, 2288560);
+      // Rent rise: the account stays rent-exempt.
+      expect(v(7711440, 9000000).withdrawableLamports, 1000000);
+      expect(v(7711440, 20000000).withdrawableLamports, 0);
+    });
+
+    test('per-rail gas stipends mirror the program', () {
+      expect(Limits.gasStipend(Rail.solana), 0);
+      expect(Limits.gasStipend(Rail.cloak), 12000000);
+      expect(Limits.gasStipend(Rail.zcash), 3000000);
     });
   });
 }

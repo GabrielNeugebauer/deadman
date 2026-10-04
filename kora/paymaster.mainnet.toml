@@ -1,0 +1,133 @@
+# Deadman PAYMASTER node, MAINNET (Kora 2.0.5), port 8091, API key required.
+# One node for every tier: margin pricing bills the network fee plus the fee
+# payer's outflow (vault and ATA rent, CPIs included: Kora simulates with
+# inner instructions) at the live Jupiter SOL/USDC price, plus 15%. So the
+# devnet fixed-price tiers (kora/paymaster.toml) are not used here.
+# scripts/kora_start.sh uses this file as is when CLUSTER=mainnet-beta;
+# secrets (signer key, API keys, JUPITER_API_KEY, RPC_URL) come from
+# kora/.env.mainnet, never from this file.
+# Schema: crates/lib/src/config.rs at tag v2.0.5.
+
+[kora]
+rate_limit = 20                       # global requests/second for this node
+max_request_body_size = 65536
+# No payment_address: payments go to the signer's own USDC ATA, created by
+# `kora rpc initialize-atas` (scripts/kora_start.sh; costs the ATA rent).
+# The app pins this signer (KORA_PAYMASTER_SIGNER) as fee payer and payment
+# address.
+
+[kora.auth]
+# Kora 2.0.5 always binds 0.0.0.0, so the API key is what closes :8091.
+# scripts/kora_start.sh sets KORA_API_KEY from PAYMASTER_API_KEY in kora/.env.
+
+[kora.cache]
+enabled = false
+default_ttl = 300
+account_ttl = 60
+
+# Every transaction is paid for, so there is no lifetime per-wallet cap here;
+# the gateway rate-limits per owner (rolling 24 h) instead.
+[kora.usage_limit]
+enabled = false
+cache_url = "redis://127.0.0.1:6379/3"
+max_transactions = 0
+fallback_if_unavailable = false
+
+[kora.enabled_methods]
+liveness = true
+estimate_transaction_fee = true
+get_supported_tokens = true
+get_payer_signer = true
+sign_transaction = true
+sign_and_send_transaction = true
+transfer_transaction = false
+get_blockhash = true
+get_config = true
+
+[validation]
+# Caps both the network fee and the fee payer's outflow: ONE vault created
+# with payer = Kora (Vault::SPACE = 1390 bytes -> 7_711_440 lamports rent)
+# + <= 2 ATAs (2 x 1_488_440; 2 x 1_513_840 for Token-2022) + <= 50_000 fee
+# = 10_738_320 (10_789_120). The gateway admits at most that per transaction.
+max_allowed_lamports = 11500000
+max_signatures = 2                    # Kora + the owner
+price_source = "Jupiter"              # needs JUPITER_API_KEY (kora/.env.mainnet)
+allow_durable_transactions = false
+
+allowed_programs = [
+    "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
+    "11111111111111111111111111111111",             # System
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", # Associated Token
+    "ComputeBudget111111111111111111111111111111",  # Compute Budget
+]
+allowed_tokens = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]          # USDC
+allowed_spl_paid_tokens = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+disallowed_accounts = []
+
+# Margin: fee = ceil((network fee + fee payer outflow) x 1.15), converted to
+# USDC at the Jupiter price; Kora checks the payment against the same value.
+# The 15% covers price moves between estimate and landing and Jupiter's
+# spread; the outflow is in the price, so a Kora-funded ATA always costs its
+# buyer more than its rent (audit M-1). Vault rent comes back to Kora on
+# close_vault; ATA rent does not.
+[validation.price]
+type = "margin"
+margin = 0.15
+
+# The fee payer may only fund account creation (Anchor `init` CPI with
+# payer = Kora in create_vault / create_vesting). Everything else is denied.
+[validation.fee_payer_policy.system]
+allow_transfer = false
+allow_assign = false
+allow_create_account = true
+allow_allocate = false
+
+[validation.fee_payer_policy.system.nonce]
+allow_initialize = false
+allow_advance = false
+allow_authorize = false
+allow_withdraw = false
+
+[validation.fee_payer_policy.spl_token]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+[validation.fee_payer_policy.token_2022]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+[validation.token_2022]
+blocked_mint_extensions = ["permanent_delegate", "transfer_hook"]
+blocked_account_extensions = []
+
+[metrics]
+enabled = true
+endpoint = "/metrics"
+port = 8091
+scrape_interval = 60
+
+[metrics.fee_payer_balance]
+enabled = true
+expiry_seconds = 30

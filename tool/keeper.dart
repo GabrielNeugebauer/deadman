@@ -12,9 +12,14 @@
 // --vest-interval per schedule (and always once it is fully vested), under
 // the same payability rules. Inheritance-only actions never touch them.
 //
-// dart run tool/keeper.dart --keypair <path> [--rpc <url>] [--every 60]
-//   [--dry-run] [--price <mint>=<lamports per base unit>]...
+// dart run tool/keeper.dart --keypair <path> [--cluster devnet|mainnet-beta]
+//   [--rpc <url>] [--every 60] [--dry-run]
+//   [--price <mint>=<lamports per base unit>]...
 //   [--vest-interval <seconds>] [--usdc-price-lamports <per base unit>]
+//   [--cu-price <micro-lamports per CU>]
+//
+// --cluster picks the default RPC and USDC mint, and the keeper refuses to
+// start when the RPC's genesis hash belongs to another cluster.
 import 'dart:convert';
 import 'dart:io';
 
@@ -245,6 +250,21 @@ RuleSpec vestingAsTier(RuleSpec schedule, int claimable) => RuleSpec(
 /// 6_000_000 lamports per 1_000_000 base units.
 const defaultUsdcLamportsPerUnit = 6.0;
 
+/// Defaults per `--cluster`: genesis hash (checked against the RPC), RPC
+/// and USDC mint.
+const clusters = <String, ({String genesisHash, String rpc, String usdcMint})>{
+  'devnet': (
+    genesisHash: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
+    rpc: 'https://api.devnet.solana.com',
+    usdcMint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+  ),
+  'mainnet-beta': (
+    genesisHash: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
+    rpc: 'https://api.mainnet-beta.solana.com',
+    usdcMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  ),
+};
+
 class Keeper {
   Keeper(
     this.sol,
@@ -253,6 +273,7 @@ class Keeper {
     this.dryRun = false,
     this.prices = const {},
     this.vestInterval = 86400,
+    this.cuPrice = 0,
   });
 
   final SolanaClient sol;
@@ -263,6 +284,10 @@ class Keeper {
 
   /// Seconds between releases of one vesting schedule.
   final int vestInterval;
+
+  /// Priority fee (micro-lamports per compute unit) on execute and release
+  /// transactions; 0 = none.
+  final int cuPrice;
   final _rent = <int, int>{};
 
   /// Last release per `vault:index`, this run.
@@ -369,6 +394,8 @@ class Keeper {
   ) async {
     final build = v.isVesting ? releaseVestedIxs : executeRuleIxs;
     final ixs = [
+      if (cuPrice > 0)
+        ComputeBudgetInstruction.setComputeUnitPrice(microLamports: cuPrice),
       for (final ix in build(
         executor: key.address,
         vaultOwner: v.owner,
@@ -479,10 +506,12 @@ extension on Keeper {
 }
 
 const _usage =
-    'usage: --keypair <path> [--rpc <url>] [--every <seconds>] [--dry-run] '
+    'usage: --keypair <path> [--cluster devnet|mainnet-beta] [--rpc <url>] '
+    '[--every <seconds>] [--dry-run] '
     '[--price <mint>=<lamports per base unit>]... '
     '[--vest-interval <seconds, default 86400>] '
-    '[--usdc-price-lamports <per USDC base unit, default 6 = 0.006 SOL/USDC>]';
+    '[--usdc-price-lamports <per USDC base unit, default 6 = 0.006 SOL/USDC>] '
+    '[--cu-price <micro-lamports per compute unit, default 0>]';
 
 Future<void> main(List<String> argv) async {
   final args = <String, String>{};
@@ -510,9 +539,14 @@ Future<void> main(List<String> argv) async {
     stderr.writeln(_usage);
     exit(64);
   }
-  final rpc = args['rpc'] ?? 'https://api.devnet.solana.com';
+  final cluster = clusters[args['cluster'] ?? AppConfig.cluster];
+  if (cluster == null) {
+    stderr.writeln('--cluster must be one of ${clusters.keys.join(', ')}');
+    exit(64);
+  }
+  final rpc = args['rpc'] ?? cluster.rpc;
   final every = int.tryParse(args['every'] ?? '');
-  prices[AppConfig.usdcMint] ??=
+  prices[cluster.usdcMint] ??=
       double.tryParse(args['usdc-price-lamports'] ?? '') ??
       defaultUsdcLamportsPerUnit;
 
@@ -525,6 +559,14 @@ Future<void> main(List<String> argv) async {
     rpcUrl: Uri.parse(rpc),
     websocketUrl: Uri.parse(rpc.replaceFirst('http', 'ws')),
   );
+  final genesis = await sol.rpcClient.getGenesisHash();
+  if (genesis != cluster.genesisHash) {
+    stderr.writeln(
+      'RPC genesis hash $genesis does not match --cluster '
+      '${args['cluster'] ?? AppConfig.cluster}',
+    );
+    exit(1);
+  }
   // No sponsor: the keeper pays its own fees.
   final client = DeadmanClient.withKora(client: sol);
   final keeper = Keeper(
@@ -534,8 +576,13 @@ Future<void> main(List<String> argv) async {
     dryRun: dryRun,
     prices: prices,
     vestInterval: int.tryParse(args['vest-interval'] ?? '') ?? 86400,
+    cuPrice: int.tryParse(args['cu-price'] ?? '') ?? 0,
   );
-  stdout.writeln('Keeper ${key.address} on $rpc${dryRun ? ' (dry run)' : ''}');
+  // Host only: RPC URLs often carry an API key in the query.
+  stdout.writeln(
+    'Keeper ${key.address} on ${Uri.parse(rpc).host} '
+    '(${args['cluster'] ?? AppConfig.cluster})${dryRun ? ' (dry run)' : ''}',
+  );
 
   do {
     try {

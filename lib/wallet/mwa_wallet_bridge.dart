@@ -3,21 +3,6 @@ import 'package:flutter/services.dart';
 import '../core/config.dart';
 import 'wallet_bridge.dart';
 
-/// Thrown when a Mobile Wallet Adapter call fails.
-class WalletException implements Exception {
-  const WalletException(this.code, this.message);
-
-  /// `NO_WALLET`, `DECLINED`, `NO_IDENTITY`, `BAD_ARGS` or `MWA_ERROR`.
-  final String code;
-  final String message;
-
-  bool get noWallet => code == 'NO_WALLET';
-  bool get declined => code == 'DECLINED';
-
-  @override
-  String toString() => 'WalletException($code): $message';
-}
-
 /// [WalletBridge] backed by the native `deadman/mwa` channel
 /// (Solana Mobile clientlib-ktx, MWA 2.0).
 class MwaWalletBridge implements WalletBridge {

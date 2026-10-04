@@ -12,7 +12,9 @@ import '../../state/providers.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
+import '../web/web_ui.dart';
 import '../widgets/feedback.dart';
+import 'rails_check_screen.dart';
 import 'recovery_phrase_screen.dart';
 
 Future<bool> _confirm(
@@ -50,6 +52,23 @@ class SettingsTab extends ConsumerWidget {
       // Retried in the background until it goes through; look normal.
       await actions.duressLockdown().catchError((Object _) {});
       if (context.mounted) toast(context, 'Vault locked down');
+      return;
+    }
+    if (ref.read(isWebProvider)) {
+      // No guard-key path in the browser: one wallet approval locks all.
+      List<VaultState>? locked;
+      final ok = await runGuarded(
+        context,
+        () async => locked = await actions.lockdownWithWallet(),
+      );
+      if (ok && context.mounted) {
+        toast(
+          context,
+          locked!.length == 1
+              ? 'Locked ${planName(locked!.single)}.'
+              : 'Locked ${locked!.length} plans.',
+        );
+      }
       return;
     }
     LockReport? report;
@@ -95,12 +114,16 @@ class SettingsTab extends ConsumerWidget {
   /// Two steps: PINs and guard by default; receiving keys only on an
   /// explicit second confirmation.
   Future<void> _forget(BuildContext context, WidgetRef ref) async {
+    final web = ref.read(isWebProvider);
     if (!await _confirm(
           context,
-          'Forget this device?',
-          'Deletes your PINs and this phone\'s guard key. Your plans stay on-chain, '
-              'but they keep the old guard key: after setting up again, use '
-              '"Move guard to this phone" or check-ins will not reach them.',
+          web ? 'Forget this browser?' : 'Forget this device?',
+          web
+              ? 'Deletes your PINs and this browser\'s guard key. Your plans stay '
+                    'on-chain and your wallet keeps working with them.'
+              : 'Deletes your PINs and this phone\'s guard key. Your plans stay on-chain, '
+                    'but they keep the old guard key: after setting up again, use '
+                    '"Move guard to this phone" or check-ins will not reach them.',
           'Forget',
         ) ||
         !context.mounted) {
@@ -150,18 +173,39 @@ class SettingsTab extends ConsumerWidget {
         .reset(deleteReceivingKeys: deleteKeys);
   }
 
+  /// Web: connect another browser wallet; its address becomes the owner.
+  Future<void> _switchWallet(BuildContext context, WidgetRef ref) async {
+    final kind = await showWalletPicker(context);
+    if (kind == null || !context.mounted) return;
+    await runGuarded(
+      context,
+      () => ref.read(actionsProvider).connectWeb(kind),
+      success: 'Connected ${kind.label}',
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final owner = ref.watch(sessionProvider.select((s) => s.owner)) ?? '';
     final guard = ref.watch(guardAddressProvider).value;
     final actions = ref.read(actionsProvider);
+    final web = ref.watch(isWebProvider);
+    final walletName = web
+        ? ref.read(webWalletProvider).lastKind?.label ?? 'Wallet'
+        : null;
 
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
         children: [
-          Text('Security', style: t.headlineMedium),
+          Row(
+            children: [
+              Text('Security', style: t.headlineMedium),
+              const Spacer(),
+              if (web) const WebBadge(),
+            ],
+          ),
           const SizedBox(height: 20),
           Card(
             child: Column(
@@ -169,7 +213,17 @@ class SettingsTab extends ConsumerWidget {
                 ListTile(
                   leading: const Icon(Icons.account_balance_wallet_outlined),
                   title: const Text('Owner wallet'),
-                  subtitle: Text(short(owner)),
+                  subtitle: Text(
+                    walletName == null
+                        ? short(owner)
+                        : '$walletName · ${short(owner)}',
+                  ),
+                  trailing: web
+                      ? TextButton(
+                          onPressed: () => _switchWallet(context, ref),
+                          child: const Text('Switch'),
+                        )
+                      : null,
                   onTap: () {
                     Clipboard.setData(ClipboardData(text: owner));
                     toast(context, 'Address copied');
@@ -178,12 +232,15 @@ class SettingsTab extends ConsumerWidget {
                 const Divider(height: 1, color: DmColors.line),
                 ListTile(
                   leading: const Icon(Icons.key_outlined),
-                  title: const Text('Guard key (this phone)'),
+                  title: Text(
+                    web ? 'Guard key (this browser)' : 'Guard key (this phone)',
+                  ),
                   subtitle: Text(guard == null ? 'Not created' : short(guard)),
                 ),
               ],
             ),
           ),
+          if (web) ...[const SizedBox(height: 12), const AndroidAppCard()],
           const SizedBox(height: 16),
           Card(
             child: ListTile(
@@ -199,7 +256,8 @@ class SettingsTab extends ConsumerWidget {
                 if (await _confirm(
                       context,
                       'Lock down vault?',
-                      'Withdrawals and policy changes freeze for your lock period. Inheritance keeps working.',
+                      'Withdrawals and policy changes freeze for your lock period. Inheritance keeps working.'
+                          '${web ? ' Approve in your wallet.' : ''}',
                       'Lock down',
                     ) &&
                     context.mounted) {
@@ -208,36 +266,58 @@ class SettingsTab extends ConsumerWidget {
               },
             ),
           ),
-          const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.autorenew),
-              title: const Text('Move guard to this phone'),
-              subtitle: const Text(
-                'Use after a lost or replaced device, or after Forget this device',
-              ),
-              onTap: () async {
-                if (await _confirm(
+          // Moving the guard to a browser would take it off the phone.
+          if (!web) ...[
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.autorenew),
+                title: const Text('Move guard to this phone'),
+                subtitle: const Text(
+                  'Use after a lost or replaced device, or after Forget this device',
+                ),
+                onTap: () async {
+                  if (await _confirm(
+                        context,
+                        'Move guard to this phone?',
+                        'Every plan guarded by another key moves to this phone\'s guard key, and the old key '
+                            'stops working. Approve in your wallet.',
+                        'Move',
+                      ) &&
+                      context.mounted) {
+                    await runGuarded(
                       context,
-                      'Move guard to this phone?',
-                      'Every plan guarded by another key moves to this phone\'s guard key, and the old key '
-                          'stops working. Approve in your wallet.',
-                      'Move',
-                    ) &&
-                    context.mounted) {
-                  await runGuarded(
-                    context,
-                    actions.rotateGuard,
-                    success: 'Guard moved to this phone',
-                  );
-                }
-              },
+                      actions.rotateGuard,
+                      success: 'Guard moved to this phone',
+                    );
+                  }
+                },
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: 12),
           const _ReceivePrivatelyCard(),
           const SizedBox(height: 12),
           const _RecoveryCard(),
+          // The Cloak prover runs in the Android app's WebView.
+          if (!web) ...[
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.health_and_safety_outlined),
+                title: const Text('Private rails check'),
+                subtitle: const Text(
+                  'Test the Cloak prover and a Zcash quote. Moves no funds.',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const RailsCheckScreen(),
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           const _FeesCard(),
           const SizedBox(height: 12),
@@ -254,7 +334,7 @@ class SettingsTab extends ConsumerWidget {
           Card(
             child: ListTile(
               leading: const Icon(Icons.logout, color: DmColors.muted),
-              title: const Text('Forget this device'),
+              title: Text(web ? 'Forget this browser' : 'Forget this device'),
               subtitle: const Text(
                 'Deletes PINs and the guard key. Receiving keys stay unless you choose to delete them.',
               ),
@@ -269,6 +349,8 @@ class SettingsTab extends ConsumerWidget {
 
 class _ReceivePrivatelyCard extends ConsumerWidget {
   const _ReceivePrivatelyCard();
+
+  static const _ownCloak = 'own-cloak-address';
 
   Future<void> _edit(
     BuildContext context,
@@ -295,6 +377,12 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
           ),
         ),
         actions: [
+          // Deriving it needs the Cloak SDK, which runs in the Android app.
+          if (rail == Rail.cloak && !ref.read(isWebProvider))
+            TextButton(
+              onPressed: () => Navigator.pop(context, _ownCloak),
+              child: const Text('Use this phone\'s shielded address'),
+            ),
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel'),
@@ -307,11 +395,14 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
       ),
     );
     if (dest == null || dest.isEmpty || !context.mounted) return;
+    final own = dest == _ownCloak;
     if (current != null && current.isNotEmpty && current != dest) {
       if (!await _confirm(
             context,
             'Change destination?',
-            'Payouts routed from now on go to\n$dest\ninstead of\n$current',
+            'Payouts routed from now on go to\n'
+                '${own ? 'this phone\'s shielded address' : dest}\n'
+                'instead of\n$current',
             'Change',
           ) ||
           !context.mounted) {
@@ -320,7 +411,10 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
     }
     SavedClaim? saved;
     final ok = await runGuarded(context, () async {
-      saved = await ref.read(actionsProvider).saveClaimProfile(rail, dest);
+      final actions = ref.read(actionsProvider);
+      saved = own
+          ? await actions.useOwnCloakAddress()
+          : await actions.saveClaimProfile(rail, dest);
       await Clipboard.setData(ClipboardData(text: saved!.profile.claimCode));
     });
     if (!ok || !context.mounted) return;
@@ -336,6 +430,7 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profiles = ref.watch(claimProfilesProvider).value ?? const [];
+    final device = ref.watch(isWebProvider) ? 'browser' : 'phone';
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 14, 8, 8),
@@ -347,9 +442,9 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
               style: TextStyle(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 4),
-            const Text(
+            Text(
               'Get a claim code to give someone who is naming you in their plan. Payouts land on a '
-              'fresh key on this phone and are forwarded to your private address.',
+              'fresh key on this $device and are forwarded to your private address.',
               style: TextStyle(
                 color: DmColors.muted,
                 fontSize: 13,
@@ -447,7 +542,7 @@ class _RecoveryCard extends ConsumerWidget {
         if (r.restored.isNotEmpty)
           'Restored ${names(r.restored)}. Set a destination before routing.',
         if (r.kept.isNotEmpty)
-          'Kept this phone\'s existing ${names(r.kept)} key (not from this phrase).',
+          'Kept this ${ref.read(isWebProvider) ? 'browser' : 'phone'}\'s existing ${names(r.kept)} key (not from this phrase).',
       ].join(' ');
     });
     if (ok && context.mounted) toast(context, message!);
@@ -467,7 +562,11 @@ class _RecoveryCard extends ConsumerWidget {
         ListTile(
           leading: const Icon(Icons.restore),
           title: const Text('Restore receiving profiles from phrase'),
-          subtitle: const Text('On a new or reset phone'),
+          subtitle: Text(
+            ref.watch(isWebProvider)
+                ? 'On a new browser or after clearing site data'
+                : 'On a new or reset phone',
+          ),
           onTap: () => _restore(context, ref),
         ),
       ],
@@ -509,6 +608,7 @@ class NetworkFeesCard extends ConsumerWidget {
     final usdc = ref.watch(walletUsdcProvider).value;
     final mode = ref.watch(feeModeProvider);
     final paymaster = ref.watch(paymasterAvailableProvider);
+    final web = ref.watch(isWebProvider);
     const small = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.35);
     return Card(
       child: Padding(
@@ -532,45 +632,51 @@ class NetworkFeesCard extends ConsumerWidget {
               '${usdc == null ? '…' : amountNumber(usdc, AppConfig.usdcMint)} USDC',
               style: small,
             ),
-            const SizedBox(height: 12),
-            const Text('Pay network fees with'),
-            const SizedBox(height: 8),
-            SegmentedButton<FeeMode>(
-              showSelectedIcon: false,
-              segments: [
-                const ButtonSegment(value: FeeMode.sol, label: Text('SOL')),
-                ButtonSegment(
-                  value: FeeMode.usdc,
-                  label: const Text('USDC'),
-                  enabled: paymaster,
-                ),
-              ],
-              selected: {mode},
-              onSelectionChanged: (s) =>
-                  ref.read(feeModeProvider.notifier).set(s.first),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              !paymaster
-                  ? 'Your wallet pays its fees in SOL. Paying in USDC needs a Kora '
-                        'paymaster, which this build does not have configured.'
-                  : mode == FeeMode.usdc
-                  ? 'A Kora paymaster pays the SOL fee and account rent for your wallet '
-                        'transactions and charges you the equivalent in USDC.'
-                  : 'Your wallet pays its fees in SOL. Switch to USDC to need no SOL at all.',
-              style: small,
-            ),
-            if (mode == FeeMode.usdc && usdc == 0)
-              const Padding(
-                padding: EdgeInsets.only(top: 6),
-                child: Text(
-                  'Your wallet has no USDC. Add USDC or switch fees to SOL.',
-                  style: TextStyle(color: DmColors.warn, fontSize: 13),
-                ),
+            // The browser build only offers USDC fees when a paymaster is set.
+            if (paymaster || !web) ...[
+              const SizedBox(height: 12),
+              const Text('Pay network fees with'),
+              const SizedBox(height: 8),
+              SegmentedButton<FeeMode>(
+                showSelectedIcon: false,
+                segments: [
+                  const ButtonSegment(value: FeeMode.sol, label: Text('SOL')),
+                  ButtonSegment(
+                    value: FeeMode.usdc,
+                    label: const Text('USDC'),
+                    enabled: paymaster,
+                  ),
+                ],
+                selected: {mode},
+                onSelectionChanged: (s) =>
+                    ref.read(feeModeProvider.notifier).set(s.first),
               ),
+              const SizedBox(height: 8),
+              Text(
+                !paymaster
+                    ? 'Your wallet pays its fees in SOL. Paying in USDC needs a Kora '
+                          'paymaster, which this build does not have configured.'
+                    : mode == FeeMode.usdc
+                    ? 'A Kora paymaster pays the SOL fee and account rent for your wallet '
+                          'transactions and charges you the equivalent in USDC.'
+                    : 'Your wallet pays its fees in SOL. Switch to USDC to need no SOL at all.',
+                style: small,
+              ),
+              if (mode == FeeMode.usdc && usdc == 0)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    'Your wallet has no USDC. Add USDC or switch fees to SOL.',
+                    style: TextStyle(color: DmColors.warn, fontSize: 13),
+                  ),
+                ),
+            ],
             const SizedBox(height: 6),
             Text(
-              sponsored
+              web
+                  ? 'Check-ins and panic locks are approved in your wallet like any '
+                        'other transaction.'
+                  : sponsored
                   ? 'Check-ins and duress locks are free; this phone needs no SOL.'
                   : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).',
               style: small,

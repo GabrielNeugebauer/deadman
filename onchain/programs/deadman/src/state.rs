@@ -33,8 +33,13 @@ pub enum Rail {
 }
 
 impl Rail {
-    pub fn is_private(self) -> bool {
-        self != Rail::Solana
+    /// SOL a private-rail token payout tops its claim key up with.
+    pub fn gas_stipend(self) -> u64 {
+        match self {
+            Rail::Solana => 0,
+            Rail::Cloak => CLOAK_GAS_STIPEND,
+            Rail::Zcash => ZCASH_GAS_STIPEND,
+        }
     }
 }
 
@@ -105,6 +110,11 @@ pub struct Rule {
     pub released: u64,
 }
 
+/// Layout (final for mainnet). Clients read `owner` at byte 8, `plan_id` at
+/// 40, `guard` at 42 and the `guardian` option at 74 (after the 8-byte
+/// discriminator); everything from `guardian` on sits at variable offsets.
+/// New fields must be carved out of `_reserved` (keeping the total size), so
+/// existing accounts decode with them zeroed and need no migration.
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
@@ -139,15 +149,33 @@ pub struct Vault {
     /// Who funded the account rent (the owner, or a fee sponsor). Closing
     /// the plan returns the rent to them, never to someone else.
     pub rent_payer: Pubkey,
+    /// Lamports the rent payer deposited at creation. Never withdrawable,
+    /// and exactly this much goes back to `rent_payer` on close, whatever
+    /// the rent sysvar says later.
+    pub rent_paid: u64,
     #[max_len(MAX_RULES)]
     pub rules: Vec<Rule>,
     /// Display name, e.g. "Kids" or "Emergency fund".
     #[max_len(MAX_LABEL_LEN)]
     pub label: String,
     pub bump: u8,
+    /// Bit `i` set once rule `i`'s claim key got its gas stipend, so a
+    /// private-rail beneficiary is topped up at most once per rule.
+    pub stipend_paid: u8,
+    /// Zeroed space for future fields; see the layout note above.
+    pub _reserved: [u8; 63],
 }
 
 impl Vault {
+    /// Total account size, discriminator included.
+    pub const SPACE: usize = 8 + Vault::INIT_SPACE;
+
+    /// Lamports that must stay in the account: the rent actually paid, or
+    /// the current minimum if that is higher.
+    pub fn rent_reserve(&self, data_len: usize) -> Result<u64> {
+        Ok(Rent::get()?.minimum_balance(data_len).max(self.rent_paid))
+    }
+
     pub fn require_kind(&self, kind: PlanKind) -> Result<()> {
         require!(self.kind == kind, DeadmanError::WrongPlanKind);
         Ok(())

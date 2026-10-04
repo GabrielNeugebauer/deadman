@@ -128,6 +128,7 @@ class VaultState {
     this.revocable = false,
     this.revokedAt = 0,
     this.rentPayer = '',
+    this.rentPaid = 0,
   });
 
   final String address;
@@ -141,7 +142,8 @@ class VaultState {
   final int intervalSecs;
   final int lockSecs;
 
-  /// Owner-chosen time a due tier gets to pay before anyone may skip it.
+  /// Owner-chosen time a due tier gets to pay before it may be skipped
+  /// (the Deadman keeper skips it once this passes).
   final int skipGraceSecs;
 
   /// Unix seconds.
@@ -159,7 +161,8 @@ class VaultState {
   final List<RuleState> rules;
   final int lamports;
 
-  /// Lamports above the rent-exempt minimum.
+  /// Lamports above the rent reserve: the larger of [rentPaid] and the
+  /// current rent-exempt minimum.
   final int withdrawableLamports;
 
   final PlanKind kind;
@@ -175,6 +178,10 @@ class VaultState {
 
   /// Who funded the account rent; closing returns it to them.
   final String rentPayer;
+
+  /// Rent [rentPayer] deposited at creation; closing returns exactly this
+  /// to them and everything else to the owner.
+  final int rentPaid;
 
   bool get isVesting => kind == PlanKind.vesting;
 
@@ -198,8 +205,10 @@ class VaultState {
 
   /// Vesting: what schedule [index] could release right now (before the
   /// vault balance cap and fees).
-  int claimable(int index, int now) =>
-      (vested(index, now) - rules[index].released).clamp(0, 1 << 62);
+  int claimable(int index, int now) {
+    final left = vested(index, now) - rules[index].released;
+    return left < 0 ? 0 : left;
+  }
 
   /// Vesting: amount of [mint] (null = SOL) still owed to beneficiaries;
   /// the owner cannot withdraw below it. 0 for inheritance plans.
@@ -263,6 +272,37 @@ class VaultState {
     return next;
   }
 
+  /// Shares reserved for skipped, unpaid tiers of [mint] (null = SOL),
+  /// other than [except] (mirrors the program's `reserved_for`).
+  int reservedFor(String? mint, {int except = -1}) {
+    var total = 0;
+    for (var j = 0; j < rules.length; j++) {
+      final r = rules[j];
+      if (j != except && r.mint == mint && !r.executed && r.skipped) {
+        total += r.reserved;
+      }
+    }
+    return total;
+  }
+
+  /// Gross amount tier [index] pays from [balance] of its asset (mirrors
+  /// the program's `payout_gross`): a skipped tier gets its reserved share;
+  /// any other tier works on the balance minus every reserved share.
+  int payoutGross(int index, int balance) {
+    final r = rules[index];
+    if (r.skipped && r.reserved > 0) {
+      return r.reserved < balance ? r.reserved : balance;
+    }
+    final left = balance - reservedFor(r.mint, except: index);
+    if (left <= 0) return 0;
+    return switch (r.mode) {
+      AmountMode.fixed => r.amount < left ? r.amount : left,
+      AmountMode.percent =>
+        (BigInt.from(left) * BigInt.from(r.amount) ~/ BigInt.from(10000))
+            .toInt(),
+    };
+  }
+
   /// Unpaid and either skipped (claimable any time) or due with every
   /// earlier rule for the same asset paid or skipped.
   bool canExecute(int index, int now) {
@@ -304,6 +344,18 @@ abstract class DeadmanApi {
   /// Every plan of [owner], sorted by plan id.
   Future<List<VaultState>> fetchVaults(String owner);
 
+  /// Plan ids of [owner]'s accounts left in an older layout by a program
+  /// upgrade (not readable as plans; see [buildRecoverLegacyVault]).
+  Future<List<int>> fetchLegacyPlanIds(String owner);
+
+  /// Closes [owner]'s plan [planId] that is in an older layout and returns
+  /// all its SOL to the owner. Tokens in that plan's token accounts stay
+  /// where they are.
+  Future<Uint8List> buildRecoverLegacyVault({
+    required String owner,
+    required int planId,
+  });
+
   /// Every Deadman vault (keepers use this to find due rules).
   Future<List<VaultState>> fetchAllVaults();
 
@@ -317,8 +369,13 @@ abstract class DeadmanApi {
   /// Token balance (base units) of [owner]'s ATA for [mint]; 0 if missing.
   Future<int> tokenBalance(String owner, String mint);
 
+  /// [tokenBalance] for many (owner, mint) pairs, batched into as few RPC
+  /// calls as possible; same order as [accounts].
+  Future<List<int>> tokenBalances(List<(String, String)> accounts);
+
   /// Creates plan [planId], funds the guard key with fee money if it holds
-  /// less than that, and optionally deposits [depositLamports], in one tx.
+  /// less than that, and optionally deposits [depositLamports] and tokens
+  /// ([tokenDeposits]: mint -> base units, from the owner's ATA), in one tx.
   Future<Uint8List> buildCreateVault({
     required String owner,
     required int planId,
@@ -329,6 +386,7 @@ abstract class DeadmanApi {
     required int skipGraceSecs,
     required List<RuleSpec> rules,
     int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
   });
 
   Future<Uint8List> buildDeposit({
@@ -402,7 +460,8 @@ abstract class DeadmanApi {
     required int index,
   });
 
-  /// Skips rule [index] (see [VaultState.canSkip]); anyone may sign. Token
+  /// Skips rule [index] (see [VaultState.canSkip]); anyone may sign (the
+  /// keeper does it automatically; the app offers no manual skip). Token
   /// tiers pass the vault's ATA so the program can reserve the tier's share.
   Future<Uint8List> buildSkipRule({
     required String caller,

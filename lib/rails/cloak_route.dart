@@ -122,6 +122,85 @@ class CloakQuoteData {
   final String? publicRecipient;
 }
 
+/// A shielded note paid to this device's Cloak receive address (see
+/// [CloakRoute.receiveAddressFor]), found by [CloakRoute.scanReceived].
+class CloakNote {
+  const CloakNote({
+    required this.commitment,
+    required this.amount,
+    required this.mint,
+    required this.blinding,
+    required this.spent,
+    this.leafIndex,
+    this.receivedAt,
+  });
+
+  factory CloakNote.fromJson(Map<String, dynamic> json) {
+    final blockTime = json['blockTime'] as int?;
+    return CloakNote(
+      commitment: json['commitment'] as String,
+      amount: int.parse(json['amount'] as String),
+      mint: json['mint'] as String?,
+      blinding: json['blinding'] as String,
+      spent: json['spent'] as bool,
+      leafIndex: json['index'] as int?,
+      receivedAt: blockTime == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(blockTime * 1000, isUtc: true),
+    );
+  }
+
+  /// 64 hex chars; identifies the note in the pool.
+  final String commitment;
+
+  /// Base units of [mint].
+  final int amount;
+
+  /// `null` for native SOL.
+  final String? mint;
+
+  /// The note's secret blinding (64 hex chars), needed to spend it. Not a
+  /// key: spending also needs the claim key.
+  final String blinding;
+  final bool spent;
+
+  /// Position in the pool's Merkle tree, once the relay has indexed it.
+  final int? leafIndex;
+  final DateTime? receivedAt;
+
+  CloakPool? get pool => CloakRoute.pools[mint];
+
+  Map<String, Object?> toJson() => {
+    'commitment': commitment,
+    'amount': '$amount',
+    'mint': mint,
+    'blinding': blinding,
+  };
+
+  @override
+  String toString() => 'CloakNote($commitment, $amount ${pool?.symbol})';
+}
+
+/// [CloakRoute.selfTest] result: the deposit pipeline ran up to signing.
+class CloakSelfTest {
+  const CloakSelfTest({
+    required this.download,
+    required this.prove,
+    required this.total,
+    required this.steps,
+  });
+
+  /// Fetching and hash-checking the proving files (near zero once cached).
+  final Duration download;
+
+  /// Groth16 proof generation, when the SDK reported its progress.
+  final Duration? prove;
+  final Duration total;
+
+  /// SDK progress messages, prefixed with ms since the deposit started.
+  final List<String> steps;
+}
+
 /// A Cloak pool Deadman can pay into. Exit fee: [exitFixedFee] + 0.3%.
 typedef CloakPool = ({
   String symbol,
@@ -146,6 +225,10 @@ typedef CloakPool = ({
 ///    0.005 SOL or 0.45 USDC/USDT). Submitted through Cloak's relay,
 ///    authenticated by the claim key.
 ///
+/// Receiving side: [receiveAddressFor] gives the claim key's own `cloak:`
+/// address, [scanReceived] finds notes paid to it, [withdrawReceived]
+/// unshields them to any Solana address.
+///
 /// The claim key's secret is handed to the on-device WebView only.
 class CloakRoute implements PrivateRoute {
   CloakRoute({
@@ -154,12 +237,16 @@ class CloakRoute implements PrivateRoute {
     String? cluster,
     String? rpcUrl,
     this.solFeeReserveLamports = 5000000,
-    this.splFeeReserveLamports = 10000000,
+    this.splFeeReserveLamports = defaultSplFeeReserveLamports,
     this.quoteTtl = const Duration(minutes: 10),
     DateTime Function()? now,
   }) : _http = client ?? http.Client(),
        _cluster = cluster ?? AppConfig.cluster,
-       _rpcUrl = Uri.parse(rpcUrl ?? AppConfig.rpcUrl),
+       _rpcUrl = Uri.parse(
+         rpcUrl ?? (rpcOverride.isNotEmpty ? rpcOverride : AppConfig.rpcUrl),
+       ),
+       _selfTestRpcUrl =
+           rpcUrl ?? (rpcOverride.isNotEmpty ? rpcOverride : selfTestRpcUrl),
        _now = now ?? DateTime.now;
 
   /// Mainnet only; Cloak has no devnet deployment (verified 2026-10-02).
@@ -167,6 +254,16 @@ class CloakRoute implements PrivateRoute {
   static const relayUrl = 'https://api.cloak.ag';
   static const sdkVersion = '0.2.5';
   static const deployedClusters = {'mainnet-beta'};
+
+  /// RPC for the WebView, which needs one that allows browser requests
+  /// (api.mainnet-beta.solana.com answers 403) and, for [scanReceived],
+  /// serves `getSignaturesForAddress` history (publicnode returns none).
+  /// `--dart-define=CLOAK_RPC_URL=...`; empty = `AppConfig.rpcUrl`.
+  static const rpcOverride = String.fromEnvironment('CLOAK_RPC_URL');
+
+  /// Mainnet RPC [selfTest] reads from when no Cloak RPC is configured, so
+  /// it also runs on devnet builds. Allows browser requests.
+  static const selfTestRpcUrl = 'https://solana-rpc.publicnode.com';
 
   /// Keys are SPL mints; `null` is native SOL. Minimums from the program's
   /// `PoolConfig` (SDK 0.2.5 README, "Fees and limits").
@@ -199,12 +296,14 @@ class CloakRoute implements PrivateRoute {
   /// also create a lookup table (about 0.0056 SOL) if the relay cannot
   /// extend its shared one.
   final int splFeeReserveLamports;
+  static const defaultSplFeeReserveLamports = 10000000;
   final Duration quoteTtl;
 
   final CloakJsRuntime? _runtime;
   final http.Client _http;
   final String _cluster;
   final Uri _rpcUrl;
+  final String _selfTestRpcUrl;
   final DateTime Function() _now;
 
   @override
@@ -301,9 +400,7 @@ class CloakRoute implements PrivateRoute {
     required Ed25519HDKeyPair claimKey,
     required RouteQuote quote,
   }) async {
-    final runtime = _runtime;
-    final reason = unavailableReason;
-    if (runtime == null || reason != null) throw CloakRouteException(reason!);
+    final runtime = _requireRuntime();
     final data = quote.raw;
     final pool = pools[quote.inputMint];
     if (quote.rail != Rail.cloak || data is! CloakQuoteData || pool == null) {
@@ -326,27 +423,15 @@ class CloakRoute implements PrivateRoute {
         ? 'Claim key holds $lamports lamports, needs $needed to shield'
         : null;
 
-    final secret = await claimKey.extract();
-    final String reply;
-    try {
-      reply = await runtime.run(
-        'shieldAndSend',
-        jsonEncode({
-          'rpcUrl': _rpcUrl.toString(),
-          'secret': base64Encode(secret.bytes),
-          'mint': quote.inputMint,
-          'amount': '${quote.amountIn}',
-          'recipientUtxoPubkey': data.shielded?.utxoPubkey,
-          'recipientViewingPubkey': data.shielded?.viewingPubkey,
-          'recipientSolana': data.publicRecipient,
-          'resumeOnlyReason': shortfall,
-        }),
-      );
-    } finally {
-      secret.destroy();
-    }
-
-    final result = _unwrap(reply);
+    final result = await _runWithClaim(runtime, 'shieldAndSend', claimKey, {
+      'rpcUrl': _rpcUrl.toString(),
+      'mint': quote.inputMint,
+      'amount': '${quote.amountIn}',
+      'recipientUtxoPubkey': data.shielded?.utxoPubkey,
+      'recipientViewingPubkey': data.shielded?.viewingPubkey,
+      'recipientSolana': data.publicRecipient,
+      'resumeOnlyReason': shortfall,
+    });
     if (result['state'] == 'already_sent') return alreadySent;
     final sig = result['sendSignature'];
     if (sig is! String || sig.isEmpty) {
@@ -395,6 +480,156 @@ class CloakRoute implements PrivateRoute {
     } on Object {
       throw const CloakRouteException('Malformed Cloak address reply');
     }
+  }
+
+  /// This device's Cloak address for [claimKey]: the shielded destination
+  /// whose payouts [scanReceived] finds and [withdrawReceived] unshields.
+  /// Derived from the claim key, so the phrase restores it.
+  Future<CloakAddress> receiveAddressFor(Ed25519HDKeyPair claimKey) async {
+    final runtime = _runtime;
+    if (runtime == null) throw CloakRouteException(unavailableReason!);
+    final result = await _runWithClaim(
+      runtime,
+      'receiveAddress',
+      claimKey,
+      const {},
+    );
+    try {
+      return CloakAddress(
+        utxoPubkey: result['utxoPubkey'] as String,
+        viewingPubkey: result['viewingPubkey'] as String,
+      );
+    } on Object {
+      throw const CloakRouteException('Malformed Cloak address reply');
+    }
+  }
+
+  /// Notes paid to [receiveAddressFor] `claimKey`, spent ones included.
+  /// Reads the whole on-chain delivery registry (one RPC call per delivery
+  /// ever made) and fails rather than return a partial list.
+  Future<List<CloakNote>> scanReceived({
+    required Ed25519HDKeyPair claimKey,
+  }) async {
+    final runtime = _requireRuntime();
+    final result = await _runWithClaim(runtime, 'scanReceived', claimKey, {
+      'rpcUrl': _rpcUrl.toString(),
+    });
+    final notes = result['notes'];
+    try {
+      return [
+        for (final n in notes as List)
+          CloakNote.fromJson(n as Map<String, dynamic>),
+      ];
+    } on Object {
+      throw const CloakRouteException('Malformed Cloak scan reply');
+    }
+  }
+
+  /// Unshields [notes] (one mint, all unspent) in full to the Solana
+  /// address [destination]. Cloak's relay submits it; the claim key needs no
+  /// SOL. Exit fee [exitFee] is deducted. Returns the last signature.
+  Future<String> withdrawReceived({
+    required Ed25519HDKeyPair claimKey,
+    required List<CloakNote> notes,
+    required String destination,
+  }) async {
+    final runtime = _requireRuntime();
+    if (notes.isEmpty) throw const CloakRouteException('No notes to withdraw');
+    final mint = notes.first.mint;
+    final pool = pools[mint];
+    if (pool == null) throw CloakRouteException('Unsupported mint $mint');
+    if (notes.any((n) => n.mint != mint)) {
+      throw const CloakRouteException('Withdraw one mint at a time');
+    }
+    if (notes.any((n) => n.spent)) {
+      throw const CloakRouteException('A selected note was already withdrawn');
+    }
+    if (!_isPubkey(destination)) {
+      throw const CloakRouteException('Invalid destination address');
+    }
+    final total = notes.fold(0, (sum, n) => sum + n.amount);
+    if (total <= exitFee(total, pool)) {
+      throw CloakRouteException(
+        'Notes do not cover the Cloak exit fee of '
+        '${_format(exitFee(total, pool), pool)}',
+      );
+    }
+    final result = await _runWithClaim(runtime, 'withdrawReceived', claimKey, {
+      'rpcUrl': _rpcUrl.toString(),
+      'destination': destination,
+      'notes': [for (final n in notes) n.toJson()],
+    });
+    final sig = result['signature'];
+    if (sig is! String || sig.isEmpty) {
+      throw const CloakRouteException('Cloak runtime returned no signature');
+    }
+    return sig;
+  }
+
+  /// Runs the deposit pipeline from a random unfunded key against mainnet up
+  /// to signing: proving-file download and hash check, Groth16 proof, risk
+  /// quote, transaction build. Nothing is signed or sent, so it needs only
+  /// the runtime and works on devnet builds. [mint] `null` is SOL; the
+  /// amount is the pool minimum.
+  Future<CloakSelfTest> selfTest({String? mint}) async {
+    final runtime = _runtime;
+    if (runtime == null) {
+      throw const CloakRouteException('Cloak runtime not started');
+    }
+    if (!pools.containsKey(mint)) {
+      throw CloakRouteException('Unsupported input mint $mint');
+    }
+    final result = _unwrap(
+      await runtime.run(
+        'selfTest',
+        jsonEncode({'rpcUrl': _selfTestRpcUrl, 'mint': mint}),
+      ),
+    );
+    final download = result['downloadMs'];
+    final prove = result['proveMs'];
+    final total = result['totalMs'];
+    final steps = result['steps'];
+    if (result['reachedSigning'] != true ||
+        download is! int ||
+        (prove != null && prove is! int) ||
+        total is! int ||
+        steps is! List) {
+      throw const CloakRouteException('Malformed Cloak self-test reply');
+    }
+    return CloakSelfTest(
+      download: Duration(milliseconds: download),
+      prove: prove == null ? null : Duration(milliseconds: prove as int),
+      total: Duration(milliseconds: total),
+      steps: steps.map((s) => '$s').toList(),
+    );
+  }
+
+  CloakJsRuntime _requireRuntime() {
+    final runtime = _runtime;
+    final reason = unavailableReason;
+    if (runtime == null || reason != null) throw CloakRouteException(reason!);
+    return runtime;
+  }
+
+  /// Hands [claimKey]'s secret to the runtime with [payload] and wipes the
+  /// extracted bytes afterwards.
+  static Future<Map<String, dynamic>> _runWithClaim(
+    CloakJsRuntime runtime,
+    String op,
+    Ed25519HDKeyPair claimKey,
+    Map<String, Object?> payload,
+  ) async {
+    final secret = await claimKey.extract();
+    final String reply;
+    try {
+      reply = await runtime.run(
+        op,
+        jsonEncode({...payload, 'secret': base64Encode(secret.bytes)}),
+      );
+    } finally {
+      secret.destroy();
+    }
+    return _unwrap(reply);
   }
 
   static Map<String, dynamic> _unwrap(String reply) {

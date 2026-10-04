@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Replaced by `flutter build web --base-href`. Must start and end with "/". -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Deadman: the safety net for your self-custody. Check in, and if you go silent your crypto still ends up where you decided.">
+  <meta name="theme-color" content="#0A0B0D">
+  <meta name="color-scheme" content="dark">
+
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Deadman">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Deadman</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0A0B0D; }
+  </style>
+</head>
+<body>
+  <!--
+    Wallets: Phantom and Solflare are found through the Wallet Standard
+    (raw transaction bytes). If a wallet only injects its legacy provider,
+    lib/wallet/web_wallet_backend_js.dart loads @solana/web3.js on demand,
+    pinned with SRI, to hand it a VersionedTransaction.
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

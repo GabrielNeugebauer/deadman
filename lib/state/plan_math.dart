@@ -1,6 +1,29 @@
 import '../core/config.dart';
 import '../solana/deadman_api.dart';
 
+/// What plan [v] holds of [mint] (null = SOL) for payouts, given its
+/// token balances [tokens] (mint -> base units); null when unknown.
+int? heldBalance(VaultState v, String? mint, Map<String, int>? tokens) =>
+    mint == null ? v.withdrawableLamports : tokens?[mint];
+
+/// Whether tier or vesting schedule [index] of [v] would pay anything from
+/// what the plan holds today; null when that balance is unknown.
+bool? tierFunded(VaultState v, int index, Map<String, int>? tokens) {
+  final balance = heldBalance(v, v.rules[index].mint, tokens);
+  if (balance == null) return null;
+  return v.isVesting ? balance > 0 : v.payoutGross(index, balance) > 0;
+}
+
+/// Assets of [v]'s unpaid tiers that would pay nothing today.
+List<String?> unfundedAssets(VaultState v, Map<String, int>? tokens) {
+  final out = <String?>[];
+  for (final (i, r) in v.rules.indexed) {
+    if (r.executed || out.contains(r.mint)) continue;
+    if (tierFunded(v, i, tokens) == false) out.add(r.mint);
+  }
+  return out;
+}
+
 String planName(VaultState v) =>
     v.label.isEmpty ? 'Plan ${v.planId + 1}' : v.label;
 
@@ -138,7 +161,7 @@ String percentText(double fraction) {
         ],
       );
 
-/// Owner-chosen time a due tier gets to pay before anyone may skip it.
+/// Owner-chosen time a due tier gets to pay before the keeper skips it.
 List<(int, String)> graceChoices({required bool demo}) => [
   if (demo) (120, '2 minutes'),
   (86400, '1 day'),

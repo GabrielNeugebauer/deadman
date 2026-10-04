@@ -278,6 +278,17 @@ void main() {
     );
   });
 
+  List<(String, bool, bool)> metas(Instruction ix) => [
+    for (final a in ix.accounts)
+      (a.pubKey.toBase58(), a.isWriteable, a.isSigner),
+  ];
+
+  /// Account keys only: a decompiled message merges each key's flags across
+  /// instructions (exact per-instruction flags are checked in codec_test).
+  List<String> addrs(Instruction ix) => [
+    for (final a in ix.accounts) a.pubKey.toBase58(),
+  ];
+
   group('buildCreateVault', () {
     Future<List<Instruction>> create(
       int planId, {
@@ -345,6 +356,77 @@ void main() {
         le(8, grace),
       );
       expect(ixs[1].accounts[1].pubKey.toBase58(), vaultPda(owner, 7).address);
+    });
+
+    test('tokenDeposits: vault ATA and TransferChecked after the create, '
+        'empty deposits dropped', () async {
+      final other = key(40);
+      rpc.accounts[other] = FakeAccount(tokenProgramId, mintBytes(0));
+      final ixs = instructions(
+        await client.buildCreateVault(
+          owner: owner,
+          planId: 0,
+          label: 'Kids',
+          guard: guard,
+          intervalSecs: 86400,
+          lockSecs: 3600,
+          skipGraceSecs: grace,
+          rules: [rule(to: alice, mint: usdc)],
+          depositLamports: 1000,
+          tokenDeposits: {usdc: 2500000, other: 7, key(41): 0},
+        ),
+      );
+      expect(ixs, hasLength(7));
+      expect(ixs[1].data.toList().sublist(0, 8), Disc.createVault);
+      expect(ixs[2].programId.toBase58(), systemProgramId);
+      expect(ixs[2].accounts[1].pubKey.toBase58(), vault);
+      for (final (i, mint, amount, decimals) in [
+        (3, usdc, 2500000, 6),
+        (5, other, 7, 0),
+      ]) {
+        expect(ixs[i].programId.toBase58(), ataProgramId);
+        expect(metas(ixs[i]).take(2), [
+          (owner, true, true),
+          (ataAddress(vault, mint), true, false),
+        ]);
+        expect(ixs[i + 1].programId.toBase58(), tokenProgramId);
+        expect(addrs(ixs[i + 1]), [
+          ataAddress(owner, mint),
+          mint,
+          ataAddress(vault, mint),
+          owner,
+        ]);
+        expect(ixs[i + 1].data.toList(), [
+          12,
+          ...le(8, amount),
+          decimals,
+        ]);
+      }
+    });
+
+    test('tokenDeposits: a Token-2022 mint is refused before signing', () async {
+      rpc.accounts[usdc] = FakeAccount(token2022ProgramId, mintBytes(6));
+      await expectLater(
+        client.buildCreateVault(
+          owner: owner,
+          planId: 0,
+          label: 'Kids',
+          guard: guard,
+          intervalSecs: 86400,
+          lockSecs: 3600,
+          skipGraceSecs: grace,
+          rules: [rule(to: alice, mint: usdc)],
+          tokenDeposits: {usdc: 1},
+        ),
+        throwsA(
+          isA<DeadmanException>().having(
+            (e) => e.message,
+            'message',
+            contains('Token-2022'),
+          ),
+        ),
+      );
+      expect(rpc.calls, isNot(contains('getLatestBlockhash')));
     });
 
     test('rejects labels over 32 bytes before building', () async {
@@ -446,6 +528,50 @@ void main() {
     expect(await client.nextFreePlanId(owner), 4);
   });
 
+  test('older-layout plans are hidden, listed and recoverable', () async {
+    Uint8List old(String of, int planId, int len) => Uint8List(len)
+      ..setAll(0, Disc.vaultAccount)
+      ..setAll(8, base58decode(of))
+      ..setAll(40, [planId & 0xff, planId >> 8]);
+    final legacy = vaultPda(owner, 42801).address;
+    rpc.accounts[legacy] = FakeAccount(
+      AppConfig.programId,
+      old(owner, 42801, 1318),
+    );
+    rpc.accounts[vaultPda(owner, 1).address] = FakeAccount(
+      AppConfig.programId,
+      old(owner, 1, 958),
+    );
+    // Bytes naming plan 9 at another address are not that plan.
+    rpc.accounts[vaultPda(owner, 8).address] = FakeAccount(
+      AppConfig.programId,
+      old(owner, 9, 996),
+    );
+    rpc.accounts[vaultPda(bob, 2).address] = FakeAccount(
+      AppConfig.programId,
+      old(bob, 2, 958),
+    );
+
+    expect(await client.fetchLegacyPlanIds(owner), [1, 42801]);
+    expect(await client.fetchVault(owner, 42801), isNull);
+    expect(
+      (await client.fetchVaults(owner)).map((v) => v.planId),
+      isNot(contains(42801)),
+    );
+
+    final ix = instructions(
+      await client.buildRecoverLegacyVault(owner: owner, planId: 42801),
+    ).single;
+    expect(ix.data.toList(), [...Disc.recoverLegacyVault, 0x31, 0xa7]);
+    expect(ix.accounts.map((a) => a.pubKey.toBase58()), [owner, legacy]);
+    await expectLater(
+      client.buildRecoverLegacyVault(owner: owner, planId: 0),
+      throwsA(
+        isA<DeadmanException>().having((e) => e.name, 'name', 'NotLegacyVault'),
+      ),
+    );
+  });
+
   test('a System program refusal reads as plain text', () {
     final e = DeadmanException.fromRpc(
       JsonRpcException('Transaction simulation failed', -32002, {
@@ -487,8 +613,30 @@ void main() {
     expect(await client.tokenBalance(alice, usdc), 4200);
   });
 
+  test('buildExecuteRule refuses a token tier the vault cannot pay', () async {
+    await expectLater(
+      client.buildExecuteRule(
+        executor: executor,
+        vaultOwner: owner,
+        planId: 0,
+        index: 1,
+      ),
+      throwsA(
+        isA<DeadmanException>().having((e) => e.name, 'name', 'NothingToPay'),
+      ),
+    );
+  });
+
   test('buildExecuteRule picks the token variant and prepends the treasury '
       'and beneficiary ATA creates', () async {
+    rpc.accounts[ataAddress(vaultPda(owner, 0).address, usdc)] = FakeAccount(
+      tokenProgramId,
+      tokenAccountBytes(
+        mint: usdc,
+        owner: vaultPda(owner, 0).address,
+        amount: 500,
+      ),
+    );
     final tx = await client.buildExecuteRule(
       executor: executor,
       vaultOwner: owner,
@@ -594,6 +742,22 @@ void main() {
       alice,
       treasury,
     ]);
+  });
+
+  test('tokenBalances batches lookups, 0 for missing accounts', () async {
+    rpc.accounts[ataAddress(vault, usdc)] = FakeAccount(
+      tokenProgramId,
+      tokenAccountBytes(mint: usdc, owner: vault, amount: 4200),
+    );
+    rpc.calls.clear();
+    final got = await client.tokenBalances([
+      (vault, usdc),
+      (vault, key(40)),
+      (owner, usdc),
+    ]);
+    expect(got, [4200, 0, 0]);
+    expect(rpc.calls, ['getMultipleAccounts']);
+    expect(await client.tokenBalances(const []), isEmpty);
   });
 
   test('buildDepositToken reads decimals from the mint', () async {
@@ -729,6 +893,14 @@ void main() {
         rule(to: bob, mint: usdc),
         rule(to: bob, mint: usdc, afterSecs: 172900),
       ]);
+      rpc.accounts[ataAddress(vaultPda(owner, 2).address, usdc)] = FakeAccount(
+        tokenProgramId,
+        tokenAccountBytes(
+          mint: usdc,
+          owner: vaultPda(owner, 2).address,
+          amount: 0,
+        ),
+      );
       final tx = await client.buildSkipRule(
         caller: executor,
         vaultOwner: owner,
@@ -761,6 +933,27 @@ void main() {
           throwsA(isA<DeadmanException>().having((e) => e.name, 'name', name)),
         );
       }
+    });
+
+    test('buildSkipRule creates the token account of a plan that never '
+        'held the mint, paid by the caller', () async {
+      addPlan(2, [rule(to: bob, mint: usdc)]);
+      final ixs = instructions(
+        await client.buildSkipRule(
+          caller: executor,
+          vaultOwner: owner,
+          planId: 2,
+          index: 0,
+        ),
+      );
+      final plan = vaultPda(owner, 2).address;
+      expect(ixs, hasLength(2));
+      expect(ixs[0].programId.toBase58(), ataProgramId);
+      expect(metas(ixs[0]).take(2), [
+        (executor, true, true),
+        (ataAddress(plan, usdc), true, false),
+      ]);
+      expect(ixs[1].data.toList(), [...Disc.skipRule, 0]);
     });
 
     test('buildSkipRule SOL tier passes the program id for vault_token; a '
@@ -1102,6 +1295,11 @@ void main() {
       expect(msg.accountKeys[0].toBase58(), wallet.address);
       expect(rpc.calls, contains('getLatestBlockhash'));
 
+      final vault = vaultPda(owner, 0).address;
+      rpc.accounts[ataAddress(vault, usdc)] = FakeAccount(
+        tokenProgramId,
+        tokenAccountBytes(mint: usdc, owner: vault, amount: 500),
+      );
       final rule = await c.buildExecuteRule(
         executor: executor,
         vaultOwner: owner,
@@ -1243,17 +1441,6 @@ void main() {
         tokenProgramId,
         tokenAccountBytes(mint: mint, owner: holder, amount: amount),
       );
-
-  List<(String, bool, bool)> metas(Instruction ix) => [
-    for (final a in ix.accounts)
-      (a.pubKey.toBase58(), a.isWriteable, a.isSigner),
-  ];
-
-  /// Account keys only: a decompiled message merges each key's flags across
-  /// instructions (exact per-instruction flags are checked in codec_test).
-  List<String> addrs(Instruction ix) => [
-    for (final a in ix.accounts) a.pubKey.toBase58(),
-  ];
 
   group('vesting', () {
     final alpha = VestingSpec(
@@ -1699,10 +1886,11 @@ void main() {
     late Ed25519HDKeyPair wallet;
 
     setUp(() async {
-      node = FakeKora(signer: key(70), paymentAddress: key(71));
+      node = FakeKora(signer: key(70), paymentAddress: key(70));
       c = DeadmanClient.withKora(
         client: rpc.client(),
         paymaster: node.client(),
+        paymasterSigner: key(70),
         clock: () => now,
       )..feeToken = usdc;
       wallet = await Ed25519HDKeyPair.random();
@@ -1826,6 +2014,33 @@ void main() {
       expect(node.paramsOf('signAndSendTransaction'), isEmpty);
     });
 
+    test('create_vault with a token deposit: the deposit counts against '
+        'the USDC fee', () async {
+      Future<Uint8List> create(int amount) => c.buildCreateVault(
+        owner: wallet.address,
+        planId: 0,
+        label: 'Kids',
+        guard: guard,
+        intervalSecs: 86400,
+        lockSecs: 3600,
+        skipGraceSecs: grace,
+        rules: [rule(to: alice, mint: usdc)],
+        tokenDeposits: {usdc: amount},
+      );
+      addTokens(wallet.address, usdc, node.feeInToken! + 999);
+      await expectLater(create(1000), throwsNamed('NoFeeToken'));
+      final tx = await create(999);
+      expectPaidByKora(tx);
+      final ixs = instructions(tx);
+      expect(ixs[0].data.toList().sublist(0, 8), Disc.createVault);
+      expect(metas(ixs[1]).first, (
+        node.signer,
+        true,
+        true,
+      ), reason: 'Kora pays the vault ATA rent');
+      expect(ixs[2].data.toList(), [12, ...le(8, 999), 6]);
+    });
+
     test('a token withdrawal may pay its fee from what it withdraws', () async {
       addPlan(0, pending, of: wallet.address);
       addTokens(wallet.address, usdc, 0);
@@ -1846,6 +2061,7 @@ void main() {
     test('executing a tier from the wallet: Kora pays the ATAs', () async {
       final ex = await Ed25519HDKeyPair.random();
       addTokens(ex.address, usdc, 1000000);
+      addTokens(vaultPda(owner, 0).address, usdc, 500);
       final tx = await c.buildExecuteRule(
         executor: ex.address,
         vaultOwner: owner,
@@ -1861,6 +2077,121 @@ void main() {
       expect(metas(ixs[1]).first, (node.signer, true, true));
       expect(ixs[2].data.toList(), [...Disc.executeTokenRule, 1]);
       expect(addrs(ixs[3]).last, ex.address);
+    });
+
+    test('a withdrawal into a closed account reopens it on the wallet, '
+        'never on Kora', () async {
+      addPlan(0, pending, of: wallet.address);
+      rpc.accounts.remove(ataAddress(wallet.address, usdc));
+      await expectLater(
+        c.buildWithdrawToken(
+          owner: wallet.address,
+          planId: 0,
+          mint: usdc,
+          amount: node.feeInToken!,
+        ),
+        throwsNamed('NoSolForAccount'),
+      );
+      rpc.accounts[wallet.address] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      final tx = await c.buildWithdrawToken(
+        owner: wallet.address,
+        planId: 0,
+        mint: usdc,
+        amount: node.feeInToken!,
+      );
+      expectPaidByKora(tx);
+      final create = instructions(tx).first;
+      expect(create.programId.toBase58(), ataProgramId);
+      expect(addrs(create).take(3), [
+        wallet.address,
+        ataAddress(wallet.address, usdc),
+        wallet.address,
+      ]);
+    });
+
+    group('paymaster pinning (M-3)', () {
+      test('refuses another fee payer or payment address', () async {
+        for (final (signer, payTo) in [
+          (key(72), key(72)),
+          (key(70), key(73)),
+        ]) {
+          final rogue = FakeKora(signer: signer, paymentAddress: payTo);
+          final d = DeadmanClient.withKora(
+            client: rpc.client(),
+            paymaster: rogue.client(),
+            paymasterSigner: key(70),
+            clock: () => now,
+          )..feeToken = usdc;
+          await expectLater(
+            d.buildDeposit(owner: wallet.address, planId: 0, lamports: 5),
+            throwsNamed('KoraUntrusted'),
+          );
+          expect(rogue.paramsOf('estimateTransactionFee'), isEmpty);
+        }
+      });
+
+      test('refuses an estimate naming another payment address', () async {
+        node.estimatePaymentAddress = key(74);
+        await expectLater(createVault(), throwsNamed('KoraUntrusted'));
+      });
+
+      test('an unpinned build refuses the paymaster', () async {
+        final d = DeadmanClient.withKora(
+          client: rpc.client(),
+          paymaster: node.client(),
+          paymasterSigner: '',
+          clock: () => now,
+        )..feeToken = usdc;
+        await expectLater(
+          d.buildDeposit(owner: wallet.address, planId: 0, lamports: 5),
+          throwsNamed('KoraUnpinned'),
+        );
+        expect(node.calls, isEmpty);
+      });
+
+      test('caps the fee', () async {
+        final d = DeadmanClient.withKora(
+          client: rpc.client(),
+          paymaster: node.client(),
+          paymasterSigner: key(70),
+          maxFee: 3000,
+          clock: () => now,
+        )..feeToken = usdc;
+        addTokens(wallet.address, usdc, 10000000);
+        node.feeInToken = 3000;
+        expectPaidByKora(
+          await d.buildDeposit(owner: wallet.address, planId: 0, lamports: 5),
+        );
+        node.feeInToken = 3001;
+        await expectLater(
+          d.buildDeposit(owner: wallet.address, planId: 0, lamports: 5),
+          throwsA(
+            isA<DeadmanException>()
+                .having((e) => e.name, 'name', 'KoraFeeTooHigh')
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(contains('asks 0.003001 '), contains('the 0.003 ')),
+                ),
+          ),
+        );
+      });
+
+      test('defaults: the devnet signer and a 3 USDC cap', () {
+        expect(AppConfig.isMainnet, isFalse);
+        expect(
+          AppConfig.koraPaymasterSigner,
+          'HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL',
+        );
+        expect(AppConfig.koraMaxFee, 3000000);
+        final d = DeadmanClient.withKora(client: rpc.client());
+        expect(d.paymasterSigner, AppConfig.koraPaymasterSigner);
+        expect(d.maxFee, 3000000);
+      });
     });
 
     test('a node that will not price the token is reported', () async {
