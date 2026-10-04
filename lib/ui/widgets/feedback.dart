@@ -37,7 +37,16 @@ const friendlyErrors = {
   'NothingToPay': 'This tier has nothing to pay yet. If it still cannot pay after the plan\'s grace period, it can be skipped.',
   'BeneficiaryCannotReceive': 'The beneficiary\'s account cannot receive this payout. After the plan\'s grace period anyone can skip the tier so later tiers continue; its share stays reserved for the beneficiary to claim.',
   'SkipTooEarly': 'Too early to skip: this tier still has time to pay within the plan\'s grace period.',
+  'WrongPlanKind': 'That action does not apply to this kind of plan: vesting plans have no check-ins or tiers, and inheritance plans have no schedules.',
+  'InvalidVesting': 'Check each schedule: it needs a total, a cliff no longer than its duration, and a start within a year.',
+  'NotRevocable': 'This vesting plan was created irrevocable: its schedules cannot be stopped.',
+  'AlreadyRevoked': 'Vesting on this plan was already revoked.',
+  'FundsCommitted': 'Those funds are committed to vesting beneficiaries. You can only withdraw what is not owed to them.',
+  'NoFeeToken': noFeeTokenText,
 };
+
+const noFeeTokenText =
+    'Not enough USDC to pay the network fee. Add USDC or switch fees to SOL (Security → Network fees).';
 
 /// User-facing text for an error: drops prefixes like
 /// `DeadmanException(Foo): ` and maps known program errors.
@@ -46,5 +55,6 @@ String errorText(Object e) {
     final friendly = friendlyErrors[e.name];
     if (friendly != null) return friendly;
   }
+  if ('$e'.contains('NoFeeToken')) return noFeeTokenText;
   return '$e'.replaceFirst(RegExp(r'^\w*Exception(\([^)]*\))?: '), '');
 }

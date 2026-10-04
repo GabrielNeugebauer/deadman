@@ -33,6 +33,12 @@ pub struct RuleSkipped {
 }
 
 #[event]
+pub struct VestingRevoked {
+    pub vault: Pubkey,
+    pub at: i64,
+}
+
+#[event]
 pub struct LockedDown {
     pub vault: Pubkey,
     pub by: Pubkey,

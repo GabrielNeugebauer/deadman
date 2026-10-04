@@ -14,6 +14,8 @@ RuleState rule({
   int executedAt = 0,
   int skippedAt = 0,
   int reserved = 0,
+  int durationSecs = 0,
+  int released = 0,
 }) => RuleState(
   beneficiary: addr(seed),
   rail: Rail.solana,
@@ -25,6 +27,8 @@ RuleState rule({
   paid: 0,
   skippedAt: skippedAt,
   reserved: reserved,
+  durationSecs: durationSecs,
+  released: released,
 );
 
 VaultState vault({
@@ -37,6 +41,10 @@ VaultState vault({
   int intervalSecs = 7 * 86400,
   int skipGraceSecs = 30 * 86400,
   int withdrawableLamports = 0,
+  PlanKind kind = PlanKind.inheritance,
+  int startAt = 0,
+  bool revocable = false,
+  int revokedAt = 0,
 }) => VaultState(
   address: addr(100 + planId),
   owner: addr(1),
@@ -57,6 +65,50 @@ VaultState vault({
   rules: rules ?? [rule()],
   lamports: withdrawableLamports,
   withdrawableLamports: withdrawableLamports,
+  kind: kind,
+  startAt: startAt,
+  revocable: revocable,
+  revokedAt: revokedAt,
+);
+
+/// A vesting schedule: [total] of [mint] vesting over [duration] seconds
+/// after a [cliff].
+RuleState schedule({
+  int seed = 20,
+  String? mint,
+  int total = 1000000000,
+  int cliff = 0,
+  int duration = 1000,
+  int released = 0,
+  int executedAt = 0,
+}) => rule(
+  seed: seed,
+  afterSecs: cliff,
+  mint: mint,
+  mode: AmountMode.fixed,
+  amount: total,
+  durationSecs: duration,
+  released: released,
+  executedAt: executedAt,
+);
+
+VaultState vestingVault({
+  int planId = 5,
+  List<RuleState>? schedules,
+  int startAt = 1000,
+  bool revocable = true,
+  int revokedAt = 0,
+  int withdrawableLamports = 0,
+  String? guard,
+}) => vault(
+  planId: planId,
+  kind: PlanKind.vesting,
+  rules: schedules ?? [schedule()],
+  startAt: startAt,
+  revocable: revocable,
+  revokedAt: revokedAt,
+  withdrawableLamports: withdrawableLamports,
+  guard: guard,
 );
 
 /// Records guard-key calls; everything else is unimplemented.
@@ -67,6 +119,9 @@ class FakeApi implements DeadmanApi {
   Object? fail;
   final locked = <List<int>>[];
   final pulsed = <List<int>>[];
+
+  @override
+  String? feeToken;
 
   @override
   Future<List<VaultState>> fetchVaults(String owner) async {

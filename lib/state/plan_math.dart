@@ -153,9 +153,24 @@ int clampGrace(int secs) => secs < AppConfig.minSkipGraceSecs
     ? AppConfig.maxSkipGraceSecs
     : secs;
 
+/// Inheritance plans: the ones "I'm alive" keeps from releasing. Vesting
+/// plans release on their own schedule (lockdown still covers them).
+List<VaultState> switchPlans(Iterable<VaultState> plans) => [
+  for (final v in plans)
+    if (!v.isVesting) v,
+];
+
+/// Inheritance plans with a tier still pending (skipped tiers only await
+/// their claim): what check-ins, the pulse ring and reminders follow.
+List<VaultState> activeSwitchPlans(Iterable<VaultState> plans) => [
+  for (final v in plans)
+    if (!v.isVesting && v.nextRuleDue != null) v,
+];
+
 /// Guard-key check-ins have stopped for this plan, or stop within
 /// [AppConfig.guardWindowWarnSecs]: the owner's wallet must confirm.
 bool needsWalletCheckIn(VaultState v, int now) =>
+    !v.isVesting &&
     !v.completed &&
     (!v.guardCanPulse(now) ||
         now >= v.guardWindowEnd - AppConfig.guardWindowWarnSecs);
@@ -174,7 +189,8 @@ class PlanCoverage {
     final wallet = <VaultState>[];
     final other = <VaultState>[];
     for (final v in plans) {
-      if (v.completed) continue;
+      // Vesting runs on its own clock: no check-ins.
+      if (v.completed || v.isVesting) continue;
       if (guard == null || v.guard != guard) {
         other.add(v);
       } else if (!v.guardCanPulse(now)) {

@@ -12,6 +12,8 @@ Future<void> main() async {
   final container = ProviderContainer(
     overrides: [prefsProvider.overrideWithValue(prefs)],
   );
+  // Applies the saved "Pay network fees with" choice to the client.
+  container.read(feeModeProvider);
   runApp(
     UncontrolledProviderScope(container: container, child: const DeadmanApp()),
   );

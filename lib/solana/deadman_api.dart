@@ -32,6 +32,31 @@ class RuleSpec {
   final int amount;
 }
 
+enum PlanKind { inheritance, vesting }
+
+/// One beneficiary's vesting schedule: [total] of [mint] (null = SOL)
+/// vests linearly from the plan start over [durationSecs]; nothing is
+/// claimable before [cliffSecs].
+class VestingSpec {
+  const VestingSpec({
+    required this.beneficiary,
+    required this.rail,
+    required this.total,
+    required this.cliffSecs,
+    required this.durationSecs,
+    this.mint,
+  });
+
+  final String beneficiary;
+  final Rail rail;
+  final String? mint;
+
+  /// Base units (lamports for SOL).
+  final int total;
+  final int cliffSecs;
+  final int durationSecs;
+}
+
 class RuleState extends RuleSpec {
   const RuleState({
     required super.beneficiary,
@@ -44,6 +69,8 @@ class RuleState extends RuleSpec {
     required this.paid,
     this.skippedAt = 0,
     this.reserved = 0,
+    this.durationSecs = 0,
+    this.released = 0,
   });
 
   /// Unix seconds; 0 while pending.
@@ -59,6 +86,13 @@ class RuleState extends RuleSpec {
 
   /// Gross share set aside for a skipped tier (0 = recomputed when claimed).
   final int reserved;
+
+  /// Vesting only: seconds from the plan start to fully vested. For a
+  /// vesting schedule [afterSecs] is the cliff and [amount] the total.
+  final int durationSecs;
+
+  /// Vesting only: gross amount released so far.
+  final int released;
 
   bool get executed => executedAt != 0;
   bool get skipped => skippedAt != 0;
@@ -89,6 +123,11 @@ class VaultState {
     required this.rules,
     required this.lamports,
     required this.withdrawableLamports,
+    this.kind = PlanKind.inheritance,
+    this.startAt = 0,
+    this.revocable = false,
+    this.revokedAt = 0,
+    this.rentPayer = '',
   });
 
   final String address;
@@ -122,6 +161,58 @@ class VaultState {
 
   /// Lamports above the rent-exempt minimum.
   final int withdrawableLamports;
+
+  final PlanKind kind;
+
+  /// Vesting: when every schedule starts vesting (unix seconds).
+  final int startAt;
+
+  /// Vesting: the owner may stop future vesting (vested stays claimable).
+  final bool revocable;
+
+  /// Vesting: when it was revoked; 0 if never.
+  final int revokedAt;
+
+  /// Who funded the account rent; closing returns it to them.
+  final String rentPayer;
+
+  bool get isVesting => kind == PlanKind.vesting;
+
+  /// Vesting: gross amount of schedule [index] vested at [now] (mirrors
+  /// the program's `vested`, including the stop at revocation).
+  int vested(int index, int now) {
+    final r = rules[index];
+    final end = revokedAt != 0 && revokedAt < now ? revokedAt : now;
+    final elapsed = end - startAt;
+    if (elapsed < r.afterSecs) return 0;
+    if (elapsed >= r.durationSecs) return r.amount;
+    return (BigInt.from(r.amount) *
+            BigInt.from(elapsed) ~/
+            BigInt.from(r.durationSecs))
+        .toInt();
+  }
+
+  /// Vesting: the most schedule [index] can ever release.
+  int vestingCap(int index) =>
+      revokedAt != 0 ? vested(index, revokedAt) : rules[index].amount;
+
+  /// Vesting: what schedule [index] could release right now (before the
+  /// vault balance cap and fees).
+  int claimable(int index, int now) =>
+      (vested(index, now) - rules[index].released).clamp(0, 1 << 62);
+
+  /// Vesting: amount of [mint] (null = SOL) still owed to beneficiaries;
+  /// the owner cannot withdraw below it. 0 for inheritance plans.
+  int committed(String? mint) {
+    if (!isVesting) return 0;
+    var total = 0;
+    for (var i = 0; i < rules.length; i++) {
+      if (rules[i].mint != mint) continue;
+      final owed = vestingCap(i) - rules[i].released;
+      if (owed > 0) total += owed;
+    }
+    return total;
+  }
 
   int get pulseDue => lastPulse + intervalSecs;
 
@@ -319,6 +410,54 @@ abstract class DeadmanApi {
     required int planId,
     required int index,
   });
+
+  /// Creates vesting plan [planId]: [schedules] vest linearly from
+  /// [startAt] whatever the owner does. Optionally funds it in the same
+  /// transaction with SOL ([depositLamports]) and/or tokens
+  /// ([tokenDeposits]: mint -> base units, from the owner's ATA).
+  Future<Uint8List> buildCreateVesting({
+    required String owner,
+    required int planId,
+    required String label,
+    required String guard,
+    required int lockSecs,
+    required int startAt,
+    required bool revocable,
+    required List<VestingSpec> schedules,
+    int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
+  });
+
+  /// Stops future vesting of a revocable plan (owner wallet).
+  Future<Uint8List> buildRevokeVesting({
+    required String owner,
+    required int planId,
+  });
+
+  /// Releases what has vested on schedule [index] (SOL or token variant
+  /// from the schedule; token releases create the ATAs like executing a
+  /// tier). Anyone may sign.
+  Future<Uint8List> buildReleaseVested({
+    required String executor,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  });
+
+  /// Same as [buildReleaseVested], signed by a local key (keeper, claim
+  /// key) and sent.
+  Future<String> releaseVestedWithKey(
+    Ed25519HDKeyPair executor, {
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  });
+
+  /// Network fees for wallet-signed owner transactions: null = the wallet
+  /// pays in SOL; a mint (USDC) = the Kora paymaster pays and charges the
+  /// owner in that token (needs `AppConfig.koraPaymasterUrl`).
+  String? get feeToken;
+  set feeToken(String? mint);
 
   Future<Uint8List> buildCloseVault({
     required String owner,

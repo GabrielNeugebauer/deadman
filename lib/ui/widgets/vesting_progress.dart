@@ -1,0 +1,139 @@
+import 'package:flutter/material.dart';
+
+import '../../solana/deadman_api.dart';
+import '../../state/assets.dart';
+import '../../state/vesting.dart';
+import '../format.dart';
+import '../rules_format.dart';
+import '../theme.dart';
+
+/// "12 months", "10 minutes", "3 days".
+String durationLabel(int secs) {
+  if (secs >= monthSecs && secs % monthSecs == 0) {
+    final n = secs ~/ monthSecs;
+    return n == 1 ? '1 month' : '$n months';
+  }
+  if (secs >= 86400 && secs % 86400 == 0) {
+    final n = secs ~/ 86400;
+    return n == 1 ? '1 day' : '$n days';
+  }
+  if (secs >= 60 && secs % 60 == 0) {
+    final n = secs ~/ 60;
+    return n == 1 ? '1 minute' : '$n minutes';
+  }
+  return span(secs);
+}
+
+/// "1000 USDC over 12 months after a 3-month cliff".
+String scheduleLabel(RuleState r) =>
+    '${amountText(r.amount, r.mint)} over ${durationLabel(r.durationSecs)}'
+    '${r.afterSecs == 0 ? '' : ', ${durationLabel(r.afterSecs)} cliff'}';
+
+/// Where a schedule stands, in one line.
+String vestingStatus(ScheduleProgress p, String? mint, int now) {
+  if (p.revoked) {
+    return p.settled
+        ? 'Revoked · everything vested was released'
+        : 'Revoked · capped at ${amountText(p.cap, mint)}';
+  }
+  if (now < p.startAt) return 'Starts in ${span(p.startAt - now)}';
+  if (now < p.cliffAt) {
+    return 'First unlock at the cliff, in ${span(p.cliffAt - now)}';
+  }
+  if (!p.fullyVested) {
+    return 'Unlocking continuously · fully vested in ${span(p.endAt - now)}';
+  }
+  return p.settled ? 'Fully vested and released' : 'Fully vested';
+}
+
+/// "Vested 250 of 1000 USDC · released 100 USDC".
+String vestingAmounts(ScheduleProgress p, String? mint) =>
+    'Vested ${amountNumber(p.vested, mint)} of ${amountText(p.total, mint)}'
+    ' · released ${amountText(p.released, mint)}';
+
+/// Released (solid) over vested (tinted) over the total (track).
+class VestingBar extends StatelessWidget {
+  const VestingBar({super.key, required this.progress, required this.color});
+
+  final ScheduleProgress progress;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget part(double f, Color c) => FractionallySizedBox(
+      alignment: Alignment.centerLeft,
+      widthFactor: f.clamp(0.0, 1.0),
+      child: Container(
+        decoration: BoxDecoration(
+          color: c,
+          borderRadius: BorderRadius.circular(99),
+        ),
+      ),
+    );
+    return Semantics(
+      label: 'Vested ${percent(progress.vestedFraction)}',
+      child: SizedBox(
+        height: 8,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            part(1, DmColors.line),
+            part(progress.vestedFraction, color.withValues(alpha: 0.4)),
+            part(progress.releasedFraction, color),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String percent(double f) => '${(f * 100).round()}%';
+}
+
+/// One vesting schedule: label, rail, bar, amounts and status.
+class VestingScheduleView extends StatelessWidget {
+  const VestingScheduleView({
+    super.key,
+    required this.rule,
+    required this.progress,
+    required this.now,
+    this.showBeneficiary = true,
+  });
+
+  final RuleState rule;
+  final ScheduleProgress progress;
+  final int now;
+  final bool showBeneficiary;
+
+  @override
+  Widget build(BuildContext context) {
+    const small = TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                showBeneficiary
+                    ? '${scheduleLabel(rule)} → ${short(rule.beneficiary)}'
+                    : scheduleLabel(rule),
+              ),
+            ),
+            const SizedBox(width: 8),
+            RailBadge(rule.rail),
+          ],
+        ),
+        const SizedBox(height: 8),
+        VestingBar(progress: progress, color: rule.rail.color),
+        const SizedBox(height: 6),
+        Text(vestingAmounts(progress, rule.mint), style: small),
+        Text(
+          vestingStatus(progress, rule.mint, now),
+          style: small.copyWith(
+            color: progress.revoked ? DmColors.warn : DmColors.muted,
+          ),
+        ),
+      ],
+    );
+  }
+}

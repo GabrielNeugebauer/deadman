@@ -8,11 +8,17 @@
 // stays claimable, so the keeper executes it (same policy) once it can pay,
 // and never skips it again. At most one action per vault per sweep.
 //
+// Vesting plans: releases what has vested on each schedule, at most once per
+// --vest-interval per schedule (and always once it is fully vested), under
+// the same payability rules. Inheritance-only actions never touch them.
+//
 // dart run tool/keeper.dart --keypair <path> [--rpc <url>] [--every 60]
 //   [--dry-run] [--price <mint>=<lamports per base unit>]...
+//   [--vest-interval <seconds>] [--usdc-price-lamports <per base unit>]
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/codec.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/solana/deadman_client.dart';
@@ -209,6 +215,36 @@ Decision decideToken(
   );
 }
 
+/// Whether to release a vesting schedule now: never with nothing new
+/// vested, at most once per [interval] (unix seconds since [lastRelease]),
+/// except once [fullyVested] so the last part never waits.
+bool vestingReleaseDue({
+  required int claimable,
+  required bool fullyVested,
+  required int now,
+  required int interval,
+  int? lastRelease,
+}) {
+  if (claimable <= 0) return false;
+  if (fullyVested || lastRelease == null) return true;
+  return now - lastRelease >= interval;
+}
+
+/// A vesting release as a Fixed tier of [claimable], so the SOL and token
+/// payability rules apply unchanged (the program caps it at the balance).
+RuleSpec vestingAsTier(RuleSpec schedule, int claimable) => RuleSpec(
+  beneficiary: schedule.beneficiary,
+  rail: schedule.rail,
+  afterSecs: 0,
+  mode: AmountMode.fixed,
+  amount: claimable,
+  mint: schedule.mint,
+);
+
+/// Default value of one USDC base unit: 1 USDC ~ 0.006 SOL, i.e.
+/// 6_000_000 lamports per 1_000_000 base units.
+const defaultUsdcLamportsPerUnit = 6.0;
+
 class Keeper {
   Keeper(
     this.sol,
@@ -216,6 +252,7 @@ class Keeper {
     this.key, {
     this.dryRun = false,
     this.prices = const {},
+    this.vestInterval = 86400,
   });
 
   final SolanaClient sol;
@@ -223,7 +260,13 @@ class Keeper {
   final Ed25519HDKeyPair key;
   final bool dryRun;
   final Map<String, double> prices;
+
+  /// Seconds between releases of one vesting schedule.
+  final int vestInterval;
   final _rent = <int, int>{};
+
+  /// Last release per `vault:index`, this run.
+  final _lastRelease = <String, int>{};
 
   RpcClient get _rpc => sol.rpcClient;
 
@@ -255,16 +298,19 @@ class Keeper {
     return ok ? AtaStatus.usable : AtaStatus.unusable;
   }
 
+  /// For a vesting plan pass [asTier] (see [vestingAsTier]); it is never
+  /// skippable and reserves nothing.
   Future<Decision> decide(
     VaultState v,
     int i,
     FeeSchedule fees,
-    int now,
-  ) async {
-    final rule = v.rules[i];
+    int now, {
+    RuleSpec? asTier,
+  }) async {
+    final rule = asTier ?? v.rules[i];
     // False for an already-skipped tier: it waits until it can pay.
-    final canSkip = v.canSkip(i, now);
-    final otherReserved = reservedFor(v, i);
+    final canSkip = asTier == null && v.canSkip(i, now);
+    final otherReserved = asTier == null ? reservedFor(v, i) : 0;
     final bps = fees.bpsFor(rule.rail);
     final mint = rule.mint;
     if (mint == null) {
@@ -321,8 +367,9 @@ class Keeper {
     FeeSchedule fees,
     Decision d,
   ) async {
+    final build = v.isVesting ? releaseVestedIxs : executeRuleIxs;
     final ixs = [
-      for (final ix in executeRuleIxs(
+      for (final ix in build(
         executor: key.address,
         vaultOwner: v.owner,
         planId: v.planId,
@@ -347,6 +394,10 @@ class Keeper {
     final fees = await client.fetchFees();
     var acted = 0;
     for (final v in vaults) {
+      if (v.isVesting) {
+        if (await _sweepVesting(v, fees, now)) acted++;
+        continue;
+      }
       // Index order respects the program's per-asset ordering; skipped
       // tiers are claimable whenever they can pay.
       for (var i = 0; i < v.rules.length; i++) {
@@ -385,9 +436,53 @@ class Keeper {
   }
 }
 
+extension on Keeper {
+  /// Releases the first schedule of [v] that is due; true if it acted.
+  Future<bool> _sweepVesting(VaultState v, FeeSchedule fees, int now) async {
+    for (var i = 0; i < v.rules.length; i++) {
+      final rule = v.rules[i];
+      if (rule.executed) continue;
+      final claimable = v.claimable(i, now);
+      final slot = '${v.address}:$i';
+      if (!vestingReleaseDue(
+        claimable: claimable,
+        fullyVested: v.vested(i, now) >= v.vestingCap(i),
+        now: now,
+        interval: vestInterval,
+        lastRelease: _lastRelease[slot],
+      )) {
+        continue;
+      }
+      final tag = '${v.address} vesting $i -> ${rule.beneficiary}';
+      try {
+        final d = await decide(
+          v,
+          i,
+          fees,
+          now,
+          asTier: vestingAsTier(rule, claimable),
+        );
+        if (d.action != KeeperAction.execute || dryRun) {
+          stdout.writeln('${dryRun ? 'DRY ' : ''}$tag: $d');
+          continue;
+        }
+        final sig = await _execute(v, i, fees, d);
+        _lastRelease[slot] = now;
+        stdout.writeln('$tag: release $d: $sig');
+        return true;
+      } on Exception catch (e) {
+        stderr.writeln('$tag failed: $e');
+      }
+    }
+    return false;
+  }
+}
+
 const _usage =
     'usage: --keypair <path> [--rpc <url>] [--every <seconds>] [--dry-run] '
-    '[--price <mint>=<lamports per base unit>]...';
+    '[--price <mint>=<lamports per base unit>]... '
+    '[--vest-interval <seconds, default 86400>] '
+    '[--usdc-price-lamports <per USDC base unit, default 6 = 0.006 SOL/USDC>]';
 
 Future<void> main(List<String> argv) async {
   final args = <String, String>{};
@@ -417,6 +512,9 @@ Future<void> main(List<String> argv) async {
   }
   final rpc = args['rpc'] ?? 'https://api.devnet.solana.com';
   final every = int.tryParse(args['every'] ?? '');
+  prices[AppConfig.usdcMint] ??=
+      double.tryParse(args['usdc-price-lamports'] ?? '') ??
+      defaultUsdcLamportsPerUnit;
 
   final secret = (jsonDecode(File(keypairPath).readAsStringSync()) as List)
       .cast<int>();
@@ -429,7 +527,14 @@ Future<void> main(List<String> argv) async {
   );
   // No sponsor: the keeper pays its own fees.
   final client = DeadmanClient.withKora(client: sol);
-  final keeper = Keeper(sol, client, key, dryRun: dryRun, prices: prices);
+  final keeper = Keeper(
+    sol,
+    client,
+    key,
+    dryRun: dryRun,
+    prices: prices,
+    vestInterval: int.tryParse(args['vest-interval'] ?? '') ?? 86400,
+  );
   stdout.writeln('Keeper ${key.address} on $rpc${dryRun ? ' (dry run)' : ''}');
 
   do {

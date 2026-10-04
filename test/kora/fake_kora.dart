@@ -19,6 +19,14 @@ class FakeKora {
   final String paymentAddress;
   String blockhash = _key(52);
 
+  /// `estimateTransactionFee` answers (fee_in_token only when asked for a
+  /// fee token, like Kora).
+  int feeInLamports = 10000;
+  int? feeInToken = 2500;
+
+  /// Next estimateTransactionFee answered with this Kora error message.
+  String? failNextEstimate;
+
   /// signAndSendTransaction calls answered with a blockhash simulation error.
   int blockhashMisses = 0;
 
@@ -66,6 +74,20 @@ class FakeKora {
         });
       case 'getBlockhash':
         return ok({'blockhash': blockhash});
+      case 'estimateTransactionFee':
+        final error = failNextEstimate;
+        if (error != null) {
+          failNextEstimate = null;
+          return fail(error);
+        }
+        return ok({
+          'fee_in_lamports': feeInLamports,
+          'fee_in_token': (params as Map)['fee_token'] == null
+              ? null
+              : feeInToken,
+          'signer_pubkey': signer,
+          'payment_address': paymentAddress,
+        });
       case 'getConfig':
         return ok({
           'fee_payers': [signer],

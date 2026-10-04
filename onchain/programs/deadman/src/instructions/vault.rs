@@ -4,7 +4,7 @@ use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{RuleInput, Vault},
+    state::{PlanKind, RuleInput, Vault, VestingInput},
 };
 
 #[derive(Accounts)]
@@ -48,6 +48,8 @@ pub fn handle_create_vault(
     vault.plan_id = plan_id;
     vault.guard = guard;
     vault.bump = ctx.bumps.vault;
+    vault.kind = PlanKind::Inheritance;
+    vault.rent_payer = ctx.accounts.payer.key();
     vault.set_label(label)?;
     let key = vault.key();
     vault.apply_policy(
@@ -96,6 +98,7 @@ pub fn handle_update_policy(
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
+    vault.require_kind(PlanKind::Inheritance)?;
     vault.require_unlocked(now)?;
     vault.set_label(label)?;
     let key = vault.key();
@@ -148,6 +151,7 @@ pub struct Pulse<'info> {
 pub fn handle_pulse(ctx: Context<Pulse>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
+    vault.require_kind(PlanKind::Inheritance)?;
     require!(!vault.is_completed(), DeadmanError::PlanCompleted);
     if ctx.accounts.signer.key() == vault.owner {
         vault.record_owner_pulse(now)?;
@@ -251,12 +255,101 @@ pub struct CloseVault<'info> {
         seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
         bump = vault.bump,
         has_one = owner @ DeadmanError::Unauthorized,
-        close = owner
+        has_one = rent_payer @ DeadmanError::Unauthorized,
+        close = rent_payer
     )]
     pub vault: Account<'info, Vault>,
+    /// CHECK: lamport destination only; pinned to the stored rent payer.
+    #[account(mut)]
+    pub rent_payer: UncheckedAccount<'info>,
 }
 
+/// The owner gets back everything above the rent; the rent goes back to
+/// whoever paid it (the owner, or a fee sponsor). Vesting plans close only
+/// once nothing is owed to their beneficiaries.
 pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
-    ctx.accounts.vault.require_unlocked(now)
+    let vault = &ctx.accounts.vault;
+    vault.require_unlocked(now)?;
+    if vault.kind == PlanKind::Vesting {
+        for (i, r) in vault.rules.iter().enumerate() {
+            require!(
+                vault.vesting_cap(i)? <= r.released,
+                DeadmanError::FundsCommitted
+            );
+        }
+    }
+    let info = vault.to_account_info();
+    let rent = Rent::get()?.minimum_balance(info.data_len());
+    let excess = info.lamports().saturating_sub(rent);
+    if excess > 0 && ctx.accounts.rent_payer.key() != ctx.accounts.owner.key() {
+        ctx.accounts.vault.sub_lamports(excess)?;
+        ctx.accounts.owner.add_lamports(excess)?;
+    }
+    Ok(())
+}
+
+/// Creates a vesting plan: each schedule vests linearly from `start_at`
+/// regardless of check-ins. Revocable plans let the owner stop future
+/// vesting; what already vested always stays with the beneficiary.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_create_vesting(
+    ctx: Context<CreateVault>,
+    plan_id: u16,
+    label: String,
+    guard: Pubkey,
+    lock_secs: i64,
+    start_at: i64,
+    revocable: bool,
+    schedules: Vec<VestingInput>,
+) -> Result<()> {
+    let owner = ctx.accounts.owner.key();
+    require!(
+        guard != Pubkey::default() && guard != owner,
+        DeadmanError::InvalidGuard
+    );
+    require!(
+        (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs),
+        DeadmanError::InvalidDuration
+    );
+    let now = Clock::get()?.unix_timestamp;
+    let vault = &mut ctx.accounts.vault;
+    vault.owner = owner;
+    vault.plan_id = plan_id;
+    vault.guard = guard;
+    vault.bump = ctx.bumps.vault;
+    vault.kind = PlanKind::Vesting;
+    vault.revocable = revocable;
+    vault.lock_secs = lock_secs;
+    vault.rent_payer = ctx.accounts.payer.key();
+    vault.set_label(label)?;
+    let key = vault.key();
+    vault.apply_vesting(&key, now, start_at, &schedules)?;
+    vault.record_owner_pulse(now)?;
+    emit!(VaultCreated {
+        vault: key,
+        owner,
+        plan_id,
+        rules: vault.rules.len() as u8,
+    });
+    Ok(())
+}
+
+/// Stops future vesting of a revocable plan. Already vested amounts stay
+/// claimable; the owner may then withdraw the rest. Blocked during
+/// lockdown so a coercer cannot force it.
+pub fn handle_revoke_vesting(ctx: Context<OwnerAction>) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    let vault = &mut ctx.accounts.vault;
+    vault.require_kind(PlanKind::Vesting)?;
+    vault.require_unlocked(now)?;
+    require!(vault.revocable, DeadmanError::NotRevocable);
+    require!(vault.revoked_at == 0, DeadmanError::AlreadyRevoked);
+    vault.revoked_at = now;
+    vault.record_owner_pulse(now)?;
+    emit!(VestingRevoked {
+        vault: vault.key(),
+        at: now,
+    });
+    Ok(())
 }

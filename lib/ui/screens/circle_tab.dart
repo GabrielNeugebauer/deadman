@@ -4,11 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
+import '../../state/assets.dart';
 import '../../state/providers.dart';
+import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/feedback.dart';
+import '../widgets/vesting_progress.dart';
 
 /// Family Circle: vaults naming this wallet (or this device's claim keys)
 /// as a beneficiary or guardian.
@@ -30,7 +33,7 @@ class CircleTab extends ConsumerWidget {
             Text('Family Circle', style: t.headlineMedium),
             const SizedBox(height: 6),
             const Text(
-              'People who named you in their release plan.',
+              'People who named you in their release or vesting plan.',
               style: TextStyle(color: DmColors.muted),
             ),
             const SizedBox(height: 20),
@@ -121,7 +124,18 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
     ];
     final next = v.nextRuleDue;
 
-    final (status, color) = next == null
+    final (status, color) = v.isVesting
+        ? v.revokedAt != 0
+              ? (
+                  'Vesting revoked; vested amounts stay claimable',
+                  DmColors.warn,
+                )
+              : vestingSettled(v)
+              ? ('Fully paid out', DmColors.muted)
+              : now < v.startAt
+              ? ('Vesting starts in ${span(v.startAt - now)}', DmColors.muted)
+              : ('Vesting', DmColors.plus)
+        : next == null
         ? (
             v.completed
                 ? 'Plan fully released'
@@ -180,51 +194,103 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Last pulse ${ago(v.lastPulse, now)} · ${v.streak}-day streak',
+                v.isVesting
+                    ? 'Vesting plan · ${v.revocable ? 'revocable by the owner' : 'irrevocable'}'
+                    : 'Last pulse ${ago(v.lastPulse, now)} · ${v.streak}-day streak',
                 style: const TextStyle(color: DmColors.muted),
               ),
-              for (final (i, r) in mine) ...[
-                const Divider(height: 24, color: DmColors.line),
-                Row(
-                  children: [
-                    Expanded(child: Text(amountLabel(r))),
-                    RailBadge(r.rail),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  r.executed
-                      ? 'Released ${ago(r.executedAt, now)}: ${r.mint == null ? '${sol(r.paid)} SOL' : '${r.paid} units'}'
-                      : r.skipped
-                      ? skippedLabel(r)
-                      : v.ruleDueAt(i) > now
-                      ? 'Releases after ${span(v.ruleDueAt(i) - now)} more silence'
-                      : 'Due now',
-                  style: const TextStyle(color: DmColors.muted, fontSize: 13),
-                ),
-                if (v.canExecute(i, now)) ...[
-                  const SizedBox(height: 10),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: DmColors.danger,
+              if (v.isVesting)
+                for (final (i, r) in mine) ...[
+                  const Divider(height: 24, color: DmColors.line),
+                  _VestingClaim(
+                    vault: v,
+                    index: i,
+                    rule: r,
+                    now: now,
+                    busy: _busy,
+                    onClaim: () => _run(
+                      () => actions.releaseVested(v, i),
+                      'Vested amount claimed',
                     ),
-                    onPressed: _busy
-                        ? null
-                        : () => _run(
-                            () => actions.executeRule(v, i),
-                            r.skipped
-                                ? 'Reserved share claimed'
-                                : 'Tier released',
-                          ),
-                    child: Text(
-                      r.skipped ? 'Claim reserved share' : 'Release this tier',
+                    onRoute: () => _run(
+                      () async => actions.routePrivately(r.rail),
+                      'Routing to your ${r.rail.label} address',
                     ),
                   ),
-                  if (r.rail != Rail.solana)
+                ],
+              if (!v.isVesting)
+                for (final (i, r) in mine) ...[
+                  const Divider(height: 24, color: DmColors.line),
+                  Row(
+                    children: [
+                      Expanded(child: Text(amountLabel(r))),
+                      RailBadge(r.rail),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    r.executed
+                        ? 'Released ${ago(r.executedAt, now)}: ${amountText(r.paid, r.mint)}'
+                        : r.skipped
+                        ? skippedLabel(r)
+                        : v.ruleDueAt(i) > now
+                        ? 'Releases after ${span(v.ruleDueAt(i) - now)} more silence'
+                        : 'Due now',
+                    style: const TextStyle(color: DmColors.muted, fontSize: 13),
+                  ),
+                  if (v.canExecute(i, now)) ...[
+                    const SizedBox(height: 10),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: DmColors.danger,
+                      ),
+                      onPressed: _busy
+                          ? null
+                          : () => _run(
+                              () => actions.executeRule(v, i),
+                              r.skipped
+                                  ? 'Reserved share claimed'
+                                  : 'Tier released',
+                            ),
+                      child: Text(
+                        r.skipped
+                            ? 'Claim reserved share'
+                            : 'Release this tier',
+                      ),
+                    ),
+                    if (r.rail != Rail.solana)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
+                          style: TextStyle(
+                            color: DmColors.muted,
+                            fontSize: 12,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                  ],
+                  for (final j in [
+                    for (var j = 0; j <= i; j++)
+                      if ((j == i || v.rules[j].mint == r.mint) &&
+                          v.canSkip(j, now))
+                        j,
+                  ]) ...[
+                    const SizedBox(height: 10),
+                    OutlinedButton(
+                      onPressed: _busy ? null : () => _skip(v, j, own: j == i),
+                      child: Text(
+                        j == i
+                            ? 'Skip this tier (it could not pay)'
+                            : 'Skip blocking tier ${j + 1} (it could not pay)',
+                      ),
+                    ),
                     const Padding(
                       padding: EdgeInsets.only(top: 6),
                       child: Text(
-                        'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
+                        'This tier has been due longer than the plan\'s grace period. Skipping only lets '
+                        'later tiers continue; this tier\'s share stays reserved for its beneficiary.',
                         style: TextStyle(
                           color: DmColors.muted,
                           fontSize: 12,
@@ -232,53 +298,92 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                         ),
                       ),
                     ),
-                ],
-                for (final j in [
-                  for (var j = 0; j <= i; j++)
-                    if ((j == i || v.rules[j].mint == r.mint) &&
-                        v.canSkip(j, now))
-                      j,
-                ]) ...[
-                  const SizedBox(height: 10),
-                  OutlinedButton(
-                    onPressed: _busy ? null : () => _skip(v, j, own: j == i),
-                    child: Text(
-                      j == i
-                          ? 'Skip this tier (it could not pay)'
-                          : 'Skip blocking tier ${j + 1} (it could not pay)',
+                  ],
+                  if (r.executed &&
+                      r.rail != Rail.solana &&
+                      r.mint == null) ...[
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: _busy
+                          ? null
+                          : () => _run(
+                              () async => actions.routePrivately(r.rail),
+                              'Routing to your ${r.rail.label} address',
+                            ),
+                      icon: Icon(r.rail.icon),
+                      label: Text('Route privately via ${r.rail.label}'),
                     ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.only(top: 6),
-                    child: Text(
-                      'This tier has been due longer than the plan\'s grace period. Skipping only lets '
-                      'later tiers continue; this tier\'s share stays reserved for its beneficiary.',
-                      style: TextStyle(
-                        color: DmColors.muted,
-                        fontSize: 12,
-                        height: 1.35,
-                      ),
-                    ),
-                  ),
+                  ],
                 ],
-                if (r.executed && r.rail != Rail.solana && r.mint == null) ...[
-                  const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: _busy
-                        ? null
-                        : () => _run(
-                            () async => actions.routePrivately(r.rail),
-                            'Routing to your ${r.rail.label} address',
-                          ),
-                    icon: Icon(r.rail.icon),
-                    label: Text('Route privately via ${r.rail.label}'),
-                  ),
-                ],
-              ],
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+/// A schedule naming this wallet or one of its claim keys.
+class _VestingClaim extends StatelessWidget {
+  const _VestingClaim({
+    required this.vault,
+    required this.index,
+    required this.rule,
+    required this.now,
+    required this.busy,
+    required this.onClaim,
+    required this.onRoute,
+  });
+
+  final VaultState vault;
+  final int index;
+  final RuleState rule;
+  final int now;
+  final bool busy;
+  final VoidCallback onClaim;
+  final VoidCallback onRoute;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = scheduleProgress(vault, index, now);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        VestingScheduleView(
+          rule: rule,
+          progress: p,
+          now: now,
+          showBeneficiary: false,
+        ),
+        if (p.claimable > 0) ...[
+          const SizedBox(height: 10),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: DmColors.plus),
+            onPressed: busy ? null : onClaim,
+            child: Text('Claim vested ${amountText(p.claimable, rule.mint)}'),
+          ),
+          if (rule.rail != Rail.solana)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                'Claiming from your wallet links it to this payout.',
+                style: TextStyle(
+                  color: DmColors.muted,
+                  fontSize: 12,
+                  height: 1.35,
+                ),
+              ),
+            ),
+        ],
+        if (rule.paid > 0 && rule.rail != Rail.solana && rule.mint == null) ...[
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: busy ? null : onRoute,
+            icon: Icon(rule.rail.icon),
+            label: Text('Route privately via ${rule.rail.label}'),
+          ),
+        ],
+      ],
     );
   }
 }

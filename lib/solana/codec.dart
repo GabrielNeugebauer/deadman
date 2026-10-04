@@ -23,6 +23,10 @@ abstract final class Disc {
   static const executeSolRule = [27, 74, 220, 147, 58, 73, 241, 103];
   static const executeTokenRule = [172, 93, 237, 201, 225, 26, 97, 140];
   static const skipRule = [240, 82, 139, 70, 215, 222, 129, 174];
+  static const createVesting = [135, 184, 171, 156, 197, 162, 246, 44];
+  static const revokeVesting = [12, 252, 252, 168, 39, 101, 98, 9];
+  static const releaseVestedSol = [136, 188, 48, 45, 14, 211, 200, 228];
+  static const releaseVestedToken = [50, 241, 129, 168, 233, 106, 179, 16];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
@@ -43,6 +47,8 @@ abstract final class Limits {
   static const minLockSecs = 60;
   static const maxLockSecs = 30 * 86400;
   static const privateGasStipend = 3000000;
+  static const maxVestSecs = 20 * 366 * 86400;
+  static const maxVestStartSkewSecs = 366 * 86400;
 }
 
 const systemProgramId = SystemProgram.programId;
@@ -151,6 +157,19 @@ class BorshWriter {
     }
   }
 
+  /// `Vec<VestingInput>`.
+  void vestingInputs(List<VestingSpec> schedules) {
+    u32(schedules.length);
+    for (final v in schedules) {
+      pubkey(v.beneficiary);
+      u8(v.rail.index);
+      optionPubkey(v.mint);
+      u64(v.total);
+      i64(v.cliffSecs);
+      i64(v.durationSecs);
+    }
+  }
+
   Uint8List toBytes() => _b.toBytes();
 
   void _num(int len, void Function(ByteData) set) {
@@ -239,6 +258,26 @@ Uint8List encodeCreateVault({
           ..ruleInputs(rules))
         .toBytes();
 
+Uint8List encodeCreateVesting({
+  required int planId,
+  required String label,
+  required String guard,
+  required int lockSecs,
+  required int startAt,
+  required bool revocable,
+  required List<VestingSpec> schedules,
+}) =>
+    (BorshWriter()
+          ..bytes(Disc.createVesting)
+          ..u16(planId)
+          ..string(label)
+          ..pubkey(guard)
+          ..i64(lockSecs)
+          ..i64(startAt)
+          ..u8(revocable ? 1 : 0)
+          ..vestingInputs(schedules))
+        .toBytes();
+
 Uint8List encodeUpdatePolicy({
   required String label,
   required int intervalSecs,
@@ -278,6 +317,12 @@ Uint8List encodeWithdrawToken(int amount) =>
 Uint8List encodeExecuteRule(int index, {required bool token}) =>
     (BorshWriter()
           ..bytes(token ? Disc.executeTokenRule : Disc.executeSolRule)
+          ..u8(index))
+        .toBytes();
+
+Uint8List encodeReleaseVested(int index, {required bool token}) =>
+    (BorshWriter()
+          ..bytes(token ? Disc.releaseVestedToken : Disc.releaseVestedSol)
           ..u8(index))
         .toBytes();
 
@@ -348,6 +393,45 @@ int? policyError({
   return null;
 }
 
+/// Mirrors the checks of `create_vesting` (`Vault::apply_vesting` plus the
+/// guard and lock bounds). Returns the program error code the chain would
+/// raise, or null if valid. [now] is unix seconds.
+int? vestingError({
+  required String owner,
+  required String vault,
+  required String guard,
+  required int lockSecs,
+  required int startAt,
+  required List<VestingSpec> schedules,
+  required int now,
+}) {
+  if (guard == defaultPubkey || guard == owner) return 6005;
+  if (lockSecs < Limits.minLockSecs || lockSecs > Limits.maxLockSecs) {
+    return 6002;
+  }
+  if (schedules.isEmpty ||
+      schedules.length > Limits.maxRules ||
+      startAt < now - Limits.maxVestStartSkewSecs ||
+      startAt > now + Limits.maxVestStartSkewSecs) {
+    return 6022;
+  }
+  for (final v in schedules) {
+    if (v.total <= 0 ||
+        v.cliffSecs < 0 ||
+        v.durationSecs <= 0 ||
+        v.cliffSecs > v.durationSecs ||
+        v.durationSecs > Limits.maxVestSecs ||
+        v.beneficiary == defaultPubkey ||
+        v.beneficiary == owner ||
+        v.beneficiary == guard ||
+        v.beneficiary == vault ||
+        v.mint == defaultPubkey) {
+      return 6022;
+    }
+  }
+  return null;
+}
+
 bool hasDiscriminator(List<int> data, List<int> disc) {
   if (data.length < disc.length) return false;
   for (var i = 0; i < disc.length; i++) {
@@ -380,6 +464,11 @@ VaultState decodeVault(
   final totalPulses = r.u64();
   final streak = r.u32();
   final bestStreak = r.u32();
+  final kind = r.enumOf(PlanKind.values, 'PlanKind');
+  final startAt = r.i64();
+  final revocable = r.boolean();
+  final revokedAt = r.i64();
+  final rentPayer = r.pubkey();
   final count = r.u32();
   if (count > Limits.maxRules) throw FormatException('Bad rule count $count');
   final rules = List.generate(
@@ -395,6 +484,8 @@ VaultState decodeVault(
       paid: r.u64(),
       skippedAt: r.i64(),
       reserved: r.u64(),
+      durationSecs: r.i64(),
+      released: r.u64(),
     ),
   );
   final label = r.string();
@@ -421,6 +512,11 @@ VaultState decodeVault(
     withdrawableLamports: lamports > rentExemptMinimum
         ? lamports - rentExemptMinimum
         : 0,
+    kind: kind,
+    startAt: startAt,
+    revocable: revocable,
+    revokedAt: revokedAt,
+    rentPayer: rentPayer,
   );
 }
 
@@ -555,7 +651,8 @@ Instruction skipRuleIx({
   ], encodeSkipRule(index));
 }
 
-/// `create_vault`. [payer] funds the vault rent (the client passes the owner).
+/// `create_vault` or `create_vesting` (same accounts). [payer] funds the
+/// vault rent and becomes its `rent_payer`: the owner, or a Kora paymaster.
 Instruction createVaultIx({
   required String owner,
   required String payer,
@@ -568,17 +665,30 @@ Instruction createVaultIx({
   _r(systemProgramId),
 ], data);
 
-/// The owner funds the vault ATA if it does not exist yet.
+/// `close_vault`: the rent goes back to [rentPayer] (`Vault.rent_payer`),
+/// everything above it to the owner.
+Instruction closeVaultIx({
+  required String owner,
+  required int planId,
+  required String rentPayer,
+}) => deadmanIx([
+  _w(owner, signer: true),
+  _w(vaultPda(owner, planId).address),
+  _w(rentPayer),
+], Disc.closeVault);
+
+/// [payer] (default: the owner) funds the vault ATA if it does not exist.
 List<Instruction> depositTokenIxs({
   required String owner,
   required int planId,
   required String mint,
   required int amount,
   required int decimals,
+  String? payer,
 }) {
   final vault = vaultPda(owner, planId).address;
   return [
-    createAtaIdempotentIx(payer: owner, owner: vault, mint: mint),
+    createAtaIdempotentIx(payer: payer ?? owner, owner: vault, mint: mint),
     transferCheckedIx(
       source: ataAddress(owner, mint),
       mint: mint,
@@ -590,16 +700,18 @@ List<Instruction> depositTokenIxs({
   ];
 }
 
-/// Recreates the owner's ATA if it was closed, then withdraws.
+/// Recreates the owner's ATA if it was closed ([payer], default the owner,
+/// funds it), then withdraws.
 List<Instruction> withdrawTokenIxs({
   required String owner,
   required int planId,
   required String mint,
   required int amount,
+  String? payer,
 }) {
   final vault = vaultPda(owner, planId).address;
   return [
-    createAtaIdempotentIx(payer: owner, owner: owner, mint: mint),
+    createAtaIdempotentIx(payer: payer ?? owner, owner: owner, mint: mint),
     deadmanIx([
       _w(owner, signer: true),
       _w(vault),
@@ -612,9 +724,10 @@ List<Instruction> withdrawTokenIxs({
 }
 
 /// `execute_sol_rule` or, for a token rule, idempotent creates of the
-/// treasury's and the beneficiary's ATAs (paid by [executor]; the program no
-/// longer creates either) followed by `execute_token_rule` paying into the
-/// beneficiary's ATA. [treasury] comes from Config.
+/// treasury's and the beneficiary's ATAs (paid by [payer], default
+/// [executor]; the program no longer creates either) followed by
+/// `execute_token_rule` paying into the beneficiary's ATA. [treasury] comes
+/// from Config.
 ///
 /// Token rules assume classic SPL Token mints. Token-2022 (different token
 /// program, ATA derivation and possibly transfer-hook remaining accounts) is
@@ -626,6 +739,47 @@ List<Instruction> executeRuleIxs({
   required RuleSpec rule,
   required int index,
   required String treasury,
+  String? payer,
+}) => _payoutIxs(
+  executor: executor,
+  vaultOwner: vaultOwner,
+  planId: planId,
+  rule: rule,
+  treasury: treasury,
+  payer: payer,
+  data: encodeExecuteRule(index, token: rule.mint != null),
+);
+
+/// `release_vested_sol`, or for a token schedule the same idempotent ATA
+/// creates as [executeRuleIxs] followed by `release_vested_token` (same
+/// accounts as the execute variants).
+List<Instruction> releaseVestedIxs({
+  required String executor,
+  required String vaultOwner,
+  required int planId,
+  required RuleSpec rule,
+  required int index,
+  required String treasury,
+  String? payer,
+}) => _payoutIxs(
+  executor: executor,
+  vaultOwner: vaultOwner,
+  planId: planId,
+  rule: rule,
+  treasury: treasury,
+  payer: payer,
+  data: encodeReleaseVested(index, token: rule.mint != null),
+);
+
+/// [payer] (default: [executor]) funds any missing ATA.
+List<Instruction> _payoutIxs({
+  required String executor,
+  required String vaultOwner,
+  required int planId,
+  required RuleSpec rule,
+  required String treasury,
+  required String? payer,
+  required List<int> data,
 }) {
   final vault = vaultPda(vaultOwner, planId).address;
   final mint = rule.mint;
@@ -637,12 +791,17 @@ List<Instruction> executeRuleIxs({
         _r(configPda().address),
         _w(rule.beneficiary),
         _w(treasury),
-      ], encodeExecuteRule(index, token: false)),
+      ], data),
     ];
   }
+  final rentPayer = payer ?? executor;
   return [
-    createAtaIdempotentIx(payer: executor, owner: treasury, mint: mint),
-    createAtaIdempotentIx(payer: executor, owner: rule.beneficiary, mint: mint),
+    createAtaIdempotentIx(payer: rentPayer, owner: treasury, mint: mint),
+    createAtaIdempotentIx(
+      payer: rentPayer,
+      owner: rule.beneficiary,
+      mint: mint,
+    ),
     deadmanIx([
       _r(executor, signer: true),
       _w(vault),
@@ -653,7 +812,7 @@ List<Instruction> executeRuleIxs({
       _w(ataAddress(rule.beneficiary, mint)),
       _w(ataAddress(treasury, mint)),
       _r(tokenProgramId),
-    ], encodeExecuteRule(index, token: true)),
+    ], data),
   ];
 }
 

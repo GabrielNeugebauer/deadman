@@ -44,6 +44,16 @@ pub enum DeadmanError {
     BeneficiaryCannotReceive,
     #[msg("This tier can only be skipped once the plan's grace period has passed")]
     SkipTooEarly,
+    #[msg("This instruction does not apply to this kind of plan")]
+    WrongPlanKind,
+    #[msg("Vesting schedules need a total, a cliff no longer than the duration, and a duration up to 20 years")]
+    InvalidVesting,
+    #[msg("This vesting plan cannot be revoked")]
+    NotRevocable,
+    #[msg("Vesting was already revoked")]
+    AlreadyRevoked,
+    #[msg("Those funds are committed to vesting beneficiaries")]
+    FundsCommitted,
     #[msg("Treasury must be set")]
     InvalidConfig,
     #[msg("Arithmetic overflow")]

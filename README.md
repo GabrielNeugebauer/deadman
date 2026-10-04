@@ -2,7 +2,7 @@
 
 **The self-custody safety net for Seeker.**
 
-Deadman is an Android app for the Solana Seeker plus an Anchor program. You put assets in one on-chain vault, and that vault covers three threats:
+Deadman is an Android app for the Solana Seeker plus an Anchor program. You put SOL and USDC in on-chain vaults (one per plan), and each vault covers three threats:
 
 | Threat       | What happens                                                                                                                                                                                                                           |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -12,7 +12,9 @@ Deadman is an Android app for the Solana Seeker plus an Anchor program. You put 
 
 You check in with a **Pulse**: one biometric touch, about 3 seconds, and no wallet prompt. It resets every pending rule and adds to an on-chain streak. With **Family Circle**, your beneficiaries and guardian see your liveness ("checked in 2h ago") and the state of each tier that names them.
 
-Deadman is free to use. The protocol charges a fee only when a rule actually releases funds.
+Next to these inheritance plans, a **vesting plan** releases SOL or USDC to up to 8 people linearly over time, with an optional cliff, whether you check in or not ([Vesting](#vesting)).
+
+Deadman is free to use. The protocol charges a fee only when a rule or vesting schedule actually releases funds. Network fees are paid in SOL, or, if you opt in, in USDC through a Kora paymaster, so a wallet with no SOL can use every feature ([Network fees in USDC](#network-fees-in-usdc)).
 
 > **Status: unaudited hackathon build.** The program runs on devnet. The private rails (Cloak, Zcash) and Earn call mainnet-only services and work only in a mainnet build. Do not put real funds in it.
 
@@ -26,6 +28,7 @@ Deadman's bet is execution on the phone, plus a release plan richer than "split 
 
 - **Guard key.** Each install generates a hot key in secure storage behind biometrics. On-chain, this key may only `pulse` and `lockdown`; it can never withdraw. Check-ins and the duress path therefore need no Seed Vault prompt, and a stolen guard key cannot take funds.
 - **Duress is a time-lock, not a decoy.** The duress PIN does not send funds to a "safe wallet" that the attacker could demand next. It freezes the vault for `lock_secs`. An early unlock needs the owner and the guardian to sign together.
+- **Vesting next to inheritance.** The same vault, keys and lockdown also run linear vesting schedules (payroll, allowances, a gift over time), revocable or irrevocable.
 - **Tiered release, not a single trigger.** "After 10 days, 1 SOL to my partner; after 30 days, everything else to my brother." Tiers fire one by one, and one Pulse stops the rest. A long trip costs you the first tier at most, not the estate.
 - **Private delivery.** A tier can pay out through Cloak (shielded pool on Solana) or as shielded ZEC, so a beneficiary's main wallet is not publicly tied to the estate on Solana. The limits of that privacy are spelled out [below](#private-rails).
 - **A habit and a social loop.** The Pulse streak and Family Circle answer the question every proof-of-life app faces: "why open it when nothing is happening?"
@@ -47,7 +50,7 @@ stateDiagram-v2
         reset last_pulse. A lockdown does not, and it does not
         block rule execution.
     end note
-    Armed --> [*]: close_vault (owner, unlocked only)
+    Armed --> [*]: close_vault (owner, unlocked only; rent to rent_payer)
 ```
 
 Each rule in the plan has its own lifecycle. "Due" is not stored; it is computed from `last_pulse`:
@@ -62,11 +65,11 @@ stateDiagram-v2
     Executed --> Pending: update_policy installs a new plan
 ```
 
-- **Release plan.** 1 to 8 rules, sorted by `after_secs`. Each rule has a `beneficiary`, a `rail` (Solana, Cloak or Zcash), `after_secs` of owner silence, an asset (`mint: None` for SOL, or any SPL mint) and an amount: `Fixed` (lamports or base units, capped at the balance) or `Percent` (bps of the asset's balance at execution time).
+- **Release plan.** 1 to 8 rules, sorted by `after_secs`. Each rule has a `beneficiary`, a `rail` (Solana, Cloak or Zcash), `after_secs` of owner silence, an asset (`mint: None` for SOL, or any SPL mint; the app offers SOL, USDC and other mints the vault holds) and an amount: `Fixed` (lamports or base units, capped at the balance) or `Percent` (bps of the asset's balance at execution time).
 - **Firing.** A rule is due when `now > last_pulse + after_secs`. `after_secs` must be at least `interval_secs + 60`, so no rule can fire before a missed check-in.
 - **Execution is permissionless.** Anyone can execute a due rule, usually the protocol keeper (`tool/keeper.dart`). Destinations are fixed on-chain, so the executor cannot redirect anything. Order is enforced per asset: a SOL rule never waits on a USDC rule, but two SOL rules execute in index order.
 - **A Pulse resets, it does not refund.** A pulse restarts the clock for every pending rule. Rules already executed stay executed.
-- **Fee.** On execution, `fee = gross × fee_bps / 10 000` goes to the treasury and the beneficiary receives the rest. The rate depends on the rail. If a SOL payout to a brand-new account would leave it below rent exemption, the rule is marked executed with `paid = 0` and the dust stays in the vault, so a tiny tier cannot block the ones after it.
+- **Fee.** On execution, `fee = gross × fee_bps / 10 000` goes to the treasury and the beneficiary receives the rest. The rate depends on the rail. If a SOL payout to a brand-new account would leave it below rent exemption, the tier stays pending (`BeneficiaryCannotReceive`); once the plan's grace period has passed anyone may `skip_rule` it, so a tiny tier cannot block the ones after it, and its share stays reserved for its beneficiary.
 - **Lockdown and inheritance.** A lockdown freezes withdrawals, plan changes and closing. It does not block pulses, guard rotation or rule execution.
 
 ### Instructions
@@ -75,17 +78,21 @@ stateDiagram-v2
 | -------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `init_config`        | program upgrade authority                    | Creates the `Config` PDA: `treasury`, `fee_bps_public`, `fee_bps_private`. Each fee is capped at 500 bps (5%).                                                                         |
 | `set_config`         | `config.admin`                               | Updates the same fields. The cap is enforced again.                                                                                                                                    |
-| `create_vault`       | owner                                        | Creates `Vault` PDA `["vault", owner]` with the guard key, `interval_secs`, `lock_secs` and the rules. Counts as the first pulse.                                                      |
+| `create_vault`       | owner (+ `payer`, the owner or a fee sponsor) | Creates inheritance `Vault` PDA `["vault", owner, plan_id]` with a label, the guard key, `interval_secs`, `lock_secs`, the skip grace and the rules. Stores `payer` as `rent_payer`. Counts as the first pulse. |
+| `create_vesting`     | owner (+ `payer`)                            | Creates a vesting `Vault` (same PDA) with `start_at`, `revocable`, `lock_secs` and 1 to 8 schedules (beneficiary, rail, asset, total, cliff, duration).                                 |
 | `update_policy`      | owner                                        | Replaces the cadence, lock length, guardian and the whole plan. Every rule becomes pending again. Blocked while locked.                                                                |
 | `set_guard`          | owner                                        | Rotates the guard key. **Allowed during lockdown.**                                                                                                                                    |
-| `pulse`              | owner or guard                               | Resets `last_pulse` and updates `streak`, `best_streak` and `total_pulses`.                                                                                                            |
+| `pulse`              | owner or guard                               | Resets `last_pulse` and updates `streak`, `best_streak` and `total_pulses`. Inheritance plans only.                                                                                    |
 | `lockdown`           | owner, guard or guardian                     | `locked_until = max(locked_until, now + lock_secs)`. Does not reset the clock. A guardian must wait until `guardian_ready_at`, which is set to `locked_until + lock_secs`.             |
 | `unlock`             | owner **and** guardian                       | Ends a lockdown early.                                                                                                                                                                 |
-| `withdraw_sol`       | owner                                        | Withdraws lamports above rent. Blocked while locked.                                                                                                                                   |
-| `withdraw_token`     | owner                                        | Withdraws from the vault's ATA (SPL Token or Token-2022). Blocked while locked.                                                                                                        |
-| `close_vault`        | owner                                        | Closes the vault and returns its lamports. Blocked while locked. Does not sweep token accounts.                                                                                        |
+| `withdraw_sol`       | owner                                        | Withdraws lamports above rent. Blocked while locked. On a vesting plan, only what the schedules do not owe (`FundsCommitted`).                                                        |
+| `withdraw_token`     | owner                                        | Withdraws from the vault's ATA (SPL Token or Token-2022). Blocked while locked. Same vesting limit.                                                                                    |
+| `close_vault`        | owner                                        | Closes the vault: the rent goes to `vault.rent_payer` (the owner, or Kora), everything above rent to the owner. Blocked while locked, and on a vesting plan while anything is owed. Does not sweep token accounts. |
 | `execute_sol_rule`   | anyone                                       | Pays a due SOL rule to its beneficiary, minus the rail's fee to the treasury.                                                                                                          |
 | `execute_token_rule` | anyone (pays rent for the beneficiary's ATA) | Pays a due token rule, minus the fee to the treasury's token account. On a private rail it also sends 0.003 SOL to the claim key if the claim key has less and the vault can spare it. |
+| `skip_rule`          | anyone                                       | Lets later tiers run past a tier that still cannot pay after the plan's grace period. Its share stays reserved and claimable by its beneficiary.                                     |
+| `release_vested_sol` / `release_vested_token` | anyone                | Pays a vesting schedule what has vested and not yet been released (capped at the vault balance), minus the rail's fee.                                                                  |
+| `revoke_vesting`     | owner                                        | Stops future vesting on a revocable plan. Vested amounts stay claimable; the rest becomes withdrawable. Blocked while locked.                                                         |
 
 There is no deposit instruction. To deposit SOL, send a plain system transfer to the vault PDA. To deposit tokens, transfer them into the vault PDA's associated token account.
 
@@ -97,12 +104,38 @@ There is no deposit instruction. To deposit SOL, send a plain system transfer to
 | Payout fee, Solana rail   | the released funds | `fee_bps_public`, 2% at launch, charged on-chain only when a rule releases funds                      |
 | Payout fee, private rails | the released funds | `fee_bps_private`, 5% at launch. The gas stipend comes from the vault, not from the fee.              |
 | Hard cap                  | -                  | 5% per rail, enforced in the program (`MAX_FEE_BPS = 500`)                                            |
+| Vesting release fee       | the released funds | Same as the payout fee of the schedule's rail                                                         |
+| Network fees in USDC (optional) | the owner    | Kora paymaster: 3.00 USDC (new plan, Kora pays the rent), 1.00 USDC (Kora opens token accounts), 0.02 USDC (anything else). In SOL, the normal Solana fee. |
 | Earn swap (optional)      | the owner          | Jupiter referral fee, at least 50 bps; Jupiter keeps 20% of it                                        |
 | Zcash routing (optional)  | the beneficiary    | NEAR Intents `appFees`, split 50/50 with 1Click. Off by default until a treasury NEAR account is set. |
 
-Duration bounds enforced on-chain: check-in interval 60 s to 366 days, rule delay from `interval + 60 s` to about 3 years, lock 60 s to 30 days. The 60-second minimums exist so the switch can be demoed live; the app's Demo cadence is a 2-minute check-in with a 3-minute first release.
+Duration bounds enforced on-chain: check-in interval 60 s to 366 days, rule delay from `interval + 60 s` to about 3 years, lock 60 s to 30 days, vesting cliff ≤ duration ≤ 20 years with a start at most 366 days before or after creation. The 60-second minimums exist so the switch can be demoed live; the app's Demo cadence is a 2-minute check-in with a 3-minute first release.
 
 Full account, trust and threat models: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Vesting
+
+A vesting plan (`PlanKind::Vesting`, `create_vesting`) holds up to 8 schedules. Each pays `total` of SOL or a token (USDC in the app) to one beneficiary, linearly from the plan's `start_at` over `duration_secs`, and nothing before `cliff_secs`.
+
+- **Release:** anyone calls `release_vested_sol` / `release_vested_token`. The keeper does it at most once per `--vest-interval` per schedule (and once it is fully vested), the owner can tap **Release**, and the beneficiary can **Claim vested** in Family Circle. Each release pays the rail's fee (2% / 5%).
+- **Revocable or irrevocable.** `revoke_vesting` stops future vesting; what vested by then stays claimable.
+- **Committed funds:** the owner can always deposit, but withdraws only what the plan does not owe, and closes it only when nothing is owed.
+- **Not part of check-ins:** `pulse` refuses vesting plans. **Lockdown covers them**: the duress PIN and Panic freeze withdraw, revoke and close; releases continue.
+- App: `lib/ui/screens/vesting_editor.dart`, `VestingPlanCard` in `lib/ui/screens/pulse_tab.dart`, claims in `lib/ui/screens/circle_tab.dart`.
+
+## Network fees in USDC
+
+USDC is `AppConfig.usdcMint` (`lib/core/config.dart`): Circle's devnet USDC by default, overridable with `--dart-define=USDC_MINT=...`. Plans take USDC deposits and withdrawals, the rules editor writes USDC tiers, and vesting schedules can pay USDC, all in USDC units.
+
+Owners can also pay network fees in USDC (Security → "Pay network fees with: SOL | USDC", `lib/state/fee_settings.dart`). A [Kora](https://github.com/solana-foundation/kora) paymaster behind a policy gateway (`tool/kora_gateway.dart`, :8081) pays the SOL fee, and rent where needed, and each transaction ends with a USDC payment. Three tiers, one Kora node each, chosen by what Kora funds:
+
+| Tier    | Kora node | Price     | Kora funds                                                   |
+| ------- | --------- | --------- | ------------------------------------------------------------ |
+| plan    | :8091     | 3.00 USDC | a new vault's rent (returned to Kora on close) + ≤ 2 ATAs    |
+| account | :8092     | 1.00 USDC | ≤ 2 token accounts                                           |
+| basic   | :8093     | 0.02 USDC | the network fee only                                         |
+
+The client drops Kora-paid ATA creates for ATAs that already exist, so a transaction lands in the cheapest tier that fits. Guard-key check-ins stay free through the Kora sponsor (:8080). On 2026-10-04 an owner with 0 SOL created, released and closed a USDC vesting plan on devnet this way (`tool/e2e_usdc_vesting.dart`). Setup, policies and results: [docs/KORA.md](docs/KORA.md).
 
 ## Private rails
 
@@ -127,10 +160,10 @@ Idle SOL in the vault earns nothing. Earn swaps SOL for JitoSOL through Jupiter 
 
 ## Keeper
 
-`tool/keeper.dart` scans every vault and executes due rules with its own key. It executes at most one rule per vault per sweep, so a percentage rule always sees the balance that earlier rules left. The keeper pays transaction fees and, for token rules, the rent for the beneficiary's and the treasury's token accounts. The payout fee pays for that. Anyone can run it, and beneficiaries can also release a due tier from the Family Circle tab.
+`tool/keeper.dart` scans every vault and executes due rules with its own key. It executes at most one rule per vault per sweep, so a percentage rule always sees the balance that earlier rules left. On vesting plans it releases each schedule at most once per `--vest-interval` (default 86 400 s), and always once the schedule is fully vested. The keeper pays transaction fees and, for token rules, the rent for the beneficiary's and the treasury's token accounts. The payout fee pays for that. Anyone can run it, and beneficiaries can also release a due tier from the Family Circle tab.
 
 ```bash
-dart run tool/keeper.dart --keypair <path> --rpc https://api.devnet.solana.com --every 30
+dart run tool/keeper.dart --keypair <path> --rpc https://api.devnet.solana.com --every 30 [--vest-interval 86400]
 ```
 
 ## Repository layout
@@ -142,13 +175,18 @@ onchain/                   Anchor workspace
   target/idl/deadman.json  IDL
 lib/                       Flutter app
   core/config.dart         cluster, RPC, program id (override with --dart-define)
-  solana/                  program client: codec, tx builders, guard-key and keeper actions
+  solana/                  program client: codec, tx builders, guard-key and keeper actions, paymaster (USDC fee) flow
+  kora/                    Kora JSON-RPC client (sponsor and paymaster)
   wallet/                  MWA contract and the platform-channel bridge
   rails/                   Zcash (1Click), Cloak (SDK in a headless WebView), Earn (Jupiter)
-  state/, ui/              Riverpod state and screens (rules_editor.dart is the release plan)
+  state/, ui/              Riverpod state and screens (rules_editor.dart is the release plan, vesting_editor.dart the vesting plan)
 assets/cloak/              bundled Cloak SDK and its WebView host page
 android/                   Android host app (app.deadman.seeker), Kotlin MWA bridge to Seed Vault Wallet
 tool/keeper.dart           protocol keeper
+tool/kora_gateway.dart     public gateway in front of the Kora sponsor and paymaster nodes
+tool/e2e_usdc_vesting.dart devnet end-to-end check: USDC vesting with fees paid in USDC
+kora/                      Kora node configs (sponsor.toml, paymaster.toml, signers.toml)
+scripts/kora_start.sh      start Redis, the Kora nodes and the gateway (kora_stop.sh stops them)
 tool/init_config.dart      admin: initialize Config (treasury, fees)
 tool/cloak_bundle/         esbuild project that produces assets/cloak/cloak.js
 scripts/devnet_setup.sh    one-time Config setup after deploy
@@ -176,12 +214,15 @@ KEYPAIR=<upgrade-authority.json> scripts/devnet_setup.sh   # 2% / 5% by default;
 flutter pub get
 flutter test
 flutter build apk                   # devnet: Solana rail end to end
+flutter build apk --dart-define=KORA_SPONSOR_URL=http://<LAN>:8080 \
+  --dart-define=KORA_PAYMASTER_URL=http://<LAN>:8081 \
+  --dart-define=USDC_MINT=<test mint>                   # devnet with free check-ins and USDC fees (docs/KORA.md)
 flutter build apk --dart-define=CLUSTER=mainnet-beta --dart-define=RPC_URL=<rpc> \
   --dart-define=JUP_API_KEY=<key> --dart-define=JUP_REFERRAL_ACCOUNT=<account> \
   --dart-define=ONECLICK_JWT=<optional partner token>      # private rails and Earn
 ```
 
-The integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover: config gated to the upgrade authority and the 5% cap, guard pulses and day streaks, rule validation, tiered SOL rules paying in order with per-rail fees, per-asset ordering, a pulse resetting pending rules after a partial release, dust to a fresh account being skipped, token rules with fees and independent order, the private-rail gas stipend, duress lockdown freezing funds and policy, lockdown not stopping inheritance, the guard being unable to move funds, the guardian lockdown cooldown and removal, co-signed unlock, owner-only token withdrawal, `close_vault` blocked while locked, and a compute-unit profile.
+`flutter test` runs 333 tests. The 42 LiteSVM integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover: config gated to the upgrade authority and the 5% cap, guard pulses and day streaks, rule validation, tiered SOL rules paying in order with per-rail fees, per-asset ordering, a pulse resetting pending rules after a partial release, dust to a fresh account being skipped, token rules with fees and independent order, the private-rail gas stipend, duress lockdown freezing funds and policy, lockdown not stopping inheritance, the guard being unable to move funds, the guardian lockdown cooldown and removal, co-signed unlock, owner-only token withdrawal, `close_vault` blocked while locked, independent plans per owner, a sponsor paying vault rent and getting it back on close, skipping unpayable tiers, the guard-only check-in window, vesting (linear release after the cliff, committed funds, revocation, token releases with fees, validation, plan kinds not mixing), and a compute-unit profile.
 
 **Program ID:** `ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL`. Check the devnet deployment with `solana program show ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL --url devnet`.
 
@@ -190,6 +231,7 @@ The integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover:
 - **Unaudited.** This is a hackathon build. Nobody outside the team has reviewed it. It has not been fuzzed, and it is not a verifiable build yet.
 - **Single-key admin.** `init_config` can only be called by the program's upgrade authority, and that key also controls upgrades. Until the authority moves to a multisig or the program is frozen, that one key can change the program.
 - **Fees are read at execution.** The admin can change either fee, up to the 5% cap, and the new rate applies to rules that have not executed yet.
+- **The Kora fee payer is a hot key** on the machine running the gateway (devnet). The gateway limits what it signs and pays (see [docs/KORA.md](docs/KORA.md)); on mainnet it needs a remote signer.
 - **Only vaulted assets are covered.** Funds left in your Seed Vault wallet are not protected by the plan or by lockdown. Funds in the vault that no rule reaches stay there if you never return.
 - **Owner-key compromise is out of scope.** There is no on-chain owner rotation. Someone who holds your seed can withdraw while the vault is unlocked.
 - **Claim keys live on one phone.** A beneficiary who loses the phone or resets the app before routing loses what landed on the claim key.

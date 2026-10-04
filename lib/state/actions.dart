@@ -64,6 +64,8 @@ class VaultActions {
     ref.invalidate(vaultsProvider);
     ref.invalidate(walletBalanceProvider);
     ref.invalidate(watchedVaultsProvider);
+    ref.invalidate(walletUsdcProvider);
+    ref.invalidate(planUsdcProvider);
   }
 
   Future<bool> _biometric(String reason) async {
@@ -110,6 +112,59 @@ class VaultActions {
     return PlanCoverage.of(plans, guard.address, nowSecs()).otherGuard;
   }
 
+  /// Creates a vesting plan with the next free id, funded in the same
+  /// transaction. Uses this device's guard key so panic lockdown covers it.
+  /// Returns the active inheritance plans guarded by another device.
+  Future<List<VaultState>> createVesting({
+    required String label,
+    required int startAt,
+    required bool revocable,
+    required List<VestingSpec> schedules,
+    required int lockSecs,
+    int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
+  }) => _decoy(() async {
+    final store = ref.read(secureStoreProvider);
+    final guard = await store.loadGuard() ?? await store.createGuard();
+    final plans = await _plans();
+    final planId = await _api.nextFreePlanId(_owner);
+    await _signAndSend([
+      await _api.buildCreateVesting(
+        owner: _owner,
+        planId: planId,
+        label: label,
+        guard: guard.address,
+        lockSecs: lockSecs,
+        startAt: startAt,
+        revocable: revocable,
+        schedules: schedules,
+        depositLamports: depositLamports,
+        tokenDeposits: tokenDeposits,
+      ),
+    ]);
+    ref.invalidate(guardAddressProvider);
+    return PlanCoverage.of(plans, guard.address, nowSecs()).otherGuard;
+  });
+
+  /// Stops future vesting; what already vested stays the beneficiaries'.
+  Future<void> revokeVesting(int planId) => _decoy(
+    () async => _signAndSend([
+      await _api.buildRevokeVesting(owner: _owner, planId: planId),
+    ]),
+  );
+
+  /// Releases what has vested on schedule [index], signed by the connected
+  /// wallet (anyone may; the destination is fixed on-chain).
+  Future<void> releaseVested(VaultState vault, int index) async =>
+      _signAndSend([
+        await _api.buildReleaseVested(
+          executor: _owner,
+          vaultOwner: vault.owner,
+          planId: vault.planId,
+          index: index,
+        ),
+      ]);
+
   /// Checks in, with the guard key, on exactly the active plans it can
   /// pulse. The report names plans that need a wallet check-in or are
   /// guarded by another device; throws when nothing could be pulsed.
@@ -118,7 +173,7 @@ class VaultActions {
     final cover = PlanCoverage.of(await _plans(), guard?.address, nowSecs());
     if (cover.isEmpty) {
       throw const ActionError(
-        'Every plan has fully released; nothing to check in',
+        'Nothing to check in: no inheritance plan has a tier pending',
       );
     }
     if (cover.guarded.isEmpty) {
@@ -192,6 +247,29 @@ class VaultActions {
         owner: _owner,
         planId: planId,
         lamports: lamports,
+      ),
+    ]),
+  );
+
+  /// Moves [amount] base units of [mint] from the wallet into a plan.
+  Future<void> depositToken(int planId, String mint, int amount) => _decoy(
+    () async => _signAndSend([
+      await _api.buildDepositToken(
+        owner: _owner,
+        planId: planId,
+        mint: mint,
+        amount: amount,
+      ),
+    ]),
+  );
+
+  Future<void> withdrawToken(int planId, String mint, int amount) => _decoy(
+    () async => _signAndSend([
+      await _api.buildWithdrawToken(
+        owner: _owner,
+        planId: planId,
+        mint: mint,
+        amount: amount,
       ),
     ]),
   );

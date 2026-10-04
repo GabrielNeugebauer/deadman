@@ -68,6 +68,29 @@ void main() {
     });
   });
 
+  test('estimateTransactionFee: params and response', () async {
+    final est = await kora.estimateTransactionFee(
+      transaction: 'dHg=',
+      feeToken: 'mint',
+      signerKey: node.signer,
+    );
+    expect(node.paramsOf('estimateTransactionFee').single, {
+      'transaction': 'dHg=',
+      'signer_key': node.signer,
+      'fee_token': 'mint',
+    });
+    expect(est.feeInLamports, 10000);
+    expect(est.feeInToken, 2500);
+    expect(est.signerPubkey, node.signer);
+    expect(est.paymentAddress, node.paymentAddress);
+
+    final sol = await kora.estimateTransactionFee(transaction: 'dHg=');
+    expect(node.paramsOf('estimateTransactionFee').last, {
+      'transaction': 'dHg=',
+    });
+    expect(sol.feeInToken, isNull);
+  });
+
   test('JSON-RPC errors become KoraException with code and message', () async {
     node.failNextSend = 'Invalid transaction: Insufficient token payment';
     await expectLater(

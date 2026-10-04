@@ -274,4 +274,73 @@ void main() {
       }
     });
   });
+
+  group('vesting', () {
+    test('waits with nothing new vested', () {
+      expect(
+        vestingReleaseDue(
+          claimable: 0,
+          fullyVested: true,
+          now: 100,
+          interval: 86400,
+        ),
+        isFalse,
+      );
+    });
+
+    test('releases once per interval, always once fully vested', () {
+      bool due(int now, {bool full = false, int? last}) => vestingReleaseDue(
+        claimable: 5,
+        fullyVested: full,
+        now: now,
+        interval: 86400,
+        lastRelease: last,
+      );
+      expect(due(1000), isTrue, reason: 'never released this run');
+      expect(due(1000 + 3600, last: 1000), isFalse);
+      expect(due(1000 + 86400, last: 1000), isTrue);
+      expect(due(1000 + 60, full: true, last: 1000), isTrue);
+    });
+
+    test('an underfunded vault releases what it holds', () {
+      final tier = vestingAsTier(rule(), 4000000);
+      final d = decideSol(tier, sol(available: 3000000), canSkip: false);
+      expect(d.action, KeeperAction.execute);
+      expect(d.reason, contains('pays 2940000'));
+    });
+
+    test('never skips a vesting release', () {
+      final tier = vestingAsTier(rule(), 1000);
+      expect(
+        decideSol(tier, sol(), canSkip: false).action,
+        KeeperAction.wait,
+        reason: 'payout leaves a fresh beneficiary below rent exemption',
+      );
+    });
+
+    test('token releases follow the ATA rent rule', () {
+      final tier = vestingAsTier(rule(mint: mint), 500000000);
+      final missing = token(
+        vaultBalance: 500000000,
+        beneficiaryAta: AtaStatus.missing,
+      );
+      expect(
+        decideToken(tier, treasury, missing, canSkip: false).action,
+        KeeperAction.wait,
+        reason: 'unknown price',
+      );
+      final priced = token(
+        vaultBalance: 500000000,
+        beneficiaryAta: AtaStatus.missing,
+        lamportsPerUnit: defaultUsdcLamportsPerUnit,
+      );
+      final d = decideToken(tier, treasury, priced, canSkip: false);
+      expect(d.action, KeeperAction.execute);
+      expect(d.createAtasFor, [heir]);
+    });
+
+    test('USDC default price is 0.006 SOL per USDC', () {
+      expect(defaultUsdcLamportsPerUnit * 1000000, 6000000);
+    });
+  });
 }

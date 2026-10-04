@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/config.dart';
 import '../rails/cloak_route.dart';
 import '../rails/earn_jupiter.dart';
 import '../rails/rails.dart';
@@ -11,7 +12,9 @@ import '../solana/deadman_api.dart';
 import '../solana/deadman_client.dart';
 import '../wallet/mwa_wallet_bridge.dart';
 import '../wallet/wallet_bridge.dart';
+import 'fee_settings.dart';
 import 'lockdown_retry.dart';
+import 'plan_math.dart';
 import 'reminders.dart';
 import 'secure_store.dart';
 
@@ -89,8 +92,8 @@ final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return const [];
   final vaults = await ref.watch(apiProvider).fetchVaults(owner);
-  // Plans with a tier still pending (skipped tiers only await a claim).
-  final active = vaults.where((v) => v.nextRuleDue != null).toList();
+  // Vesting plans need no check-ins, so they never drive reminders.
+  final active = activeSwitchPlans(vaults);
   if (active.isNotEmpty) {
     // Remind on the most urgent plan.
     final pulseDue = active.map((v) => v.pulseDue).reduce(min);
@@ -135,6 +138,53 @@ final walletBalanceProvider = FutureProvider<int>((ref) async {
   if (owner == null) return 0;
   return ref.watch(apiProvider).balance(owner);
 });
+
+/// USDC (base units) in the connected wallet.
+final walletUsdcProvider = FutureProvider<int>((ref) async {
+  final owner = ref.watch(sessionProvider.select((s) => s.owner));
+  if (owner == null) return 0;
+  return ref.watch(apiProvider).tokenBalance(owner, AppConfig.usdcMint);
+});
+
+/// USDC (base units) held by the plan vault at [vaultAddress] (its ATA is
+/// owned by the vault PDA).
+final planUsdcProvider = FutureProvider.family<int, String>(
+  (ref, vaultAddress) =>
+      ref.watch(apiProvider).tokenBalance(vaultAddress, AppConfig.usdcMint),
+);
+
+/// A Kora paymaster is configured, so owners may pay fees in USDC.
+final paymasterAvailableProvider = Provider(
+  (ref) => AppConfig.koraPaymasterUrl.isNotEmpty,
+);
+
+/// Network-fee payment for wallet-signed owner transactions. Reading it
+/// applies the persisted choice to the API (done at startup in main).
+class FeeModeController extends Notifier<FeeMode> {
+  FeeSettings get _settings => FeeSettings(
+    ref.read(prefsProvider),
+    paymasterAvailable: ref.read(paymasterAvailableProvider),
+  );
+
+  @override
+  FeeMode build() {
+    final mode = _settings.mode;
+    _settings.apply(ref.read(apiProvider), mode);
+    return mode;
+  }
+
+  Future<void> set(FeeMode mode) async {
+    final settings = _settings;
+    if (mode == FeeMode.usdc && !settings.paymasterAvailable) return;
+    await settings.save(mode);
+    settings.apply(ref.read(apiProvider), mode);
+    state = mode;
+  }
+}
+
+final feeModeProvider = NotifierProvider<FeeModeController, FeeMode>(
+  FeeModeController.new,
+);
 
 /// Vaults naming this wallet, or one of this device's claim keys.
 final watchedVaultsProvider = FutureProvider<List<VaultState>>((ref) async {
