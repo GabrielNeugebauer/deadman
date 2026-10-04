@@ -1,0 +1,134 @@
+# Deadman PAYMASTER node (Kora 2.0.5), port 8091, API key required.
+# Owners without SOL pay the network fee (and, for create_vault /
+# create_vesting, the vault rent) in USDC. Only tool/kora_gateway.dart (public
+# :8081) holds the key; it forwards owner-signed Deadman, deposit and payment
+# instructions only, and requires the LAST instruction to be the USDC payment.
+# scripts/kora_start.sh renders this file to paymaster.run.toml, adding
+# TEST_USDC_MINT from kora/.env when it is set.
+# Schema: crates/lib/src/config.rs at tag v2.0.5.
+
+[kora]
+rate_limit = 20                       # global requests/second for this node
+max_request_body_size = 65536
+# No payment_address: payments go to the signer's own ATAs
+# (HCAeeSv4…  USDC ATA BmGw5huqX9EaddNKjPHeC8Gp5yBkdPSScd1tejhMCJ4L),
+# created by `kora rpc initialize-atas` (see scripts/kora_start.sh).
+
+[kora.auth]
+# Kora 2.0.5 always binds 0.0.0.0, so the API key is what closes :8091.
+# scripts/kora_start.sh sets KORA_API_KEY from PAYMASTER_API_KEY in kora/.env.
+
+[kora.cache]
+enabled = false
+default_ttl = 300
+account_ttl = 60
+
+# Every transaction is paid for, so there is no lifetime per-wallet cap here;
+# the gateway rate-limits per owner (rolling 24 h) instead.
+[kora.usage_limit]
+enabled = false
+cache_url = "redis://127.0.0.1:6379/1"
+max_transactions = 0
+fallback_if_unavailable = false
+
+[kora.enabled_methods]
+liveness = true
+estimate_transaction_fee = true
+get_supported_tokens = true
+get_payer_signer = true
+sign_transaction = true
+sign_and_send_transaction = true
+transfer_transaction = false
+get_blockhash = true
+get_config = true
+
+[validation]
+# Caps both the network fee and the fee payer's outflow (plan tier): ONE
+# vault created with payer = Kora (8 + Vault::INIT_SPACE = 1318 bytes ->
+# 7_345_680 lamports rent) + <= 2 ATAs (2 x 2_039_280) + <= 50_000 fee.
+max_allowed_lamports = 11500000
+max_signatures = 2                    # Kora + the owner
+price_source = "Mock"                 # Jupiter has no devnet prices; see docs/KORA.md
+allow_durable_transactions = false
+
+allowed_programs = [
+    "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
+    "11111111111111111111111111111111",             # System
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",  # Token-2022
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", # Associated Token
+    "ComputeBudget111111111111111111111111111111",  # Compute Budget
+]
+allowed_tokens = ["4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]          # Circle devnet USDC
+allowed_spl_paid_tokens = ["4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]
+disallowed_accounts = []
+
+# Kora's fixed mode cannot price per instruction, so there is one node per
+# tier and the gateway routes by what Kora funds. This file is the PLAN tier
+# (Kora pays a new vault's rent, 7.35M lamports, plus <= 2 ATAs and the fee:
+# 3.00 USDC covers it up to SOL ~= $260; the vault rent comes back to Kora on
+# close_vault). scripts/kora_start.sh renders the ACCOUNT (1.00 USDC, <= 2
+# ATAs) and BASIC (0.02 USDC, fee only, no account funding) tiers from it.
+# strict = false: with the Mock oracle, 3 USDC is "worth" 300_000 lamports, so
+# strict mode would reject every Kora-funded create. Mainnet: see docs/KORA.md.
+[validation.price]
+type = "fixed"
+amount = 3000000                      # 3.00 USDC (6 decimals)
+token = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+strict = false
+
+# The fee payer may only fund account creation (Anchor `init` CPI with
+# payer = Kora in create_vault / create_vesting). Everything else is denied.
+[validation.fee_payer_policy.system]
+allow_transfer = false
+allow_assign = false
+allow_create_account = true
+allow_allocate = false
+
+[validation.fee_payer_policy.system.nonce]
+allow_initialize = false
+allow_advance = false
+allow_authorize = false
+allow_withdraw = false
+
+[validation.fee_payer_policy.spl_token]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+[validation.fee_payer_policy.token_2022]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+
+[validation.token_2022]
+blocked_mint_extensions = ["permanent_delegate", "transfer_hook"]
+blocked_account_extensions = []
+
+[metrics]
+enabled = true
+endpoint = "/metrics"
+port = 8091
+scrape_interval = 60
+
+[metrics.fee_payer_balance]
+enabled = true
+expiry_seconds = 30

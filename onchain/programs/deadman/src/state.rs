@@ -38,6 +38,27 @@ impl Rail {
     }
 }
 
+/// Inheritance plans release tiers after owner silence; vesting plans
+/// release linearly over time from a fixed start, whatever the owner does.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum PlanKind {
+    Inheritance,
+    Vesting,
+}
+
+/// One beneficiary's vesting schedule: `total` of `mint` (None = SOL) vests
+/// linearly from `start_at` over `duration_secs`; nothing is claimable
+/// before `cliff_secs` have passed.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub struct VestingInput {
+    pub beneficiary: Pubkey,
+    pub rail: Rail,
+    pub mint: Option<Pubkey>,
+    pub total: u64,
+    pub cliff_secs: i64,
+    pub duration_secs: i64,
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum AmountMode {
     /// `amount` in lamports or token base units (capped at the balance).
@@ -77,6 +98,11 @@ pub struct Rule {
     /// Share set aside for a skipped tier, so skipping never moves value to
     /// later tiers. 0 = recompute from the balance when claimed.
     pub reserved: u64,
+    /// Vesting only: seconds from the plan start to fully vested (the cliff
+    /// is `after_secs`, the total is `amount`). 0 for inheritance tiers.
+    pub duration_secs: i64,
+    /// Vesting only: gross amount released so far.
+    pub released: u64,
 }
 
 #[account]
@@ -103,6 +129,16 @@ pub struct Vault {
     pub total_pulses: u64,
     pub streak: u32,
     pub best_streak: u32,
+    pub kind: PlanKind,
+    /// Vesting: when every schedule starts vesting.
+    pub start_at: i64,
+    /// Vesting: the owner may stop future vesting (already vested stays).
+    pub revocable: bool,
+    /// Vesting: when it was revoked; 0 if never.
+    pub revoked_at: i64,
+    /// Who funded the account rent (the owner, or a fee sponsor). Closing
+    /// the plan returns the rent to them, never to someone else.
+    pub rent_payer: Pubkey,
     #[max_len(MAX_RULES)]
     pub rules: Vec<Rule>,
     /// Display name, e.g. "Kids" or "Emergency fund".
@@ -112,6 +148,117 @@ pub struct Vault {
 }
 
 impl Vault {
+    pub fn require_kind(&self, kind: PlanKind) -> Result<()> {
+        require!(self.kind == kind, DeadmanError::WrongPlanKind);
+        Ok(())
+    }
+
+    /// Gross amount of rule `index` vested at `now` (stops at revocation).
+    pub fn vested(&self, index: usize, now: i64) -> Result<u64> {
+        let rule = &self.rules[index];
+        let end = if self.revoked_at != 0 {
+            now.min(self.revoked_at)
+        } else {
+            now
+        };
+        let elapsed = end.saturating_sub(self.start_at);
+        if elapsed < rule.after_secs {
+            return Ok(0);
+        }
+        if elapsed >= rule.duration_secs {
+            return Ok(rule.amount);
+        }
+        let v = u128::from(rule.amount)
+            .checked_mul(u128::try_from(elapsed).map_err(|_| DeadmanError::MathOverflow)?)
+            .and_then(|v| v.checked_div(u128::try_from(rule.duration_secs).ok()?))
+            .ok_or(DeadmanError::MathOverflow)?;
+        u64::try_from(v).map_err(|_| error!(DeadmanError::MathOverflow))
+    }
+
+    /// Most rule `index` can ever release: the total, or what had vested
+    /// when the plan was revoked.
+    pub fn vesting_cap(&self, index: usize) -> Result<u64> {
+        if self.revoked_at != 0 {
+            self.vested(index, self.revoked_at)
+        } else {
+            Ok(self.rules[index].amount)
+        }
+    }
+
+    /// Amount of `mint` the owner may not withdraw: what vesting
+    /// beneficiaries are still owed. Always 0 for inheritance plans.
+    pub fn committed(&self, mint: Option<Pubkey>) -> Result<u64> {
+        if self.kind != PlanKind::Vesting {
+            return Ok(0);
+        }
+        let mut total: u64 = 0;
+        for (i, r) in self.rules.iter().enumerate() {
+            if r.mint == mint {
+                let owed = self.vesting_cap(i)?.saturating_sub(r.released);
+                total = total.checked_add(owed).ok_or(DeadmanError::MathOverflow)?;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Validates and installs vesting schedules. Caller enforces auth.
+    pub fn apply_vesting(
+        &mut self,
+        vault: &Pubkey,
+        now: i64,
+        start_at: i64,
+        schedules: &[VestingInput],
+    ) -> Result<()> {
+        require!(
+            !schedules.is_empty() && schedules.len() <= MAX_RULES,
+            DeadmanError::InvalidVesting
+        );
+        let earliest = now
+            .checked_sub(MAX_VEST_START_SKEW_SECS)
+            .ok_or(DeadmanError::MathOverflow)?;
+        let latest = now
+            .checked_add(MAX_VEST_START_SKEW_SECS)
+            .ok_or(DeadmanError::MathOverflow)?;
+        require!(
+            (earliest..=latest).contains(&start_at),
+            DeadmanError::InvalidVesting
+        );
+        for v in schedules {
+            require!(
+                v.total > 0
+                    && v.cliff_secs >= 0
+                    && v.duration_secs > 0
+                    && v.cliff_secs <= v.duration_secs
+                    && v.duration_secs <= MAX_VEST_SECS
+                    && v.beneficiary != Pubkey::default()
+                    && v.beneficiary != self.owner
+                    && v.beneficiary != self.guard
+                    && v.beneficiary != *vault
+                    && v.mint != Some(Pubkey::default()),
+                DeadmanError::InvalidVesting
+            );
+        }
+        self.start_at = start_at;
+        self.rules = schedules
+            .iter()
+            .map(|v| Rule {
+                beneficiary: v.beneficiary,
+                rail: v.rail,
+                after_secs: v.cliff_secs,
+                mint: v.mint,
+                mode: AmountMode::Fixed,
+                amount: v.total,
+                executed_at: 0,
+                paid: 0,
+                skipped_at: 0,
+                reserved: 0,
+                duration_secs: v.duration_secs,
+                released: 0,
+            })
+            .collect();
+        Ok(())
+    }
+
     pub fn is_locked(&self, now: i64) -> bool {
         now < self.locked_until
     }
@@ -341,6 +488,8 @@ impl Vault {
             paid: 0,
             skipped_at: 0,
             reserved: 0,
+            duration_secs: 0,
+            released: 0,
         }));
         Ok(())
     }

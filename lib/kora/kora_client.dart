@@ -40,6 +40,15 @@ typedef KoraSignedTransaction = ({
   String? signature,
 });
 
+/// `estimateTransactionFee` result. [feeInToken] (base units of the
+/// requested `fee_token`) is null when no token was asked for.
+typedef KoraFeeEstimate = ({
+  int feeInLamports,
+  int? feeInToken,
+  String signerPubkey,
+  String paymentAddress,
+});
+
 typedef KoraConfig = ({
   List<String> feePayers,
   Map<String, dynamic> validationConfig,
@@ -92,6 +101,28 @@ class KoraClient {
       feePayers: [for (final k in r['fee_payers'] as List) k as String],
       validationConfig: (r['validation_config'] as Map).cast<String, dynamic>(),
       enabledMethods: (r['enabled_methods'] as Map).cast<String, dynamic>(),
+    );
+  }
+
+  /// Fee Kora charges for [transaction] (base64, Kora as fee payer), in
+  /// lamports and, with [feeToken], in that token. The caller then appends
+  /// a transfer of `feeInToken` to `paymentAddress` (Kora 2.0.5 has no
+  /// server-side payment instruction builder).
+  Future<KoraFeeEstimate> estimateTransactionFee({
+    required String transaction,
+    String? feeToken,
+    String? signerKey,
+    bool? sigVerify,
+  }) async {
+    final r = await _call('estimateTransactionFee', {
+      ..._txParams(transaction, signerKey, sigVerify),
+      'fee_token': ?feeToken,
+    });
+    return (
+      feeInLamports: (r['fee_in_lamports'] as num).toInt(),
+      feeInToken: (r['fee_in_token'] as num?)?.toInt(),
+      signerPubkey: r['signer_pubkey'] as String,
+      paymentAddress: r['payment_address'] as String,
     );
   }
 

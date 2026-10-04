@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
+import '../../state/assets.dart';
+import '../../state/fee_settings.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../format.dart';
@@ -190,7 +192,9 @@ class SettingsTab extends ConsumerWidget {
                 color: DmColors.danger,
               ),
               title: const Text('Panic lockdown'),
-              subtitle: const Text('Freeze withdrawals and policy changes now'),
+              subtitle: const Text(
+                'Freeze withdrawals, policy changes and vesting revocation now',
+              ),
               onTap: () async {
                 if (await _confirm(
                       context,
@@ -237,7 +241,7 @@ class SettingsTab extends ConsumerWidget {
           const SizedBox(height: 12),
           const _FeesCard(),
           const SizedBox(height: 12),
-          const _GasCard(),
+          const NetworkFeesCard(),
           const SizedBox(height: 12),
           Card(
             child: ListTile(
@@ -492,24 +496,87 @@ class _FeesCard extends ConsumerWidget {
   }
 }
 
-/// Owners pay their own fees in SOL; check-ins can be sponsored by Kora.
-class _GasCard extends ConsumerWidget {
-  const _GasCard();
+/// Wallet balances and who pays network fees on owner transactions: SOL
+/// from the wallet, or USDC through a Kora paymaster. Check-ins can be
+/// sponsored by Kora either way.
+class NetworkFeesCard extends ConsumerWidget {
+  const NetworkFeesCard({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     const sponsored = AppConfig.koraSponsorUrl != '';
     final lamports = ref.watch(walletBalanceProvider).value;
+    final usdc = ref.watch(walletUsdcProvider).value;
+    final mode = ref.watch(feeModeProvider);
+    final paymaster = ref.watch(paymasterAvailableProvider);
+    const small = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.35);
     return Card(
-      child: ListTile(
-        leading: const Icon(Icons.local_gas_station_outlined),
-        title: const Text('Network fees'),
-        subtitle: Text(
-          'Your wallet pays its own fees in SOL: '
-          '${lamports == null ? '…' : sol(lamports)} SOL available.\n'
-          '${sponsored ? 'Check-ins and duress locks are free; this phone needs no SOL.' : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).'}',
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.local_gas_station_outlined),
+                SizedBox(width: 12),
+                Text(
+                  'Network fees',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Wallet: ${lamports == null ? '…' : sol(lamports)} SOL · '
+              '${usdc == null ? '…' : amountNumber(usdc, AppConfig.usdcMint)} USDC',
+              style: small,
+            ),
+            const SizedBox(height: 12),
+            const Text('Pay network fees with'),
+            const SizedBox(height: 8),
+            SegmentedButton<FeeMode>(
+              showSelectedIcon: false,
+              segments: [
+                const ButtonSegment(value: FeeMode.sol, label: Text('SOL')),
+                ButtonSegment(
+                  value: FeeMode.usdc,
+                  label: const Text('USDC'),
+                  enabled: paymaster,
+                ),
+              ],
+              selected: {mode},
+              onSelectionChanged: (s) =>
+                  ref.read(feeModeProvider.notifier).set(s.first),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              !paymaster
+                  ? 'Your wallet pays its fees in SOL. Paying in USDC needs a Kora '
+                        'paymaster, which this build does not have configured.'
+                  : mode == FeeMode.usdc
+                  ? 'A Kora paymaster pays the SOL fee and account rent for your wallet '
+                        'transactions and charges you the equivalent in USDC.'
+                  : 'Your wallet pays its fees in SOL. Switch to USDC to need no SOL at all.',
+              style: small,
+            ),
+            if (mode == FeeMode.usdc && usdc == 0)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: Text(
+                  'Your wallet has no USDC. Add USDC or switch fees to SOL.',
+                  style: TextStyle(color: DmColors.warn, fontSize: 13),
+                ),
+              ),
+            const SizedBox(height: 6),
+            Text(
+              sponsored
+                  ? 'Check-ins and duress locks are free; this phone needs no SOL.'
+                  : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).',
+              style: small,
+            ),
+          ],
         ),
-        isThreeLine: true,
       ),
     );
   }

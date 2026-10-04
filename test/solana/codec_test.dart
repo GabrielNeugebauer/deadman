@@ -169,6 +169,8 @@ void main() {
         'paid',
         'skipped_at',
         'reserved',
+        'duration_secs',
+        'released',
       ]);
     });
 
@@ -546,8 +548,10 @@ void main() {
             decodeVault(short, address: 'x', lamports: 0, rentExemptMinimum: 0),
         throwsFormatException,
       );
-      // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 7*8 + 8 + 4 + 4 + 4 + 32.
-      final badRail = bytes()..[183] = 3;
+      // Rail byte of rule 0: 8 + 32 + 2 + 32 + 1 + 7*8 + 8 + 4 + 4
+      // + kind 1 + start_at 8 + revocable 1 + revoked_at 8 + rent_payer 32
+      // + 4 + 32.
+      final badRail = bytes()..[233] = 3;
       expect(
         () => decodeVault(
           badRail,
@@ -558,7 +562,7 @@ void main() {
         throwsFormatException,
       );
       // AmountMode of rule 0: rail offset + 1 + 8 + 1 (no mint).
-      final badMode = bytes()..[183 + 10] = 2;
+      final badMode = bytes()..[233 + 10] = 2;
       expect(
         () => decodeVault(
           badMode,
@@ -570,13 +574,15 @@ void main() {
       );
     });
 
-    test('rule layout: skipped_at then reserved after paid (83 bytes)', () {
+    test('rule layout: skipped_at, reserved, duration_secs, released after '
+        'paid (99 bytes)', () {
       // SOL rule: beneficiary 32, rail 1, after_secs 8, mint None 1, mode 1,
-      // amount 8, then executed_at, paid, skipped_at, reserved (8 each).
+      // amount 8, then executed_at, paid, skipped_at, reserved,
+      // duration_secs, released (8 each).
       final bytes = Uint8List.fromList(
         vaultBytes(owner: owner, guard: guard, rules: rules),
       );
-      const start = 183 - 32; // beneficiary of rule 0
+      const start = 233 - 32; // beneficiary of rule 0
       int at(int offset) => ByteData.sublistView(
         bytes,
         start + offset,
@@ -586,7 +592,9 @@ void main() {
       expect(at(59), 1470000000, reason: 'paid');
       expect(at(67), 0, reason: 'skipped_at');
       expect(at(75), 0, reason: 'reserved');
-      expect(bytes.sublist(start + 83, start + 115), keyBytes(bob));
+      expect(at(83), 0, reason: 'duration_secs');
+      expect(at(91), 0, reason: 'released');
+      expect(bytes.sublist(start + 99, start + 131), keyBytes(bob));
     });
 
     test('decodes Config, mint decimals and token amounts', () {
@@ -1039,7 +1047,7 @@ void main() {
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(23));
+      expect(errors, hasLength(28));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -1104,8 +1112,13 @@ void main() {
         (6018, 'NothingToPay', 'nothing to pay'),
         (6019, 'BeneficiaryCannotReceive', 'cannot receive'),
         (6020, 'SkipTooEarly', 'grace period'),
-        (6021, 'InvalidConfig', 'Treasury'),
-        (6022, 'MathOverflow', 'overflow'),
+        (6021, 'WrongPlanKind', 'vesting plans need no check-ins'),
+        (6022, 'InvalidVesting', 'cliff no longer than its duration'),
+        (6023, 'NotRevocable', 'irrevocable'),
+        (6024, 'AlreadyRevoked', 'already stopped'),
+        (6025, 'FundsCommitted', 'owed to vesting beneficiaries'),
+        (6026, 'InvalidConfig', 'Treasury'),
+        (6027, 'MathOverflow', 'overflow'),
       ]) {
         final e = DeadmanException.fromTxError({
           'InstructionError': [
@@ -1116,12 +1129,465 @@ void main() {
         expect(e.name, name);
         expect(e.message, contains(words));
       }
+      int codeOf(String name) => DeadmanException.programErrors.entries
+          .firstWhere((e) => e.value.$1 == name)
+          .key;
       expect(
         DeadmanException.ownerConfirmationRequired,
-        DeadmanException.programErrors.entries
-            .firstWhere((e) => e.value.$1 == 'OwnerConfirmationRequired')
-            .key,
+        codeOf('OwnerConfirmationRequired'),
       );
+      for (final (code, name) in [
+        (DeadmanException.vaultLocked, 'VaultLocked'),
+        (DeadmanException.ruleAlreadyExecuted, 'RuleAlreadyExecuted'),
+        (DeadmanException.invalidRuleIndex, 'InvalidRuleIndex'),
+        (DeadmanException.insufficientFunds, 'InsufficientFunds'),
+        (DeadmanException.nothingToPay, 'NothingToPay'),
+        (DeadmanException.wrongPlanKind, 'WrongPlanKind'),
+        (DeadmanException.invalidVesting, 'InvalidVesting'),
+        (DeadmanException.notRevocable, 'NotRevocable'),
+        (DeadmanException.alreadyRevoked, 'AlreadyRevoked'),
+        (DeadmanException.fundsCommitted, 'FundsCommitted'),
+      ]) {
+        expect(code, codeOf(name), reason: name);
+      }
+    });
+  });
+
+  group('vesting', () {
+    final treasury = key(7);
+    final executor = key(8);
+    final kora = key(9);
+    const planId = 3;
+    final vault = vaultPda(owner, planId).address;
+    const now = 1790500000;
+
+    Map<String, dynamic> idlIx(String name) =>
+        ((loadIdl()['instructions'] as List).firstWhere(
+          (i) => i['name'] == name,
+        ) as Map).cast<String, dynamic>();
+    List<String> idlFields(String type) => [
+      for (final f
+          in ((loadIdl()['types'] as List).firstWhere(
+                (t) => t['name'] == type,
+              )['type']['fields']
+              as List))
+        f['name'] as String,
+    ];
+    List<(bool, bool)> idlFlags(String name) => [
+      for (final a in idlIx(name)['accounts'] as List)
+        (a['writable'] == true, a['signer'] == true),
+    ];
+    List<(String, bool, bool)> metas(Instruction ix) => [
+      for (final a in ix.accounts)
+        (a.pubKey.toBase58(), a.isWriteable, a.isSigner),
+    ];
+
+    final solSchedule = VestingSpec(
+      beneficiary: alice,
+      rail: Rail.solana,
+      total: 4000000000,
+      cliffSecs: 86400 * 90,
+      durationSecs: 86400 * 365,
+    );
+    final usdcSchedule = VestingSpec(
+      beneficiary: bob,
+      rail: Rail.cloak,
+      mint: usdc,
+      total: 1200000000,
+      cliffSecs: 0,
+      durationSecs: 86400 * 730,
+    );
+
+    test('discriminators, args and types match the IDL', () {
+      List<int> disc(String name) =>
+          List<int>.from(idlIx(name)['discriminator'] as List);
+      expect(Disc.createVesting, disc('create_vesting'));
+      expect(Disc.revokeVesting, disc('revoke_vesting'));
+      expect(Disc.releaseVestedSol, disc('release_vested_sol'));
+      expect(Disc.releaseVestedToken, disc('release_vested_token'));
+      expect(
+        [for (final a in idlIx('create_vesting')['args'] as List) a['name']],
+        [
+          'plan_id',
+          'label',
+          'guard',
+          'lock_secs',
+          'start_at',
+          'revocable',
+          'schedules',
+        ],
+      );
+      expect(idlIx('revoke_vesting')['args'], isEmpty);
+      expect(idlFields('VestingInput'), [
+        'beneficiary',
+        'rail',
+        'mint',
+        'total',
+        'cliff_secs',
+        'duration_secs',
+      ]);
+      expect(idlFields('Vault'), [
+        'owner',
+        'plan_id',
+        'guard',
+        'guardian',
+        'interval_secs',
+        'lock_secs',
+        'skip_grace_secs',
+        'last_pulse',
+        'owner_last_seen',
+        'locked_until',
+        'guardian_ready_at',
+        'total_pulses',
+        'streak',
+        'best_streak',
+        'kind',
+        'start_at',
+        'revocable',
+        'revoked_at',
+        'rent_payer',
+        'rules',
+        'label',
+        'bump',
+      ]);
+      final kinds = [
+        for (final v
+            in ((loadIdl()['types'] as List).firstWhere(
+                  (t) => t['name'] == 'PlanKind',
+                )['type']['variants']
+                as List))
+          (v['name'] as String).toLowerCase(),
+      ];
+      expect(kinds, PlanKind.values.map((k) => k.name));
+    });
+
+    test('create_vesting encoding', () {
+      final data = encodeCreateVesting(
+        planId: 0x0203,
+        label: 'Team',
+        guard: guard,
+        lockSecs: 3600,
+        startAt: 1790000000,
+        revocable: true,
+        schedules: [solSchedule, usdcSchedule],
+      );
+      expect(data, [
+        ...Disc.createVesting,
+        3,
+        2,
+        ...le(4, 4),
+        ...utf8.encode('Team'),
+        ...keyBytes(guard),
+        ...le(8, 3600),
+        ...le(8, 1790000000),
+        1,
+        ...le(4, 2),
+        ...keyBytes(alice),
+        0,
+        0,
+        ...le(8, 4000000000),
+        ...le(8, 86400 * 90),
+        ...le(8, 86400 * 365),
+        ...keyBytes(bob),
+        1,
+        1,
+        ...keyBytes(usdc),
+        ...le(8, 1200000000),
+        ...le(8, 0),
+        ...le(8, 86400 * 730),
+      ]);
+      final irrevocable = encodeCreateVesting(
+        planId: 0,
+        label: '',
+        guard: guard,
+        lockSecs: 60,
+        startAt: 0,
+        revocable: false,
+        schedules: [solSchedule],
+      );
+      expect(irrevocable[8 + 2 + 4 + 32 + 16], 0, reason: 'revocable false');
+    });
+
+    test('release, revoke and close instructions match the IDL accounts', () {
+      (bool, bool) f(AccountMeta a) => (a.isWriteable, a.isSigner);
+      final sol = releaseVestedIxs(
+        executor: executor,
+        vaultOwner: owner,
+        planId: planId,
+        rule: RuleSpec(
+          beneficiary: alice,
+          rail: Rail.solana,
+          afterSecs: 0,
+          mode: AmountMode.fixed,
+          amount: 1,
+        ),
+        index: 0,
+        treasury: treasury,
+      );
+      expect(sol, hasLength(1));
+      expect(sol.single.data.toList(), [...Disc.releaseVestedSol, 0]);
+      expect(sol.single.accounts.map(f), idlFlags('release_vested_sol'));
+      expect(metas(sol.single), [
+        (executor, false, true),
+        (vault, true, false),
+        (configPda().address, false, false),
+        (alice, true, false),
+        (treasury, true, false),
+      ]);
+
+      final token = releaseVestedIxs(
+        executor: executor,
+        vaultOwner: owner,
+        planId: planId,
+        rule: RuleSpec(
+          beneficiary: bob,
+          rail: Rail.cloak,
+          afterSecs: 0,
+          mint: usdc,
+          mode: AmountMode.fixed,
+          amount: 1,
+        ),
+        index: 1,
+        treasury: treasury,
+        payer: kora,
+      );
+      expect(token, hasLength(3));
+      expect(token[0].programId.toBase58(), ataProgramId);
+      expect(metas(token[0]).first, (kora, true, true), reason: 'payer');
+      expect(metas(token[0])[1].$1, ataAddress(treasury, usdc));
+      expect(metas(token[1]).first, (kora, true, true));
+      expect(metas(token[1])[1].$1, ataAddress(bob, usdc));
+      expect(token[2].data.toList(), [...Disc.releaseVestedToken, 1]);
+      expect(token[2].accounts.map(f), idlFlags('release_vested_token'));
+      expect(metas(token[2]), [
+        (executor, false, true),
+        (vault, true, false),
+        (configPda().address, false, false),
+        (usdc, false, false),
+        (ataAddress(vault, usdc), true, false),
+        (bob, true, false),
+        (ataAddress(bob, usdc), true, false),
+        (ataAddress(treasury, usdc), true, false),
+        (tokenProgramId, false, false),
+      ]);
+
+      final revoke = ownerActionIx(owner, planId, Disc.revokeVesting);
+      expect(revoke.accounts.map(f), idlFlags('revoke_vesting'));
+      expect(revoke.data.toList(), Disc.revokeVesting);
+
+      final close = closeVaultIx(owner: owner, planId: planId, rentPayer: kora);
+      expect(close.accounts.map(f), idlFlags('close_vault'));
+      expect(metas(close), [
+        (owner, true, true),
+        (vault, true, false),
+        (kora, true, false),
+      ]);
+      expect(close.data.toList(), Disc.closeVault);
+
+      final create = createVaultIx(
+        owner: owner,
+        payer: kora,
+        planId: planId,
+        data: const [],
+      );
+      expect(create.accounts.map(f), idlFlags('create_vesting'));
+      expect(metas(create)[1], (kora, true, true));
+    });
+
+    test('deposit and withdraw token ixs take an optional rent payer', () {
+      final deposit = depositTokenIxs(
+        owner: owner,
+        planId: planId,
+        mint: usdc,
+        amount: 5,
+        decimals: 6,
+        payer: kora,
+      );
+      expect(metas(deposit.first).first, (kora, true, true));
+      expect(metas(deposit.last).last, (owner, false, true), reason: 'auth');
+      final withdraw = withdrawTokenIxs(
+        owner: owner,
+        planId: planId,
+        mint: usdc,
+        amount: 5,
+        payer: kora,
+      );
+      expect(metas(withdraw.first).first, (kora, true, true));
+      expect(
+        metas(
+          depositTokenIxs(
+            owner: owner,
+            planId: planId,
+            mint: usdc,
+            amount: 5,
+            decimals: 6,
+          ).first,
+        ).first,
+        (owner, true, true),
+      );
+    });
+
+    test('decodes a vesting vault and mirrors vested/claimable/committed', () {
+      const start = 1780000000;
+      const year = 365 * 86400;
+      final v = decodeVault(
+        vaultBytes(
+          owner: owner,
+          planId: planId,
+          label: 'Team',
+          guard: guard,
+          kind: PlanKind.vesting,
+          startAt: start,
+          revocable: true,
+          revokedAt: 0,
+          rentPayer: kora,
+          rules: [
+            RuleState(
+              beneficiary: alice,
+              rail: Rail.solana,
+              afterSecs: 90 * 86400,
+              mode: AmountMode.fixed,
+              amount: 1000,
+              executedAt: 0,
+              paid: 98,
+              durationSecs: year,
+              released: 100,
+            ),
+            RuleState(
+              beneficiary: bob,
+              rail: Rail.cloak,
+              afterSecs: 0,
+              mint: usdc,
+              mode: AmountMode.fixed,
+              amount: 500,
+              executedAt: 0,
+              paid: 0,
+              durationSecs: 2 * year,
+            ),
+          ],
+        ),
+        address: vault,
+        lamports: 10,
+        rentExemptMinimum: 0,
+      );
+      expect(v.kind, PlanKind.vesting);
+      expect(v.isVesting, isTrue);
+      expect(v.startAt, start);
+      expect(v.revocable, isTrue);
+      expect(v.revokedAt, 0);
+      expect(v.rentPayer, kora);
+      expect(v.rules[0].durationSecs, year);
+      expect(v.rules[0].released, 100);
+      expect(v.rules[0].paid, 98);
+      expect(v.rules[1].mint, usdc);
+
+      expect(v.vested(0, start + 89 * 86400), 0, reason: 'before the cliff');
+      expect(v.vested(0, start + year ~/ 2), 500);
+      expect(v.vested(0, start + 2 * year), 1000);
+      expect(v.claimable(0, start + year ~/ 2), 400);
+      expect(v.committed(null), 900);
+      expect(v.committed(usdc), 500);
+
+      final inheritance = decodeVault(
+        vaultBytes(owner: owner, guard: guard),
+        address: vault,
+        lamports: 0,
+        rentExemptMinimum: 0,
+      );
+      expect(inheritance.kind, PlanKind.inheritance);
+      expect(inheritance.rentPayer, owner);
+      expect(inheritance.committed(null), 0);
+    });
+
+    test('revoked vesting stops at revoked_at', () {
+      const start = 1780000000;
+      const year = 365 * 86400;
+      final v = decodeVault(
+        vaultBytes(
+          owner: owner,
+          guard: guard,
+          kind: PlanKind.vesting,
+          startAt: start,
+          revocable: true,
+          revokedAt: start + year ~/ 4,
+          rules: [
+            RuleState(
+              beneficiary: alice,
+              rail: Rail.solana,
+              afterSecs: 0,
+              mode: AmountMode.fixed,
+              amount: 1000,
+              executedAt: 0,
+              paid: 0,
+              durationSecs: year,
+            ),
+          ],
+        ),
+        address: vault,
+        lamports: 0,
+        rentExemptMinimum: 0,
+      );
+      expect(v.vested(0, start + year), 250);
+      expect(v.vestingCap(0), 250);
+      expect(v.committed(null), 250);
+    });
+
+    test('vestingError mirrors create_vesting', () {
+      int? check({
+        String? g,
+        int lockSecs = 3600,
+        int startAt = now,
+        List<VestingSpec>? schedules,
+      }) => vestingError(
+        owner: owner,
+        vault: vault,
+        guard: g ?? guard,
+        lockSecs: lockSecs,
+        startAt: startAt,
+        schedules: schedules ?? [solSchedule, usdcSchedule],
+        now: now,
+      );
+      VestingSpec s({
+        String? to,
+        int total = 10,
+        int cliff = 0,
+        int duration = 100,
+        String? mint,
+      }) => VestingSpec(
+        beneficiary: to ?? alice,
+        rail: Rail.solana,
+        total: total,
+        cliffSecs: cliff,
+        durationSecs: duration,
+        mint: mint,
+      );
+      expect(check(), isNull);
+      expect(check(g: owner), 6005);
+      expect(check(g: defaultPubkey), 6005);
+      expect(check(lockSecs: 59), 6002);
+      expect(check(lockSecs: 30 * 86400 + 1), 6002);
+      expect(check(schedules: []), 6022);
+      expect(check(schedules: List.filled(9, s())), 6022);
+      expect(check(schedules: List.filled(8, s())), isNull);
+      expect(check(startAt: now - 366 * 86400), isNull);
+      expect(check(startAt: now - 366 * 86400 - 1), 6022);
+      expect(check(startAt: now + 366 * 86400 + 1), 6022);
+      for (final bad in [
+        s(total: 0),
+        s(cliff: -1),
+        s(duration: 0),
+        s(cliff: 101),
+        s(duration: 20 * 366 * 86400 + 1),
+        s(to: owner),
+        s(to: guard),
+        s(to: vault),
+        s(to: defaultPubkey),
+        s(mint: defaultPubkey),
+      ]) {
+        expect(check(schedules: [bad]), 6022);
+      }
+      expect(check(schedules: [s(cliff: 100, duration: 100)]), isNull);
+      expect(check(schedules: [s(duration: 20 * 366 * 86400)]), isNull);
     });
   });
 }

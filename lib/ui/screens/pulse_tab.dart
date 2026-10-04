@@ -3,16 +3,22 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/config.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
+import '../../state/assets.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
+import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
+import '../widgets/amount_dialog.dart';
 import '../widgets/feedback.dart';
 import '../widgets/pulse_ring.dart';
+import '../widgets/vesting_progress.dart';
 import 'rules_editor.dart';
+import 'vesting_editor.dart';
 
 class PulseTab extends ConsumerStatefulWidget {
   const PulseTab({super.key});
@@ -63,7 +69,10 @@ class _PulseTabState extends ConsumerState<PulseTab> {
         data: (list) => list.isEmpty
             ? const _ArmIntro()
             : RefreshIndicator(
-                onRefresh: () async => ref.invalidate(vaultsProvider),
+                onRefresh: () async {
+                  ref.invalidate(vaultsProvider);
+                  ref.invalidate(planUsdcProvider);
+                },
                 child: _Dashboard(plans: list, now: _now),
               ),
       ),
@@ -75,6 +84,68 @@ void openEditor(BuildContext context, {VaultState? vault}) => Navigator.push(
   context,
   MaterialPageRoute<void>(builder: (_) => RulesEditorPage(vault: vault)),
 );
+
+void openVestingEditor(BuildContext context) => Navigator.push(
+  context,
+  MaterialPageRoute<void>(builder: (_) => const VestingEditorPage()),
+);
+
+/// "New plan": inheritance (dead man's switch) or vesting.
+Future<void> chooseNewPlan(BuildContext context) async {
+  final kind = await showModalBottomSheet<PlanKind>(
+    context: context,
+    backgroundColor: DmColors.surface,
+    showDragHandle: true,
+    builder: (context) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('New plan', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 12),
+            for (final (kind, icon, color, title, blurb) in [
+              (
+                PlanKind.inheritance,
+                Icons.monitor_heart_outlined,
+                DmColors.alive,
+                'Inheritance',
+                'Release when I go silent. Tiers pay out if you stop checking in.',
+              ),
+              (
+                PlanKind.vesting,
+                Icons.stacked_line_chart,
+                DmColors.plus,
+                'Vesting',
+                'Release gradually over time, with an optional cliff. No check-ins.',
+              ),
+            ])
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Card(
+                  color: DmColors.raised,
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.fromLTRB(16, 6, 12, 6),
+                    leading: Icon(icon, color: color, size: 28),
+                    title: Text(title),
+                    subtitle: Text(
+                      blurb,
+                      style: const TextStyle(color: DmColors.muted),
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.pop(context, kind),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+  if (kind == null || !context.mounted) return;
+  kind == PlanKind.vesting ? openVestingEditor(context) : openEditor(context);
+}
 
 /// One check-in covers every active plan, so the ring follows the most
 /// urgent one.
@@ -89,8 +160,14 @@ class _Dashboard extends ConsumerWidget {
     final t = Theme.of(context).textTheme;
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
     final guard = ref.watch(guardAddressProvider);
+    // "I'm alive" covers inheritance plans only; vesting runs on its own.
+    final switches = switchPlans(plans);
+    final vestings = [
+      for (final v in plans)
+        if (v.isVesting) v,
+    ];
     // Plans with a pending tier; skipped tiers only await their claim.
-    final active = plans.where((v) => v.nextRuleDue != null).toList();
+    final active = activeSwitchPlans(plans);
     final locked = plans.any((v) => v.isLocked(now)) && !duress;
     final cover = guard.hasValue
         ? PlanCoverage.of(plans, guard.value, now)
@@ -110,10 +187,12 @@ class _Dashboard extends ConsumerWidget {
         : inGrace
         ? DmColors.warn
         : DmColors.alive;
-    final (big, label, progress) = urgent == null
+    final (big, label, progress) = urgent == null && switches.isEmpty
+        ? ('Off', 'no inheritance plan to check in', 0.0)
+        : urgent == null
         ? (
             'Done',
-            plans.every((v) => v.completed)
+            switches.every((v) => v.completed)
                 ? 'every plan released'
                 : 'no tier pending; reserved shares await claim',
             0.0,
@@ -168,32 +247,55 @@ class _Dashboard extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 24),
-        _PulseButton(color: color, activePlans: active.length),
+        _PulseButton(
+          color: color,
+          activePlans: active.length,
+          hasSwitch: switches.isNotEmpty,
+        ),
         if (cover != null && cover.otherGuard.isNotEmpty) ...[
           const SizedBox(height: 12),
           _OtherGuardBanner(plans: cover.otherGuard),
         ],
-        const SizedBox(height: 16),
-        _StreakCard(plans: active.isEmpty ? plans : active),
+        if (switches.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _StreakCard(plans: active.isEmpty ? switches : active),
+        ],
         const SizedBox(height: 18),
         Row(
           children: [
-            Text('Release plans', style: t.titleLarge),
+            Text(
+              switches.isEmpty ? 'Vesting plans' : 'Release plans',
+              style: t.titleLarge,
+            ),
             const Spacer(),
             TextButton.icon(
-              onPressed: () => openEditor(context),
+              onPressed: () => chooseNewPlan(context),
               icon: const Icon(Icons.add),
               label: const Text('New plan'),
             ),
           ],
         ),
         const SizedBox(height: 6),
-        for (final v in plans) ...[
+        for (final v in switches) ...[
           _PlanCard(
             vault: v,
             now: now,
             otherGuard: cover?.otherGuard.contains(v) ?? false,
           ),
+          const SizedBox(height: 12),
+        ],
+        if (switches.isNotEmpty && vestings.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text('Vesting plans', style: t.titleLarge),
+          const SizedBox(height: 4),
+          const Text(
+            'Release on their own schedule; check-ins do not affect them. Panic lockdown still covers them.',
+            style: TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35),
+          ),
+          const SizedBox(height: 10),
+        ],
+        for (final v in vestings) ...[
+          VestingPlanCard(vault: v, now: now),
           const SizedBox(height: 12),
         ],
       ],
@@ -202,10 +304,17 @@ class _Dashboard extends ConsumerWidget {
 }
 
 class _PulseButton extends ConsumerStatefulWidget {
-  const _PulseButton({required this.color, required this.activePlans});
+  const _PulseButton({
+    required this.color,
+    required this.activePlans,
+    required this.hasSwitch,
+  });
 
   final Color color;
   final int activePlans;
+
+  /// The owner has at least one inheritance plan.
+  final bool hasSwitch;
 
   @override
   ConsumerState<_PulseButton> createState() => _PulseButtonState();
@@ -244,7 +353,11 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
             )
           : const Icon(Icons.fingerprint, size: 28),
       label: Text(
-        closed ? 'All plans released' : "I'm alive",
+        !widget.hasSwitch
+            ? 'No plan to check in'
+            : closed
+            ? 'All plans released'
+            : "I'm alive",
         style: const TextStyle(fontSize: 18),
       ),
     );
@@ -372,6 +485,7 @@ class _PlanCard extends ConsumerWidget {
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
     final released = vault.rules.where((r) => r.executed).length;
     final id = vault.planId;
+    final usdc = ref.watch(planUsdcProvider(vault.address)).value;
 
     Future<void> run(
       String title,
@@ -412,7 +526,8 @@ class _PlanCard extends ConsumerWidget {
               ],
             ),
             Text(
-              '${sol(vault.withdrawableLamports)} SOL protected'
+              '${sol(vault.withdrawableLamports)} SOL'
+              '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} protected'
               '${vault.completed ? '' : ' · check in every ${span(vault.intervalSecs)}'}',
               style: const TextStyle(color: DmColors.muted),
             ),
@@ -506,20 +621,15 @@ class _PlanCard extends ConsumerWidget {
                 children: [
                   OutlinedButton(
                     style: small,
-                    onPressed: () => run(
-                      'Deposit SOL',
-                      (l) => actions.deposit(id, l),
-                      'Deposited',
-                    ),
+                    onPressed: () => depositToPlan(context, ref, id),
                     child: const Text('Deposit'),
                   ),
                   OutlinedButton(
                     style: small,
-                    onPressed: () => run(
-                      'Withdraw SOL',
-                      (l) => actions.withdraw(id, l),
-                      'Withdrawn',
-                    ),
+                    onPressed: () => withdrawFromPlan(context, ref, vault, {
+                      null: vault.withdrawableLamports,
+                      AppConfig.usdcMint: ?usdc,
+                    }),
                     child: const Text('Withdraw'),
                   ),
                   OutlinedButton.icon(
@@ -644,6 +754,12 @@ class _ArmIntro extends ConsumerWidget {
           child: const Text('Build release plan'),
         ),
         const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: () => openVestingEditor(context),
+          icon: const Icon(Icons.stacked_line_chart, color: DmColors.plus),
+          label: const Text('Or set up vesting: release gradually over time'),
+        ),
+        const SizedBox(height: 10),
         Text(
           fees == null
               ? 'No subscription. Deadman only charges when a tier releases funds.'
@@ -742,4 +858,266 @@ Future<int?> askAmount(BuildContext context, String title) {
       ],
     ),
   );
+}
+
+/// Deposits SOL or USDC from the wallet into plan [planId].
+Future<void> depositToPlan(
+  BuildContext context,
+  WidgetRef ref,
+  int planId,
+) async {
+  final wallet = <String?, int>{
+    null: ?ref.read(walletBalanceProvider).value,
+    AppConfig.usdcMint: ?ref.read(walletUsdcProvider).value,
+  };
+  final pick = await askAssetAmount(
+    context,
+    'Deposit',
+    available: wallet,
+    availableLabel: 'in your wallet',
+  );
+  if (pick == null || !context.mounted) return;
+  final actions = ref.read(actionsProvider);
+  await runGuarded(
+    context,
+    () => pick.mint == null
+        ? actions.deposit(planId, pick.amount)
+        : actions.depositToken(planId, pick.mint!, pick.amount),
+    success: 'Deposited ${amountText(pick.amount, pick.mint)}',
+  );
+}
+
+/// Withdraws up to [available] (base units per mint; for vesting plans
+/// only what is not committed to beneficiaries).
+Future<void> withdrawFromPlan(
+  BuildContext context,
+  WidgetRef ref,
+  VaultState vault,
+  Map<String?, int> available,
+) async {
+  final pick = await askAssetAmount(
+    context,
+    'Withdraw',
+    available: available,
+    availableLabel: vault.isVesting ? 'not committed' : 'withdrawable',
+    capped: true,
+  );
+  if (pick == null || !context.mounted) return;
+  final actions = ref.read(actionsProvider);
+  await runGuarded(
+    context,
+    () => pick.mint == null
+        ? actions.withdraw(vault.planId, pick.amount)
+        : actions.withdrawToken(vault.planId, pick.mint!, pick.amount),
+    success: 'Withdrew ${amountText(pick.amount, pick.mint)}',
+  );
+}
+
+/// A vesting plan: per-schedule progress, committed funds, and owner
+/// actions. Not part of "I'm alive"; panic lockdown still freezes it.
+class VestingPlanCard extends ConsumerStatefulWidget {
+  const VestingPlanCard({super.key, required this.vault, required this.now});
+
+  final VaultState vault;
+  final int now;
+
+  @override
+  ConsumerState<VestingPlanCard> createState() => _VestingPlanCardState();
+}
+
+class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() action, String success) async {
+    setState(() => _busy = true);
+    await runGuarded(context, action, success: success);
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _revoke() async {
+    final v = widget.vault;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: DmColors.surface,
+        title: const Text('Revoke vesting?'),
+        content: Text(
+          'Vesting on ${planName(v)} stops now for every schedule. What has vested so far '
+          'stays claimable by each beneficiary; the rest becomes yours to withdraw. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: DmColors.danger),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _run(
+      () => ref.read(actionsProvider).revokeVesting(v.planId),
+      'Vesting revoked; vested amounts stay claimable',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final v = widget.vault;
+    final now = widget.now;
+    final duress = ref.watch(sessionProvider.select((s) => s.duress));
+    final usdc = ref.watch(planUsdcProvider(v.address)).value;
+    final mints = <String?>{for (final r in v.rules) r.mint};
+    int? balanceOf(String? mint) => mint == null
+        ? v.withdrawableLamports
+        : mint == AppConfig.usdcMint
+        ? usdc
+        : null;
+    final committed = [
+      for (final m in mints)
+        if (v.committed(m) > 0) amountText(v.committed(m), m),
+    ];
+    final shortBy = [
+      for (final m in mints)
+        if (balanceOf(m) case final bal? when shortfall(v, m, bal) > 0)
+          amountText(shortfall(v, m, bal), m),
+    ];
+    final revoked = v.revokedAt != 0;
+    final settled = vestingSettled(v);
+    final small = OutlinedButton.styleFrom(minimumSize: const Size(0, 42));
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: Text(planName(v), style: t.titleLarge)),
+                if (revoked)
+                  const _Chip(text: 'REVOKED', color: DmColors.warn)
+                else if (settled)
+                  const _Chip(text: 'PAID OUT', color: DmColors.muted)
+                else
+                  const _Chip(text: 'VESTING', color: DmColors.plus),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${sol(v.withdrawableLamports)} SOL'
+              '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} in plan · '
+              '${v.revocable ? 'revocable' : 'irrevocable'} · '
+              '${now < v.startAt ? 'starts in ${span(v.startAt - now)}' : 'started ${ago(v.startAt, now)}'}',
+              style: const TextStyle(color: DmColors.muted),
+            ),
+            if (committed.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Committed: ${committed.join(' · ')}',
+                style: const TextStyle(color: DmColors.plus, fontSize: 13),
+              ),
+            ],
+            if (shortBy.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Underfunded by ${shortBy.join(' · ')}: deposit more or releases stop when the plan runs dry.',
+                  style: const TextStyle(
+                    color: DmColors.warn,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            for (final (i, r) in v.rules.indexed) ...[
+              const Divider(height: 24, color: DmColors.line),
+              Builder(
+                builder: (context) {
+                  final p = scheduleProgress(v, i, now);
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      VestingScheduleView(rule: r, progress: p, now: now),
+                      if (p.claimable > 0)
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : () => _run(
+                                    () => ref
+                                        .read(actionsProvider)
+                                        .releaseVested(v, i),
+                                    'Released to ${short(r.beneficiary)}',
+                                  ),
+                            icon: const Icon(Icons.call_made, size: 18),
+                            label: Text(
+                              'Release ${amountText(p.claimable, r.mint)}',
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ],
+            if (v.isLocked(now) && !duress)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'Locked down for ${span(v.lockedUntil - now)}',
+                  style: const TextStyle(color: DmColors.warn),
+                ),
+              ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton(
+                  style: small,
+                  onPressed: _busy
+                      ? null
+                      : () => depositToPlan(context, ref, v.planId),
+                  child: const Text('Deposit'),
+                ),
+                OutlinedButton(
+                  style: small,
+                  onPressed: _busy
+                      ? null
+                      : () => withdrawFromPlan(context, ref, v, {
+                          null: uncommitted(v, null, v.withdrawableLamports),
+                          if (usdc != null)
+                            AppConfig.usdcMint: uncommitted(
+                              v,
+                              AppConfig.usdcMint,
+                              usdc,
+                            ),
+                        }),
+                  child: const Text('Withdraw'),
+                ),
+                if (v.revocable && !revoked)
+                  OutlinedButton(
+                    style: small.copyWith(
+                      foregroundColor: const WidgetStatePropertyAll(
+                        DmColors.danger,
+                      ),
+                    ),
+                    onPressed: _busy ? null : _revoke,
+                    child: const Text('Revoke'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

@@ -116,6 +116,37 @@ pub mod deadman {
         instructions::funds::handle_skip_rule(ctx, index)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vesting(
+        ctx: Context<CreateVault>,
+        plan_id: u16,
+        label: String,
+        guard: Pubkey,
+        lock_secs: i64,
+        start_at: i64,
+        revocable: bool,
+        schedules: Vec<VestingInput>,
+    ) -> Result<()> {
+        instructions::vault::handle_create_vesting(
+            ctx, plan_id, label, guard, lock_secs, start_at, revocable, schedules,
+        )
+    }
+
+    pub fn revoke_vesting(ctx: Context<OwnerAction>) -> Result<()> {
+        instructions::vault::handle_revoke_vesting(ctx)
+    }
+
+    pub fn release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+        instructions::funds::handle_release_vested_sol(ctx, index)
+    }
+
+    pub fn release_vested_token<'info>(
+        ctx: Context<'info, ExecuteTokenRule<'info>>,
+        index: u8,
+    ) -> Result<()> {
+        instructions::funds::handle_release_vested_token(ctx, index)
+    }
+
     pub fn execute_token_rule<'info>(
         ctx: Context<'info, ExecuteTokenRule<'info>>,
         index: u8,

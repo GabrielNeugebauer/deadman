@@ -32,6 +32,21 @@ class AppConfig {
 
   static const koraApiKey = String.fromEnvironment('KORA_API_KEY');
 
+  /// Kora node that pays network fees and rent for wallet-signed owner
+  /// transactions and charges the owner in USDC instead (opt-in in the
+  /// Security tab). Empty = owners always pay in SOL.
+  static const koraPaymasterUrl = String.fromEnvironment('KORA_PAYMASTER_URL');
+
+  /// USDC mint: Circle's devnet USDC by default on devnet. Override with
+  /// `--dart-define=USDC_MINT=...` (e.g. a test mint).
+  static const usdcMint = String.fromEnvironment(
+    'USDC_MINT',
+    defaultValue: isMainnet
+        ? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+        : '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+  );
+  static const usdcDecimals = 6;
+
   /// SOL sent to the device guard key at setup to pay pulse fees.
   static const guardFundingLamports = 10000000;
 

@@ -198,8 +198,23 @@ class DeadmanException implements Exception {
       'SkipTooEarly',
       "This tier can only be skipped once the plan's grace period has passed",
     ),
-    6021: ('InvalidConfig', 'Treasury must be set'),
-    6022: ('MathOverflow', 'Arithmetic overflow'),
+    6021: (
+      'WrongPlanKind',
+      'This instruction does not apply to this kind of plan',
+    ),
+    6022: (
+      'InvalidVesting',
+      'Vesting schedules need a total, a cliff no longer than the duration, '
+          'and a duration up to 20 years',
+    ),
+    6023: ('NotRevocable', 'This vesting plan cannot be revoked'),
+    6024: ('AlreadyRevoked', 'Vesting was already revoked'),
+    6025: (
+      'FundsCommitted',
+      'Those funds are committed to vesting beneficiaries',
+    ),
+    6026: ('InvalidConfig', 'Treasury must be set'),
+    6027: ('MathOverflow', 'Arithmetic overflow'),
   };
 
   /// Clearer wording than the program's `msg` where the user must act.
@@ -216,11 +231,35 @@ class DeadmanException implements Exception {
         'open a new account). Once the grace period passes, later tiers can '
         "skip past it; this tier's share stays reserved for its beneficiary",
     6020: "This tier can only be skipped after the plan's grace period",
+    6021:
+        'This action does not apply to this kind of plan: vesting plans need '
+        'no check-ins and have no tiers to execute or skip, and only vesting '
+        'plans can be released or revoked',
+    6022:
+        'Each vesting schedule needs an amount, a cliff no longer than its '
+        'duration (at most 20 years), a beneficiary other than you or this '
+        'device, and a start date within a year of today (1 to 8 schedules)',
+    6023:
+        'This vesting plan was created as irrevocable, so it cannot be stopped',
+    6024: 'Vesting on this plan was already stopped',
+    6025:
+        'Those funds are owed to vesting beneficiaries. You can only withdraw '
+        'what is above the amount still to be released to them',
   };
 
+  static const vaultLocked = 6006;
+  static const ruleAlreadyExecuted = 6008;
+  static const invalidRuleIndex = 6011;
+  static const insufficientFunds = 6012;
   static const planCompleted = 6015;
   static const labelTooLong = 6016;
   static const ownerConfirmationRequired = 6017;
+  static const nothingToPay = 6018;
+  static const wrongPlanKind = 6021;
+  static const invalidVesting = 6022;
+  static const notRevocable = 6023;
+  static const alreadyRevoked = 6024;
+  static const fundsCommitted = 6025;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -237,20 +276,27 @@ class DeadmanException implements Exception {
 }
 
 class DeadmanClient implements DeadmanApi {
-  /// Uses the Kora sponsor in [AppConfig] when its URL is set.
+  /// Uses the Kora sponsor and paymaster in [AppConfig] when their URLs are
+  /// set.
   DeadmanClient([SolanaClient? client])
     : this.withKora(
         client: client,
         sponsor: KoraClient.fromConfig(AppConfig.koraSponsorUrl),
+        paymaster: KoraClient.fromConfig(AppConfig.koraPaymasterUrl),
       );
 
   /// [sponsor] pays guard-key transactions (pulse, lockdown) for free.
-  /// Wallet-signed transactions always pay their own fees and rent in SOL.
+  ///
+  /// [paymaster], once [feeToken] is set, is fee payer and rent payer of
+  /// every wallet-signed `build*` transaction and charges the wallet in
+  /// [feeToken] (a final SPL transfer). Without either, wallet-signed
+  /// transactions pay their own fees and rent in SOL.
   ///
   /// [clock] returns unix seconds; it only drives client-side pre-checks.
   DeadmanClient.withKora({
     SolanaClient? client,
     this.sponsor,
+    this.paymaster,
     int Function()? clock,
   }) : _now = clock ?? _systemNow,
        _client =
@@ -269,7 +315,21 @@ class DeadmanClient implements DeadmanApi {
 
   final SolanaClient _client;
   final KoraClient? sponsor;
+  final KoraClient? paymaster;
   final int Function() _now;
+
+  @override
+  String? get feeToken => _feeToken;
+  @override
+  set feeToken(String? mint) => _feeToken = mint;
+  String? _feeToken;
+
+  /// Wallet-signed builds go through [paymaster] and charge [feeToken].
+  bool get paysFeesInToken => paymaster != null && _feeToken != null;
+
+  /// Fee payers of transactions built for the paymaster; signed bytes with
+  /// one of these first are sent through it.
+  final _paymasterPayers = <String>{};
 
   /// Whether the last [pulseWithGuard] or [lockdownWithGuard] was paid by
   /// the guard key because the sponsor failed (down, drained, rejected).
@@ -442,9 +502,7 @@ class DeadmanClient implements DeadmanApi {
       skipGraceSecs: skipGraceSecs,
       rules: rules,
     );
-    // Even with a sponsor: the guard pays its own pulse or lockdown when the
-    // sponsor is down. Later plans reuse a guard that is already funded.
-    final fundGuard = await balance(guard) < AppConfig.guardFundingLamports;
+    final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreateVault(
       planId: planId,
       label: label,
@@ -454,21 +512,82 @@ class DeadmanClient implements DeadmanApi {
       skipGraceSecs: skipGraceSecs,
       rules: rules,
     );
-    return _build(owner, [
-      if (fundGuard)
-        SystemInstruction.transfer(
-          fundingAccount: _pk(owner),
-          recipientAccount: _pk(guard),
-          lamports: AppConfig.guardFundingLamports,
-        ),
-      createVaultIx(owner: owner, payer: owner, planId: planId, data: data),
-      if (depositLamports > 0)
-        SystemInstruction.transfer(
-          fundingAccount: _pk(owner),
-          recipientAccount: _pk(vault),
-          lamports: depositLamports,
-        ),
-    ]);
+    return _build(
+      owner,
+      (payer) => [
+        if (fundGuard) _transfer(owner, guard, AppConfig.guardFundingLamports),
+        createVaultIx(owner: owner, payer: payer, planId: planId, data: data),
+        if (depositLamports > 0) _transfer(owner, vault, depositLamports),
+      ],
+    );
+  }
+
+  @override
+  Future<Uint8List> buildCreateVesting({
+    required String owner,
+    required int planId,
+    required String label,
+    required String guard,
+    required int lockSecs,
+    required int startAt,
+    required bool revocable,
+    required List<VestingSpec> schedules,
+    int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
+  }) async {
+    _checkAmount(depositLamports);
+    tokenDeposits.values.forEach(_checkAmount);
+    _checkLabel(label);
+    final vault = vaultAddressFor(owner, planId);
+    final code = vestingError(
+      owner: owner,
+      vault: vault,
+      guard: guard,
+      lockSecs: lockSecs,
+      startAt: startAt,
+      schedules: schedules,
+      now: _now(),
+    );
+    if (code != null) throw DeadmanException.program(code);
+    // Rejects Token-2022 and non-mint accounts before anything is signed.
+    for (final mint in {for (final s in schedules) ?s.mint}) {
+      await _mintDecimals(mint);
+    }
+    final deposits = {
+      for (final e in tokenDeposits.entries)
+        if (e.value > 0) e.key: e.value,
+    };
+    final decimals = {
+      for (final mint in deposits.keys) mint: await _mintDecimals(mint),
+    };
+    final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
+    final data = encodeCreateVesting(
+      planId: planId,
+      label: label,
+      guard: guard,
+      lockSecs: lockSecs,
+      startAt: startAt,
+      revocable: revocable,
+      schedules: schedules,
+    );
+    return _build(
+      owner,
+      (payer) => [
+        if (fundGuard) _transfer(owner, guard, AppConfig.guardFundingLamports),
+        createVaultIx(owner: owner, payer: payer, planId: planId, data: data),
+        if (depositLamports > 0) _transfer(owner, vault, depositLamports),
+        for (final e in deposits.entries)
+          ...depositTokenIxs(
+            owner: owner,
+            planId: planId,
+            mint: e.key,
+            amount: e.value,
+            decimals: decimals[e.key]!,
+            payer: payer,
+          ),
+      ],
+      spend: deposits,
+    );
   }
 
   @override
@@ -478,13 +597,10 @@ class DeadmanClient implements DeadmanApi {
     required int lamports,
   }) async {
     _checkAmount(lamports);
-    return _build(owner, [
-      SystemInstruction.transfer(
-        fundingAccount: _pk(owner),
-        recipientAccount: _pk(vaultAddressFor(owner, planId)),
-        lamports: lamports,
-      ),
-    ]);
+    return _build(
+      owner,
+      (_) => [_transfer(owner, vaultAddressFor(owner, planId), lamports)],
+    );
   }
 
   @override
@@ -498,13 +614,15 @@ class DeadmanClient implements DeadmanApi {
     final decimals = await _mintDecimals(mint);
     return _build(
       owner,
-      depositTokenIxs(
+      (payer) => depositTokenIxs(
         owner: owner,
         planId: planId,
         mint: mint,
         amount: amount,
         decimals: decimals,
+        payer: payer,
       ),
+      spend: {mint: amount},
     );
   }
 
@@ -515,9 +633,13 @@ class DeadmanClient implements DeadmanApi {
     required int lamports,
   }) async {
     _checkAmount(lamports);
-    return _build(owner, [
-      ownerActionIx(owner, planId, encodeWithdrawSol(lamports)),
-    ]);
+    final vault = await _ownedVault(owner, planId);
+    _checkUnlocked(vault);
+    _checkWithdrawable(vault, null, lamports, vault.withdrawableLamports);
+    return _build(
+      owner,
+      (_) => [ownerActionIx(owner, planId, encodeWithdrawSol(lamports))],
+    );
   }
 
   @override
@@ -528,14 +650,27 @@ class DeadmanClient implements DeadmanApi {
     required int amount,
   }) async {
     _checkAmount(amount);
+    final vault = await _ownedVault(owner, planId);
+    _checkUnlocked(vault);
+    if (vault.committed(mint) > 0) {
+      _checkWithdrawable(
+        vault,
+        mint,
+        amount,
+        await tokenBalance(vault.address, mint),
+      );
+    }
     return _build(
       owner,
-      withdrawTokenIxs(
+      (payer) => withdrawTokenIxs(
         owner: owner,
         planId: planId,
         mint: mint,
         amount: amount,
+        payer: payer,
       ),
+      // Arrives before the fee payment, which runs last.
+      spend: {mint: -amount},
     );
   }
 
@@ -551,8 +686,10 @@ class DeadmanClient implements DeadmanApi {
     String? guardian,
   }) async {
     _checkLabel(label);
-    final current = await fetchVault(owner, planId);
-    if (current == null) throw const DeadmanException('Plan not found');
+    final current = await _ownedVault(owner, planId);
+    if (current.isVesting) {
+      throw DeadmanException.program(DeadmanException.wrongPlanKind);
+    }
     _checkPolicy(
       owner: owner,
       vault: current.address,
@@ -572,7 +709,7 @@ class DeadmanClient implements DeadmanApi {
       rules: rules,
       guardian: guardian,
     );
-    return _build(owner, [ownerActionIx(owner, planId, data)]);
+    return _build(owner, (_) => [ownerActionIx(owner, planId, data)]);
   }
 
   @override
@@ -582,9 +719,13 @@ class DeadmanClient implements DeadmanApi {
     required String newGuard,
   }) {
     final ids = _distinct(planIds);
-    return _build(owner, [
-      for (final id in ids) ownerActionIx(owner, id, encodeSetGuard(newGuard)),
-    ]);
+    return _build(
+      owner,
+      (_) => [
+        for (final id in ids)
+          ownerActionIx(owner, id, encodeSetGuard(newGuard)),
+      ],
+    );
   }
 
   @override
@@ -593,15 +734,18 @@ class DeadmanClient implements DeadmanApi {
     required List<int> planIds,
   }) async {
     final ids = await _pulsablePlans(owner, planIds, byGuard: false);
-    return _build(owner, [
-      for (final id in ids)
-        pulseOrLockdownIx(
-          signer: owner,
-          vaultOwner: owner,
-          planId: id,
-          lockdown: false,
-        ),
-    ]);
+    return _build(
+      owner,
+      (_) => [
+        for (final id in ids)
+          pulseOrLockdownIx(
+            signer: owner,
+            vaultOwner: owner,
+            planId: id,
+            lockdown: false,
+          ),
+      ],
+    );
   }
 
   @override
@@ -610,15 +754,18 @@ class DeadmanClient implements DeadmanApi {
     required List<int> planIds,
   }) async {
     if (planIds.isEmpty) throw ArgumentError('planIds is empty');
-    return _build(owner, [
-      for (final id in planIds.toSet())
-        pulseOrLockdownIx(
-          signer: owner,
-          vaultOwner: owner,
-          planId: id,
-          lockdown: true,
-        ),
-    ]);
+    return _build(
+      owner,
+      (_) => [
+        for (final id in planIds.toSet())
+          pulseOrLockdownIx(
+            signer: owner,
+            vaultOwner: owner,
+            planId: id,
+            lockdown: true,
+          ),
+      ],
+    );
   }
 
   @override
@@ -627,10 +774,10 @@ class DeadmanClient implements DeadmanApi {
     required String vaultOwner,
     required int planId,
     required int index,
-  }) async {
-    final ixs = await _executeRuleIxs(executor, vaultOwner, planId, index);
-    return _build(executor, ixs);
-  }
+  }) async => _build(
+    executor,
+    await _executeRuleIxs(executor, vaultOwner, planId, index),
+  );
 
   @override
   Future<Uint8List> buildSkipRule({
@@ -640,22 +787,86 @@ class DeadmanClient implements DeadmanApi {
     required int index,
   }) async {
     final rule = await _checkSkippable(vaultOwner, planId, index);
-    return _build(caller, [
-      skipRuleIx(
-        caller: caller,
-        vaultOwner: vaultOwner,
-        planId: planId,
-        index: index,
-        mint: rule.mint,
-      ),
-    ]);
+    return _build(
+      caller,
+      (_) => [
+        skipRuleIx(
+          caller: caller,
+          vaultOwner: vaultOwner,
+          planId: planId,
+          index: index,
+          mint: rule.mint,
+        ),
+      ],
+    );
   }
+
+  @override
+  Future<Uint8List> buildRevokeVesting({
+    required String owner,
+    required int planId,
+  }) async {
+    final vault = await _ownedVault(owner, planId);
+    if (!vault.isVesting) {
+      throw DeadmanException.program(DeadmanException.wrongPlanKind);
+    }
+    _checkUnlocked(vault);
+    if (!vault.revocable) {
+      throw DeadmanException.program(DeadmanException.notRevocable);
+    }
+    if (vault.revokedAt != 0) {
+      throw DeadmanException.program(DeadmanException.alreadyRevoked);
+    }
+    return _build(
+      owner,
+      (_) => [ownerActionIx(owner, planId, Disc.revokeVesting)],
+    );
+  }
+
+  @override
+  Future<Uint8List> buildReleaseVested({
+    required String executor,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  }) async => _build(
+    executor,
+    await _releaseVestedIxs(executor, vaultOwner, planId, index),
+  );
+
+  @override
+  Future<String> releaseVestedWithKey(
+    Ed25519HDKeyPair executor, {
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  }) async => _sendWithKey(
+    executor,
+    (await _releaseVestedIxs(executor.address, vaultOwner, planId, index))(
+      executor.address,
+    ),
+  );
 
   @override
   Future<Uint8List> buildCloseVault({
     required String owner,
     required int planId,
-  }) => _build(owner, [ownerActionIx(owner, planId, Disc.closeVault)]);
+  }) async {
+    final vault = await _ownedVault(owner, planId);
+    _checkUnlocked(vault);
+    if (vault.isVesting) {
+      for (var i = 0; i < vault.rules.length; i++) {
+        if (vault.vestingCap(i) > vault.rules[i].released) {
+          throw DeadmanException.program(DeadmanException.fundsCommitted);
+        }
+      }
+    }
+    final rentPayer = vault.rentPayer.isEmpty ? owner : vault.rentPayer;
+    return _build(
+      owner,
+      (_) => [closeVaultIx(owner: owner, planId: planId, rentPayer: rentPayer)],
+    );
+  }
 
   @override
   Future<String> pulseWithGuard(
@@ -714,7 +925,9 @@ class DeadmanClient implements DeadmanApi {
     required int index,
   }) async => _sendWithKey(
     executor,
-    await _executeRuleIxs(executor.address, vaultOwner, planId, index),
+    (await _executeRuleIxs(executor.address, vaultOwner, planId, index))(
+      executor.address,
+    ),
   );
 
   /// Sends in order, then confirms. Calling again with the same signed bytes
@@ -733,7 +946,13 @@ class DeadmanClient implements DeadmanApi {
       final id = _txId(tx);
       var entry = _inflight[id];
       if (entry == null) {
-        final sent = _send(base64Encode(tx));
+        final payer = _feePayerOf(tx);
+        final viaPaymaster = _paymasterPayers.contains(payer);
+        final sent = _send(
+          base64Encode(tx),
+          kora: viaPaymaster ? paymaster : null,
+          koraSigner: viaPaymaster ? payer : null,
+        );
         final e = _SignedSend(
           sent,
           sent.then((signature) async {
@@ -757,14 +976,33 @@ class DeadmanClient implements DeadmanApi {
     return signatures;
   }
 
-  /// First (fee payer) signature, which identifies a signed transaction.
-  static String _txId(Uint8List tx) =>
-      tx.length > 65 ? base58encode(tx.sublist(1, 65)) : base64Encode(tx);
+  /// First filled signature, which identifies a signed transaction (the
+  /// fee payer's, or the wallet's when a paymaster still has to co-sign).
+  static String _txId(Uint8List tx) {
+    final count = tx.isEmpty ? 0 : tx[0];
+    if (count < 0x80) {
+      for (var i = 0; i < count && 65 + i * 64 <= tx.length; i++) {
+        final sig = tx.sublist(1 + i * 64, 65 + i * 64);
+        if (sig.any((b) => b != 0)) return base58encode(sig);
+      }
+    }
+    return base64Encode(tx);
+  }
 
-  /// [planIds] minus completed or closed plans, which the program would
-  /// reject (`PlanCompleted`) or cannot load. With [byGuard], also minus
-  /// plans whose owner must check in from their wallet first; if that
-  /// leaves nothing, throws `OwnerConfirmationRequired` naming them.
+  static String? _feePayerOf(Uint8List tx) {
+    try {
+      return SignedTx.fromBytes(tx).compiledMessage.accountKeys.first
+          .toBase58();
+    } on Object {
+      return null;
+    }
+  }
+
+  /// [planIds] minus completed, closed or vesting plans, which the program
+  /// would reject (`PlanCompleted`, `WrongPlanKind`) or cannot load. With
+  /// [byGuard], also minus plans whose owner must check in from their wallet
+  /// first; if that leaves nothing, throws `OwnerConfirmationRequired`
+  /// naming them.
   Future<List<int>> _pulsablePlans(
     String owner,
     List<int> planIds, {
@@ -784,6 +1022,7 @@ class DeadmanClient implements DeadmanApi {
     final open = <int>[];
     final needOwner = <VaultState>[];
     var completed = false;
+    var vesting = false;
     final now = _now();
     for (var i = 0; i < ids.length; i++) {
       final account = accounts[i];
@@ -791,7 +1030,9 @@ class DeadmanClient implements DeadmanApi {
           ? null
           : await _decodeVault(addresses[i], account);
       if (vault == null) continue;
-      if (vault.completed) {
+      if (vault.isVesting) {
+        vesting = true;
+      } else if (vault.completed) {
         completed = true;
       } else if (byGuard && !vault.guardCanPulse(now)) {
         needOwner.add(vault);
@@ -814,6 +1055,13 @@ class DeadmanClient implements DeadmanApi {
       if (completed) {
         throw DeadmanException.program(DeadmanException.planCompleted);
       }
+      if (vesting) {
+        throw const DeadmanException(
+          'Vesting plans need no check-ins.',
+          code: DeadmanException.wrongPlanKind,
+          name: 'WrongPlanKind',
+        );
+      }
       throw const DeadmanException('Plan not found');
     }
     return open;
@@ -833,11 +1081,7 @@ class DeadmanClient implements DeadmanApi {
     int planId,
     int index,
   ) async {
-    final vault = await fetchVault(vaultOwner, planId);
-    if (vault == null) throw const DeadmanException('Vault not found');
-    if (index < 0 || index >= vault.rules.length) {
-      throw DeadmanException.program(6011);
-    }
+    final vault = await _payoutVault(vaultOwner, planId, index, vesting: false);
     final rule = vault.rules[index];
     if (rule.settled) throw DeadmanException.program(6008);
     for (final earlier in vault.rules.take(index)) {
@@ -848,29 +1092,87 @@ class DeadmanClient implements DeadmanApi {
     return rule;
   }
 
-  Future<List<Instruction>> _executeRuleIxs(
+  /// Plan [planId] of [vaultOwner], checked to be of the right kind for an
+  /// execute/skip ([vesting] false) or release ([vesting] true) of
+  /// [index].
+  Future<VaultState> _payoutVault(
+    String vaultOwner,
+    int planId,
+    int index, {
+    required bool vesting,
+  }) async {
+    final vault = await fetchVault(vaultOwner, planId);
+    if (vault == null) throw const DeadmanException('Vault not found');
+    if (vault.isVesting != vesting) {
+      throw DeadmanException.program(DeadmanException.wrongPlanKind);
+    }
+    if (index < 0 || index >= vault.rules.length) {
+      throw DeadmanException.program(DeadmanException.invalidRuleIndex);
+    }
+    return vault;
+  }
+
+  /// Instructions for a given rent payer (the executor, or the paymaster).
+  Future<List<Instruction> Function(String payer)> _executeRuleIxs(
     String executor,
     String vaultOwner,
     int planId,
     int index,
   ) async {
-    final vault = await fetchVault(vaultOwner, planId);
-    if (vault == null) throw const DeadmanException('Vault not found');
-    if (index < 0 || index >= vault.rules.length) {
-      throw DeadmanException.program(6011);
-    }
+    final vault = await _payoutVault(vaultOwner, planId, index, vesting: false);
     final rule = vault.rules[index];
     if (rule.executed) throw DeadmanException.program(6008);
     final mint = rule.mint;
     if (mint != null) await _mintDecimals(mint);
     final fees = await fetchFees();
-    return executeRuleIxs(
+    return (payer) => executeRuleIxs(
       executor: executor,
       vaultOwner: vaultOwner,
       planId: planId,
       rule: rule,
       index: index,
       treasury: fees.treasury,
+      payer: payer,
+    );
+  }
+
+  /// Rejects what `release_vested_*` would, as far as the client knows
+  /// (the chain clock decides at the edges).
+  Future<List<Instruction> Function(String payer)> _releaseVestedIxs(
+    String executor,
+    String vaultOwner,
+    int planId,
+    int index,
+  ) async {
+    final vault = await _payoutVault(vaultOwner, planId, index, vesting: true);
+    final rule = vault.rules[index];
+    if (rule.executed) {
+      throw DeadmanException.program(DeadmanException.ruleAlreadyExecuted);
+    }
+    if (vault.claimable(index, _now()) <= 0) {
+      throw const DeadmanException(
+        'Nothing new has vested on this schedule yet.',
+        code: DeadmanException.nothingToPay,
+        name: 'NothingToPay',
+      );
+    }
+    final mint = rule.mint;
+    final held = mint == null
+        ? vault.withdrawableLamports
+        : await tokenBalance(vault.address, mint);
+    if (held <= 0) {
+      throw DeadmanException.program(DeadmanException.nothingToPay);
+    }
+    if (mint != null) await _mintDecimals(mint);
+    final fees = await fetchFees();
+    return (payer) => releaseVestedIxs(
+      executor: executor,
+      vaultOwner: vaultOwner,
+      planId: planId,
+      rule: rule,
+      index: index,
+      treasury: fees.treasury,
+      payer: payer,
     );
   }
 
@@ -932,21 +1234,204 @@ class DeadmanClient implements DeadmanApi {
     );
   }
 
-  /// Unsigned transaction for the wallet of [signer], which pays the fee
-  /// and any rent, with a blockhash from our RPC.
+  /// Unsigned transaction for the wallet of [signer]. [instructions] gets
+  /// the account that pays the fee and any rent: [signer] itself with a
+  /// blockhash from our RPC, or, when [paysFeesInToken], the paymaster's
+  /// signer with a Kora blockhash plus a final [feeToken] payment.
+  /// [spend] is how much of each token the instructions take from (or,
+  /// negative, add to) the signer's ATA before the fee payment.
   Future<Uint8List> _build(
     String signer,
-    List<Instruction> instructions,
+    List<Instruction> Function(String payer) instructions, {
+    Map<String, int> spend = const {},
+  }) async {
+    final paymaster = this.paymaster;
+    final token = _feeToken;
+    final Uint8List tx;
+    if (paymaster != null && token != null) {
+      tx = await _buildPaid(paymaster, token, signer, instructions, spend);
+    } else {
+      final bh = await _net(
+        () => _rpc.getLatestBlockhash(commitment: commitment).value,
+      );
+      tx = serializeUnsigned(
+        instructions(signer),
+        feePayer: signer,
+        recentBlockhash: bh.blockhash,
+      );
+    }
+    if (tx.length > maxTxBytes) {
+      throw const DeadmanException(
+        'This is too much for one transaction. Split it into smaller steps '
+        '(for example, deposit some tokens afterwards).',
+        name: 'TxTooLarge',
+      );
+    }
+    return tx;
+  }
+
+  /// Solana's packet limit for a serialized transaction.
+  static const maxTxBytes = 1232;
+
+  Future<Uint8List> _buildPaid(
+    KoraClient paymaster,
+    String token,
+    String signer,
+    List<Instruction> Function(String payer) instructions,
+    Map<String, int> spend,
   ) async {
-    final bh = await _net(
-      () => _rpc.getLatestBlockhash(commitment: commitment).value,
+    final kora = (await _kora(paymaster.getPayerSigner)).signerAddress;
+    final blockhash = await _kora(paymaster.getBlockhash);
+    final decimals = await _mintDecimals(token);
+    final ixs = await _withoutExistingKoraAtas(instructions(kora), kora);
+    final estimate = await _kora(
+      () => paymaster.estimateTransactionFee(
+        transaction: base64Encode(
+          serializeUnsigned(ixs, feePayer: kora, recentBlockhash: blockhash),
+        ),
+        feeToken: token,
+        signerKey: kora,
+      ),
     );
+    final fee = estimate.feeInToken;
+    if (fee == null || fee < 0) {
+      throw DeadmanException(
+        'The fee service does not accept ${_tokenName(token)}. Switch '
+        'network fees back to SOL.',
+        name: 'KoraError',
+      );
+    }
+    final extra = spend[token] ?? 0;
+    final needed = fee + (extra > 0 ? extra : 0);
+    final held = await tokenBalance(signer, token) + (extra < 0 ? -extra : 0);
+    if (held < needed) {
+      final name = _tokenName(token);
+      throw DeadmanException(
+        'Not enough $name for the network fee: this needs '
+        '${_units(fee, decimals)} $name'
+        '${extra > 0 ? ' plus the ${_units(extra, decimals)} $name moved' : ''}'
+        ', the wallet holds ${_units(held, decimals)}. Add $name or switch '
+        'network fees back to SOL.',
+        name: 'NoFeeToken',
+      );
+    }
+    _paymasterPayers.add(kora);
     return serializeUnsigned(
-      instructions,
-      feePayer: signer,
-      recentBlockhash: bh.blockhash,
+      [
+        ...ixs,
+        if (fee > 0)
+          transferCheckedIx(
+            source: ataAddress(signer, token),
+            mint: token,
+            destination: ataAddress(estimate.paymentAddress, token),
+            authority: signer,
+            amount: fee,
+            decimals: decimals,
+          ),
+      ],
+      feePayer: kora,
+      recentBlockhash: blockhash,
     );
   }
+
+  /// Drops token-account creates paid by [kora] whose account already
+  /// exists: the paymaster prices a transaction by what it funds, so a
+  /// no-op create would move it into a dearer tier.
+  Future<List<Instruction>> _withoutExistingKoraAtas(
+    List<Instruction> ixs,
+    String kora,
+  ) async {
+    bool koraAta(Instruction ix) =>
+        ix.programId.toBase58() == ataProgramId &&
+        ix.accounts.first.pubKey.toBase58() == kora;
+    final atas = [
+      for (final ix in ixs)
+        if (koraAta(ix)) ix.accounts[1].pubKey.toBase58(),
+    ];
+    if (atas.isEmpty) return ixs;
+    final accounts = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            atas,
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    final existing = {
+      for (var i = 0; i < atas.length; i++)
+        if (accounts[i] != null) atas[i],
+    };
+    return [
+      for (final ix in ixs)
+        if (!koraAta(ix) ||
+            !existing.contains(ix.accounts[1].pubKey.toBase58()))
+          ix,
+    ];
+  }
+
+  static String _tokenName(String mint) =>
+      mint == AppConfig.usdcMint ? 'USDC' : 'token ${mint.substring(0, 4)}…';
+
+  /// [amount] base units as a decimal string, e.g. 12340 at 6 -> 0.01234.
+  static String _units(int amount, int decimals) {
+    if (decimals == 0) return '$amount';
+    final digits = amount.abs().toString().padLeft(decimals + 1, '0');
+    final whole = digits.substring(0, digits.length - decimals);
+    final frac = digits
+        .substring(digits.length - decimals)
+        .replaceFirst(RegExp(r'0+$'), '');
+    return '${amount < 0 ? '-' : ''}$whole${frac.isEmpty ? '' : '.$frac'}';
+  }
+
+  /// Even with a sponsor the guard pays its own pulse or lockdown when the
+  /// sponsor is down, so a new plan tops it up (later plans reuse a funded
+  /// guard). When the paymaster pays fees the wallet may hold no SOL: the
+  /// guard is then funded only if the wallet can spare it.
+  Future<bool> _shouldFundGuard(
+    String owner,
+    String guard,
+    int depositLamports,
+  ) async {
+    if (await balance(guard) >= AppConfig.guardFundingLamports) return false;
+    if (!paysFeesInToken) return true;
+    return await balance(owner) >=
+        AppConfig.guardFundingLamports + depositLamports;
+  }
+
+  Future<VaultState> _ownedVault(String owner, int planId) async {
+    final vault = await fetchVault(owner, planId);
+    if (vault == null) throw const DeadmanException('Plan not found');
+    return vault;
+  }
+
+  void _checkUnlocked(VaultState vault) {
+    if (vault.isLocked(_now())) {
+      throw DeadmanException.program(DeadmanException.vaultLocked);
+    }
+  }
+
+  /// [held] is the vault's balance of [mint] (null = withdrawable SOL).
+  static void _checkWithdrawable(
+    VaultState vault,
+    String? mint,
+    int amount,
+    int held,
+  ) {
+    if (amount > held) {
+      throw DeadmanException.program(DeadmanException.insufficientFunds);
+    }
+    if (amount > held - vault.committed(mint)) {
+      throw DeadmanException.program(DeadmanException.fundsCommitted);
+    }
+  }
+
+  static Instruction _transfer(String from, String to, int lamports) =>
+      SystemInstruction.transfer(
+        fundingAccount: _pk(from),
+        recipientAccount: _pk(to),
+        lamports: lamports,
+      );
 
   /// Signs with [signer] and sends, [signer] paying the fee. When
   /// [sponsored] and a [sponsor] is set, the sponsor's signer is fee payer

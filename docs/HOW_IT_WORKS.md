@@ -1,8 +1,8 @@
 # How Deadman works
 
-Every design choice, technology and user flow in the current build (program v2, 2026-10-02). Research behind the rails, with sources: [`docs/research/`](research/).
+Every design choice, technology and user flow in the current build (updated 2026-10-04: vesting plans, USDC, network fees in USDC). Research behind the rails, with sources: [`docs/research/`](research/).
 
-**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, and earns on the optional staking yield path.
+**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Next to these inheritance plans you can open _vesting plans_ that release SOL or USDC to someone linearly over time, whether you check in or not. Plans hold SOL and USDC, and an owner with no SOL at all can pay network fees in USDC. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, and earns on the optional staking yield path.
 
 ---
 
@@ -20,9 +20,10 @@ flowchart LR
   App --> Guard
   App --> Claim
   Program["Deadman program\n(Anchor, Solana)"]
-  SVW -- "owner txs: create, deposit,\nwithdraw, edit plan" --> Program
-  Guard -- "pulse, lockdown" --> Program
-  Keeper["Keeper bot\n(tool/keeper.dart)"] -- "execute due tiers" --> Program
+  SVW -- "owner txs: create, deposit,\nwithdraw, edit plan\n(fees in SOL)" --> Program
+  SVW -- "same txs, fees in USDC" --> Paymaster["Kora paymaster\n(gateway :8081)"] --> Program
+  Guard -- "pulse, lockdown" --> Sponsor["Kora sponsor\n(gateway :8080)"] --> Program
+  Keeper["Keeper bot\n(tool/keeper.dart)"] -- "execute due tiers,\nrelease vested amounts" --> Program
   Program -- "2% / 5% fee" --> Treasury["Treasury"]
   Program -- "Solana rail" --> Heir["Beneficiary wallet"]
   Program -- "private rails" --> Claim
@@ -41,12 +42,12 @@ The Solana program is the only component that holds funds. Everything else signs
 | -------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Chain          | **Solana**                                                                      | Seeker-native. A daily pulse costs ~0.000005 SOL, so frequent check-ins are free in practice.                                                                                                                                                                            |
 | Program        | **Anchor 1.1.2** (Rust)                                                         | Declarative account checks (signer, PDA seeds, `has_one`) remove the most common Solana bugs. It also generates the IDL the app encodes against. Pinocchio wasn't needed: the most expensive instruction uses ~14.5k compute units.                                      |
-| Program tests  | **LiteSVM**                                                                     | Runs the real compiled program in-process, with clock control to simulate "30 days of silence" in a millisecond. 17 tests.                                                                                                                                               |
+| Program tests  | **LiteSVM**                                                                     | Runs the real compiled program in-process, with clock control to simulate "30 days of silence" in a millisecond. 42 tests (`onchain/programs/deadman/tests/test_deadman.rs`).                                                                                                                                               |
 | Lint gate      | **Solana `program_autofixer`**                                                  | Static security pass. It found no issues on v2.                                                                                                                                                                                                                          |
 | App            | **Flutter 3.47** + Material 3                                                   | Your requirement. One codebase, ports later to any Android phone.                                                                                                                                                                                                        |
 | State          | **Riverpod 3**                                                                  | Async providers fit "fetch vault, refresh, invalidate after a transaction" without boilerplate.                                                                                                                                                                          |
 | Wallet         | **Mobile Wallet Adapter 2.2.0** through a **native Kotlin bridge**              | The only way to reach the Seed Vault is MWA → Seed Vault Wallet (keys never leave the secure element). The Dart MWA package (`solana_mobile_client`) has been unmaintained since May 2025, so we call the official Kotlin `clientlib-ktx` over a `MethodChannel`.        |
-| Solana client  | **`solana` Dart 0.32** + a hand-written Borsh codec                             | RPC and keypairs come from the package. Instruction and account encoding is written against the IDL and tested byte by byte (36 tests).                                                                                                                                  |
+| Solana client  | **`solana` Dart 0.32** + a hand-written Borsh codec                             | RPC and keypairs come from the package. Instruction and account encoding is written against the IDL and tested byte by byte (`test/solana/codec_test.dart`; 333 Flutter tests in all).                                                                                                                                  |
 | Device secrets | **flutter_secure_storage** (Android Keystore)                                   | Holds the guard key, the claim-key recovery phrase (claim keys derive from it) and salted SHA-256 PIN hashes.                                                                                                                                                            |
 | Biometrics     | **local_auth**                                                                  | A fingerprint gates every pulse.                                                                                                                                                                                                                                         |
 | Reminders      | **workmanager** + **flutter_local_notifications**                               | An hourly background check notifies you before a check-in is due. Android may delay it in Doze, which is acceptable: the on-chain timer is the source of truth, and each tier has a margin after the check-in deadline.                                                  |
@@ -54,7 +55,7 @@ The Solana program is the only component that holds funds. Everything else signs
 | Cloak rail     | **Cloak SDK 0.2.5** in a **headless WebView** (`flutter_inappwebview` 6.2 beta) | Every Cloak deposit needs a Groth16 zero-knowledge proof. The only prover is Cloak's TypeScript SDK (snarkjs + WebAssembly), and no Dart prover exists. We bundle it (3.4 MB) and run it in an invisible WebView on the phone, so the claim key never leaves the device. |
 | Yield          | **Jupiter Swap V2** (`/order` + `/execute`) into **JitoSOL**                    | Jupiter's current API returns an unsigned v0 transaction that MWA can sign, and supports an integrator referral fee. A direct Jito stake-pool deposit is cheaper for the user but earns the protocol nothing.                                                            |
 | Keeper         | **Dart CLI** (`tool/keeper.dart`)                                               | Reuses the app's own client code. It runs on any server or cron.                                                                                                                                                                                                         |
-| Fee sponsor    | **Kora 2.0.5** (Solana Foundation paymaster)                                    | Pays the network fee for guard-key check-ins and duress locks, so the phone needs no SOL. Allowlisted to the Deadman program only; owners still pay their own fees in SOL. See [`KORA.md`](KORA.md).                                                                     |
+| Fee sponsor    | **Kora 2.0.5** (Solana Foundation paymaster)                                    | Sponsor: pays the network fee for guard-key check-ins and duress locks, so the phone needs no SOL. Paymaster (opt-in): pays the fee and account rent of the owner's own transactions and charges USDC instead, in three price tiers (§3.8). Both sit behind a policy gateway. See [`KORA.md`](KORA.md). |
 
 ---
 
@@ -62,13 +63,15 @@ The Solana program is the only component that holds funds. Everything else signs
 
 ### 3.1 A vault PDA, not an "allowance"
 
-Native SOL has no allowance mechanism. An SPL token delegate can be revoked by a thief as easily as by the owner. Only funds held by a program-owned account (PDA `["vault", owner]`) can be protected by time rules and lockdowns. The vault holds SOL directly and any SPL token in its associated token accounts.
+Native SOL has no allowance mechanism. An SPL token delegate can be revoked by a thief as easily as by the owner. Only funds held by a program-owned account (PDA `["vault", owner, plan_id]`) can be protected by time rules and lockdowns. One owner can hold several independent plans, each its own vault. The vault holds SOL directly and any SPL token (USDC in the app) in its associated token accounts.
+
+The vault records who paid its rent (`rent_payer`: the owner, or the Kora paymaster). `close_vault` returns the rent to that payer and everything above rent to the owner.
 
 ### 3.2 Three keys, least privilege
 
 | Key                     | Lives in                  | Can                                                       | Cannot                    |
 | ----------------------- | ------------------------- | --------------------------------------------------------- | ------------------------- |
-| **Owner**               | Seed Vault (hardware)     | deposit, withdraw, edit the plan, rotate the guard, close | —                         |
+| **Owner**               | Seed Vault (hardware)     | deposit, withdraw, edit the plan, revoke a revocable vesting plan, rotate the guard, close | withdraw what a vesting plan owes |
 | **Guard**               | phone secure storage      | `pulse`, `lockdown`                                       | move funds, edit the plan |
 | **Guardian** (optional) | a trusted person's wallet | `lockdown` (rate-limited), co-sign early `unlock`         | move funds                |
 
@@ -90,21 +93,36 @@ asset (SOL or a token mint) · Fixed amount or Percent of the balance at release
 - **Who executes:** anyone. The destination is fixed in the rule, so the executor can't redirect anything. In practice it's the protocol keeper or a beneficiary.
 - **Fixed amounts** are capped at the balance. A tier with nothing to pay, or a payout too small to open the beneficiary's account (under ~0.00089 SOL), stays pending instead of being used up; the grace-period skip handles it if it never becomes payable. The editor refuses fixed SOL tiers under 0.001 SOL.
 
-### 3.4 Duress and lockdown
+### 3.4 Vesting plans
+
+A plan is either an **inheritance** plan (§3.3) or a **vesting** plan (`PlanKind::Vesting`, `onchain/programs/deadman/src/state.rs`). A vesting plan releases on a fixed schedule, whatever the owner does:
+
+```
+beneficiary · rail · asset (SOL or USDC in the app) · total · cliff · duration
+```
+
+- **Up to 8 schedules**, all starting at the plan's `start_at` (now, or a chosen date up to a year ahead). Each vests **linearly** from `start_at` over its `duration`; nothing is claimable before the `cliff` (`create_vesting`).
+- **Release:** anyone may call `release_vested_sol` / `release_vested_token`; the destination is fixed in the schedule. It pays what has vested and not yet been released, capped at the vault balance, minus **the same release fee as inheritance** (2% Solana rail, 5% private rails, rounded down). The keeper releases each schedule at most once per `--vest-interval` (default 1 day), and always once it is fully vested.
+- **Revocable or irrevocable**, chosen at creation. `revoke_vesting` (revocable plans only) stops future vesting; what had vested by then **stays claimable** by the beneficiary.
+- **Committed funds:** the owner may deposit at any time but can withdraw only what the plan does not owe (`FundsCommitted`). The plan closes only when nothing is owed (fully released, or revoked and the vested part released).
+- **No check-ins:** vesting plans are not part of "I'm alive" (`pulse` refuses them) and have no tiers to reset. They **are** covered by lockdown: the duress PIN and Panic lock them too, which blocks withdraw, revoke and close (releases continue).
+- **App:** Pulse tab → New plan → Vesting (`lib/ui/screens/vesting_editor.dart`), with a funding check and demo timings (2-minute cliff, 10-minute vesting). Each plan shows a `VestingPlanCard` (`lib/ui/screens/pulse_tab.dart`) with per-schedule progress and Release, Deposit, Withdraw and Revoke. Beneficiaries see the schedule in Family Circle and claim with **Claim vested** (`lib/ui/screens/circle_tab.dart`).
+
+### 3.5 Duress and lockdown
 
 `lockdown` freezes withdrawals, plan edits and closing for `lock_secs` (1 minute to 30 days, depending on your cadence preset). It **does not** stop inheritance: if you are coerced and then disappear, the tiers still fire. The duress PIN signs `lockdown` with the guard key in the background, while the app keeps looking normal. Withdrawals fail with a fake "Seed Vault timed out", so the attacker never sees a lock screen. Plan edits are blocked during a lockdown, so a coercer can't redirect the payouts to themselves.
 
 **Guardian rate limit:** when a guardian's lockdown expires, they can't lock again for another `lock_secs`. That guarantees you an unlocked window to remove a guardian who turned hostile.
 
-### 3.5 Fees (your new pricing policy)
+### 3.6 Fees (your new pricing policy)
 
-- **No subscription.** Creating a vault, depositing, checking in and locking are free (Solana network fees only).
-- **Fee on release only**, charged on-chain from each payout: **2% on the Solana rail, 5% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
+- **No subscription.** Creating a vault, depositing, checking in and locking are free (Solana network fees only, paid in SOL, or in USDC through the paymaster, §3.8).
+- **Fee on release only**, charged on-chain from each payout, inheritance tier or vesting release: **2% on the Solana rail, 5% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
 - **Why the private rails cost more:** the beneficiary gets privacy and cross-chain delivery, and the payout also carries a 0.003 SOL gas stipend so their claim key can route the funds.
 - **Why the fee lives in the program, not with the rail operators:** we measured NEAR Intents' `appFees` live. The fee you set is **split 50/50 with 1Click** and capped at 5% total, so a Deadman 5% through NEAR is impossible (2.5% maximum), and the fee would land inside NEAR, not in our Solana treasury. Charging on-chain is predictable and enforced the same way on every rail.
 - If the treasury can't accept a tiny SOL fee (rent rules), the fee is waived to the beneficiary instead of blocking the payout.
 
-### 3.6 Yield (Earn)
+### 3.7 Yield (Earn)
 
 The program does no lending or staking calls (no CPI), so there is no extra smart-contract risk inside the vault. Instead:
 
@@ -118,6 +136,19 @@ The program does no lending or staking calls (no CPI), so there is no extra smar
 - **The normal 2–5% release fee**, which now applies to a balance that grew with the yield.
 
 **Risks:** JitoSOL can trade below SOL in a crisis; swaps have slippage; and a 0.5% referral equals about 38 days of yield, so heavy fees make Earn worse than holding SOL for short periods.
+
+### 3.8 USDC and network fees in USDC
+
+- **USDC in plans.** `AppConfig.usdcMint` (`lib/core/config.dart`) is Circle's devnet USDC by default (mainnet USDC on a mainnet build), overridable with `--dart-define=USDC_MINT=...`. Each plan has its own USDC balance: deposit and withdraw it per plan, write USDC tiers in the rules editor, and fund USDC vesting schedules. Amounts are entered and shown in USDC units (6 decimals).
+- **Network fees in USDC** (opt-in, Security tab → "Pay network fees with: SOL | USDC", `lib/state/fee_settings.dart`). The wallet then needs no SOL: a Kora paymaster pays the fee (and rent where needed) and the transaction ends with a USDC payment to it. Kora prices per node, so there are three tiers, chosen by the gateway from what Kora funds:
+
+| Tier    | Price     | Kora funds                     | Example                                          |
+| ------- | --------- | ------------------------------ | ------------------------------------------------ |
+| plan    | 3.00 USDC | a new vault's rent + ≤ 2 ATAs  | create a plan (rent comes back to Kora on close) |
+| account | 1.00 USDC | ≤ 2 token accounts             | first USDC deposit, a release opening the heir's ATA |
+| basic   | 0.02 USDC | the network fee only           | edits, check-ins, withdrawals, later releases, close |
+
+The client drops Kora-paid ATA creates for ATAs that already exist, so each transaction lands in the cheapest tier that fits. Check-ins by the guard key stay free through the sponsor either way. Details and a devnet end-to-end run: [`KORA.md`](KORA.md).
 
 ---
 
@@ -160,20 +191,20 @@ sequenceDiagram
   U->>A: choose PIN, then a different duress PIN
   U->>A: Build release plan (tiers, cadence, deposit)
   A->>A: create guard key in secure storage
-  A->>W: sign 1 tx: create_vault + deposit (+ fund guard 0.01 SOL only without Kora)
+  A->>W: sign 1 tx: create_vault + deposit (+ fund guard 0.01 SOL only without Kora)<br/>(fees in USDC: Kora pays fee + rent, last ix pays 3 USDC)
   W-->>A: signed
   A->>P: send
 ```
 
 ### 5.2 Daily pulse
 
-Open the app → enter PIN → tap **I'm alive** → fingerprint → the guard key signs `pulse` (no wallet prompt) → the streak goes up and every pending tier's clock restarts. A reminder notification arrives when a check-in is due.
+Open the app → enter PIN → tap **I'm alive** → fingerprint → the guard key signs `pulse` (no wallet prompt) for every inheritance plan → the streak goes up and every pending tier's clock restarts. Vesting plans are not checked in. A reminder notification arrives when a check-in is due.
 
 ### 5.3 Duress
 
 Forced to open the app → type the **duress PIN** → the app opens normally while the guard key silently sends `lockdown` → withdrawals spin and fail with "Seed Vault timed out" → the vault stays frozen for the lock period, and the attacker can't edit the plan. If the lock can't be sent right away (no network, sponsor down), the app keeps retrying in the background until it lands, without showing anything. Receiving profiles and private routing are disabled in a duress session.
 
-**Panic** (Security tab) locks every plan this phone guards and says exactly which plans it could not lock; for those it offers to lock them with your wallet instead.
+**Panic** (Security tab) locks every plan this phone guards, vesting plans included, and says exactly which plans it could not lock; for those it offers to lock them with your wallet instead.
 
 ### 5.4 Release (you went silent)
 
@@ -203,7 +234,11 @@ On the new phone: connect the same Seed Vault wallet, then Security → **Move g
 
 - **Solana rail:** give them your wallet address.
 - **Private rails:** Security → Receive privately, paste your Zcash or Cloak destination, and send them the claim code. The first time, the app shows a **12-word recovery phrase**: your claim keys are derived from it, so you can restore them on a new phone. Write it down; without it, a lost phone means payouts to those claim keys are lost.
-- **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns.
+- **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns. For a vesting plan it shows each schedule's progress, whether it is revocable or revoked, and a **Claim vested** button for what has vested.
+
+### 5.7 Vesting plan
+
+Pulse tab → **New plan** → **Vesting** → name, start (now or a date), revocable or not, then up to 8 schedules (beneficiary or claim code, SOL or USDC, total, cliff, duration) and the initial deposit; the editor warns if the deposit does not cover the totals → one wallet signature (`create_vesting` + deposits). From then on the keeper, the owner (**Release**) or the beneficiary (**Claim vested**) releases what has vested. The owner can top up, withdraw only the uncommitted part, revoke (if revocable) and close once nothing is owed.
 
 ---
 
@@ -225,6 +260,9 @@ An honest note, since you said you know the risks: releases are rare by nature (
 | ----------------------------------------------- | ---------------------- | ---------------------------------------------------- |
 | Vault, pulse, streak, duress lockdown, guardian | yes                    | yes                                                  |
 | Release plan with Solana-rail tiers, keeper     | yes                    | yes                                                  |
+| Vesting plans (SOL, USDC), keeper releases      | yes                    | yes                                                  |
+| USDC deposits, withdrawals and tiers            | yes (Circle devnet USDC or `USDC_MINT`) | yes                                 |
+| Network fees in USDC (Kora paymaster)           | yes, with `KORA_PAYMASTER_URL` (verified end to end on 2026-10-04) | needs a mainnet paymaster (margin pricing) |
 | Zcash rail routing                              | shows "mainnet only"   | yes (unproven with real funds)                       |
 | Cloak rail routing                              | shows "mainnet only"   | yes (unproven with real funds)                       |
 | Earn                                            | shows "mainnet only"   | yes                                                  |
@@ -236,5 +274,7 @@ An honest note, since you said you know the risks: releases are rare by nature (
 - **Private token payouts:** the app's "Route privately" forwards SOL only; USDC/USDT paid to a claim key stays there until that is wired.
 - **Token-2022:** the program supports it (including transfer hooks), but the app's client is classic SPL only.
 - **Leftover funds:** tokens or SOL arriving after the last tier has fired stay in the vault.
+- **Underfunded vesting:** a release pays at most what the vault holds; the editor and the plan card show the shortfall, and the owner can top up.
+- **USDC fees need the paymaster:** on devnet it runs on the developer's machine (same Wi-Fi). Kora-funded token accounts cost Kora rent it does not get back, which is why the account tier costs 1 USDC.
 - **Stolen guard key:** it can delay inheritance by at most a year after the owner's last wallet action, and not at all once a tier has released. Rotate it if your phone is lost.
 - **NEAR Intents and Cloak** are third-party operators: they can see the claim key, amounts and IP, and NEAR has held funds for compliance before.

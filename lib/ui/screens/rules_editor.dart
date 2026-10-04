@@ -2,26 +2,20 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:solana/solana.dart';
 
 import '../../solana/deadman_api.dart';
 import '../../core/config.dart';
 import '../../state/actions.dart';
+import '../../state/assets.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
+import '../../state/vesting.dart' show isAddress, parseBeneficiary;
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/feedback.dart';
 
-bool isAddress(String s) {
-  try {
-    Ed25519HDPublicKey.fromBase58(s.trim());
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
+export '../../state/vesting.dart' show isAddress;
 
 enum _Unit {
   minutes(60, 'min'),
@@ -54,9 +48,7 @@ class _Draft {
     mode: r.mode,
     amount: r.mode == AmountMode.percent
         ? '${r.amount / 100}'
-        : r.mint == null
-        ? sol(r.amount, digits: 4)
-        : '${r.amount}',
+        : amountInput(r.amount, r.mint),
   );
 
   final TextEditingController beneficiary;
@@ -69,12 +61,10 @@ class _Draft {
 
   /// Accepts a plain address or a claim code like `zcash:<address>`.
   void applyClaimCode() {
-    final parts = beneficiary.text.trim().split(':');
-    if (parts.length != 2) return;
-    final rail = Rail.values.where((r) => r.name == parts[0]).firstOrNull;
+    final (who, rail) = parseBeneficiary(beneficiary.text);
     if (rail == null) return;
     this.rail = rail;
-    beneficiary.text = parts[1];
+    beneficiary.text = who;
   }
 
   /// Lenient parse for the live share preview; null while incomplete.
@@ -88,9 +78,7 @@ class _Draft {
           ? null
           : (pct * 100).round();
     } else {
-      final v = mint == null
-          ? parseSol(this.amount.text)
-          : int.tryParse(this.amount.text.trim());
+      final v = parseAmount(this.amount.text, mint);
       amount = v == null || v <= 0 ? null : v;
     }
     if (amount == null) return null;
@@ -124,11 +112,9 @@ class _Draft {
       }
       amount = (pct * 100).round();
     } else {
-      final v = mint == null
-          ? parseSol(this.amount.text)
-          : int.tryParse(this.amount.text.trim());
+      final v = parseAmount(this.amount.text, mint);
       if (v == null || v <= 0) {
-        error('Check each fixed amount');
+        error('Check each fixed amount (in ${unitLabel(mint)})');
         return null;
       }
       if (mint == null && v < 1000000) {
@@ -197,10 +183,13 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
 
   /// Today's balance of an asset, for turning fixed tiers into shares.
   int? _balanceOf(String? mint) {
-    if (mint != null) return null;
-    return _creating
-        ? parseSol(_deposit.text)
-        : widget.vault!.withdrawableLamports;
+    if (mint == null) {
+      return _creating
+          ? parseSol(_deposit.text)
+          : widget.vault!.withdrawableLamports;
+    }
+    if (_creating || mint != AppConfig.usdcMint) return null;
+    return ref.read(planUsdcProvider(widget.vault!.address)).value;
   }
 
   /// Assets whose last tier leaves something in the vault.
@@ -725,9 +714,7 @@ class _TierCard extends StatelessWidget {
                             decoration: InputDecoration(
                               suffixText: d.mode == AmountMode.percent
                                   ? '% of remaining'
-                                  : d.mint == null
-                                  ? 'SOL'
-                                  : 'units',
+                                  : unitLabel(d.mint),
                             ),
                           ),
                         ),
@@ -763,30 +750,34 @@ class _TierCard extends StatelessWidget {
   }
 }
 
-/// SOL by default; any SPL mint (e.g. USDC, JitoSOL) the vault holds.
+/// Presets (SOL, USDC, JitoSOL on mainnet) plus any other SPL mint the
+/// vault holds.
 class _AssetPicker extends StatelessWidget {
   const _AssetPicker({required this.mint, required this.onChanged});
 
   final String? mint;
   final ValueChanged<String?> onChanged;
 
-  Future<void> _pick(BuildContext context) async {
-    final controller = TextEditingController(text: mint ?? '');
+  bool get _custom => !presetAssets.any((a) => a.mint == mint);
+
+  Future<void> _pickOther(BuildContext context) async {
+    final controller = TextEditingController(text: _custom ? mint : '');
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: DmColors.surface,
-        title: const Text('Asset'),
+        title: const Text('Other token'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(
-            labelText: 'Token mint (empty = SOL)',
+            labelText: 'Token mint address',
+            helperText: 'Fixed amounts for other tokens are in base units.',
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, ''),
-            child: const Text('Use SOL'),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
@@ -795,19 +786,32 @@ class _AssetPicker extends StatelessWidget {
         ],
       ),
     );
-    if (result == null) return;
-    if (result.isEmpty) return onChanged(null);
+    if (result == null || result.isEmpty) return;
     if (!isAddress(result)) {
       if (context.mounted) toast(context, 'Invalid mint address', error: true);
       return;
     }
-    onChanged(result);
+    onChanged(knownAsset(result)?.mint ?? result);
   }
 
   @override
-  Widget build(BuildContext context) => TextButton.icon(
-    onPressed: () => _pick(context),
-    icon: const Icon(Icons.token_outlined, size: 18),
-    label: Text(mint == null ? 'Asset: SOL' : 'Asset: ${short(mint!)}'),
+  Widget build(BuildContext context) => Wrap(
+    spacing: 8,
+    runSpacing: 4,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      const Icon(Icons.token_outlined, size: 18, color: DmColors.muted),
+      for (final a in presetAssets)
+        ChoiceChip(
+          label: Text(a.symbol),
+          selected: mint == a.mint,
+          onSelected: (_) => onChanged(a.mint),
+        ),
+      ChoiceChip(
+        label: Text(_custom ? 'Other: ${short(mint!)}' : 'Other token'),
+        selected: _custom,
+        onSelected: (_) => _pickOther(context),
+      ),
+    ],
   );
 }

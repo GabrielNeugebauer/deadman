@@ -1,13 +1,33 @@
-# Kora fee sponsor for Deadman (devnet)
+# Kora fee sponsor and USDC paymaster for Deadman (devnet)
 
-Deadman runs one [Kora](https://github.com/solana-foundation/kora) 2.0.5 node, the **sponsor**, so that the phone's guard key never needs SOL. A small gateway (`tool/kora_gateway.dart`) is the only public entry to it (audit M-4):
+Deadman runs [Kora](https://github.com/solana-foundation/kora) 2.0.5 nodes that share one signer:
 
-| Process     | Port | Auth                       | Purpose                                                                                     |
-| ----------- | ---- | -------------------------- | ------------------------------------------------------------------------------------------- |
-| **gateway** | 8080 | none (public)              | Accepts only guard-signed `pulse` / `lockdown`, rate-limits them, forwards with the API key |
-| **sponsor** | 8090 | `x-api-key` (gateway only) | Kora, `free` pricing: simulates, co-signs and sends. Pays the network fee                   |
+- The **sponsor** pays the guard key's `pulse` / `lockdown` for free, so the phone's guard key never needs SOL.
+- The **paymaster** lets an owner who holds no SOL pay network fees in USDC (opt-in: Security tab, "Pay network fees with: SOL | USDC", `lib/state/fee_settings.dart`). It covers the network fee and, depending on the transaction, the rent of a new vault and of up to 2 token accounts. Kora's `fixed` pricing has one price per node, so there are **three paymaster nodes, one per price tier**, and the gateway picks the node by what Kora funds (see [Pricing](#pricing-paymaster)).
 
-Owners pay their own fees in SOL from their wallet; there is no token fee payment (product decision, 2026-10-03). The program still lets a separate account fund `create_vault` rent, so a paymaster can be added later without a program change.
+A small gateway (`tool/kora_gateway.dart`, one process) is the only public entry to any node (audit M-4):
+
+| Process                         | Port | Auth                       | Purpose                                                                                                    |
+| ------------------------------- | ---- | -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **gateway (sponsor)**           | 8080 | none (public)              | Accepts only guard-signed `pulse` / `lockdown`, rate-limits them, forwards with the API key                |
+| **gateway (paymaster)**         | 8081 | none (public)              | Accepts owner-signed Deadman, deposit and payment instructions ending in a USDC payment; picks the tier    |
+| **sponsor**                     | 8090 | `x-api-key` (gateway only) | Kora, `free` pricing: simulates, co-signs and sends. Pays the network fee                                  |
+| **paymaster plan tier**         | 8091 | `x-api-key` (gateway only) | Kora, fixed **3.00 USDC**. Pays the fee, one new vault's rent and up to 2 ATAs                             |
+| **paymaster account tier**      | 8092 | `x-api-key` (gateway only) | Kora, fixed **1.00 USDC**. Pays the fee and up to 2 ATAs                                                   |
+| **paymaster basic tier**        | 8093 | `x-api-key` (gateway only) | Kora, fixed **0.02 USDC**. Pays the network fee only (`allow_create_account = false`)                      |
+
+Owners can still pay in SOL from their own wallet and skip Kora entirely (the default). The paymaster was added on 2026-10-04 and replaces the 2026-10-03 decision that there would be no token fee payment.
+
+App URLs (same Wi-Fi): sponsor `http://<LAN>:8080`, paymaster `http://<LAN>:8081`. `kora_start.sh` prints both. The app reads them at build time:
+
+```bash
+flutter build apk \
+  --dart-define=KORA_SPONSOR_URL=http://<LAN>:8080 \
+  --dart-define=KORA_PAYMASTER_URL=http://<LAN>:8081 \
+  --dart-define=USDC_MINT=<test mint>      # optional; default is Circle devnet USDC
+```
+
+Without `KORA_PAYMASTER_URL` the USDC option is disabled and owners pay in SOL. `USDC_MINT` (`AppConfig.usdcMint`, `lib/core/config.dart`) must be a mint the paymaster accepts: Circle devnet USDC by default, or the `TEST_USDC_MINT` in `kora/.env`.
 
 - Program: `ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL` (devnet)
 - Fee payer / signer: `HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL`
@@ -19,21 +39,28 @@ Owners pay their own fees in SOL from their wallet; there is no token fee paymen
                                    │  policy + rate limits          │
                                    │  getMultipleAccounts ──────────┼──────────────────────▶ RPC
                                    kora/gateway-usage.json      Redis :6379 (localhost)
- owner wallet ── everything else (pays its own SOL) ───────────────────────────────────────▶ RPC
+ owner wallet ── tx ending in a USDC payment ──▶ gateway :8081 ── x-api-key ──┬─▶ plan    :8091 (3.00 USDC) ─┐
+                                   │  policy + rate limits + tier             ├─▶ account :8092 (1.00 USDC) ─┼─ co-sign ─▶ RPC
+                                   kora/paymaster-*.json                      └─▶ basic   :8093 (0.02 USDC) ─┘
+                                                                     payment ATA BmGw5huq…CJ4L (USDC)
+ owner wallet ── or anything, paying its own SOL ──────────────────────────────────────────▶ RPC
 ```
 
 ## Files
 
-| Path                                     | Purpose                                                                                                          |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `kora/sponsor.toml`                      | Sponsor node config                                                                                              |
-| `kora/signers.toml`                      | Signer pool: one memory signer, key read from `KORA_SIGNER_PRIVATE_KEY`                                          |
-| `kora/.env`                              | **Gitignored.** `KORA_SIGNER_PRIVATE_KEY`, `RPC_URL`, `SPONSOR_API_KEY` (generated by `kora_start.sh` if absent) |
-| `tool/kora_gateway.dart`                 | Public gateway: method allowlist, transaction policy, rate limits                                                |
-| `kora/gateway-usage.json`                | **Gitignored.** Gateway rate-limit timestamps (rolling 24 h)                                                     |
-| `kora/fee-payer.json`                    | **Gitignored.** Keypair file for the fee payer                                                                   |
-| `kora/logs/*.log`, `kora/*.pid`          | Runtime files (gitignored): `sponsor.log`, `gateway.log`                                                         |
-| `scripts/kora_start.sh` / `kora_stop.sh` | Start or stop Redis, the sponsor and the gateway                                                                 |
+| Path                                                       | Purpose                                                                                                                                                                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kora/sponsor.toml`                                        | Sponsor node config                                                                                                                                                                                                             |
+| `kora/paymaster.toml`                                      | Paymaster config (plan tier). `kora_start.sh` (`render_tier`) renders `kora/paymaster-{plan,account,basic}.run.toml` (gitignored) with each tier's price, outflow cap, `allow_create_account` and metrics port, plus `TEST_USDC_MINT` when set |
+| `kora/signers.toml`                                        | Signer pool: one memory signer, key read from `KORA_SIGNER_PRIVATE_KEY`                                                                                                                                                         |
+| `kora/.env`                                                | **Gitignored.** `KORA_SIGNER_PRIVATE_KEY`, `RPC_URL`, `SPONSOR_API_KEY` and `PAYMASTER_API_KEY` (both generated by `kora_start.sh` if absent), optional `TEST_USDC_MINT`                                                        |
+| `tool/kora_gateway.dart`                                   | Public gateway (both ports): method allowlists, transaction policies, rate limits, paymaster tier routing (`PaymasterTier`)                                                                                                     |
+| `kora/gateway-usage.json`                                  | **Gitignored.** Sponsor rate-limit timestamps (rolling 24 h)                                                                                                                                                                    |
+| `kora/paymaster-usage.json`, `kora/paymaster-creates.json` | **Gitignored.** Paymaster rate-limit timestamps: all paid transactions, and Kora-funded vaults                                                                                                                                  |
+| `kora/fee-payer.json`                                      | **Gitignored.** Keypair file for the fee payer                                                                                                                                                                                  |
+| `kora/logs/*.log`, `kora/*.pid`                            | Runtime files (gitignored): `sponsor.log`, `paymaster.log` (plan tier), `paymaster-account.log`, `paymaster-basic.log`, `gateway.log`                                                                                           |
+| `scripts/kora_start.sh` / `kora_stop.sh`                   | Start or stop Redis, the four Kora nodes and the gateway                                                                                                                                                                        |
+| `tool/e2e_usdc_vesting.dart`                               | Devnet end-to-end check: a 0-SOL owner creates, releases and closes a USDC vesting plan, paying fees in USDC ([results](#usdc-paymaster-end-to-end-2026-10-04-devnet))                                                          |
 
 ## Install
 
@@ -63,18 +90,25 @@ The memory signer accepts a base58 secret, a `[1,2,...]` u8 array, or a path to 
 ## Run
 
 ```bash
-scripts/kora_start.sh        # Redis, the sponsor on :8090 and the gateway on :8080; idempotent
-scripts/kora_stop.sh         # stops the gateway and the sponsor
+scripts/kora_start.sh        # Redis, sponsor :8090, paymaster tiers :8091-8093 (+ initialize-atas), gateway :8080/:8081; idempotent
+scripts/kora_stop.sh         # stops the gateway and all Kora nodes
 scripts/kora_stop.sh --all   # also stops Redis (counters persist in the `deadman-kora-redis` volume)
 ```
 
-- Kora 2.0.5 always binds `0.0.0.0` (hard-coded in `run_rpc_server`). Only `--port` is configurable, so the API key is what closes :8090: any call without it gets HTTP 401 (only the `liveness` method and `GET /metrics` bypass it). Phones use the gateway URL the script prints (`KORA_SPONSOR_URL=http://<lan-ip>:8080`). They must be on the same Wi-Fi, and the host firewall must allow TCP 8080. Do not open 8090.
-- The gateway runs with `dart run tool/kora_gateway.dart` in its own process group (`kora/gateway.pid`), logs to `kora/logs/gateway.log`, and reads `SPONSOR_API_KEY`, `RPC_URL`, `GATEWAY_PORT`, `KORA_UPSTREAM`, `GATEWAY_STATE`, `GATEWAY_PER_VAULT`, `GATEWAY_PER_SIGNER`, `GATEWAY_GLOBAL` and `GATEWAY_PER_IP_MINUTE` from the environment. The app needs no API key: the gateway adds it.
-- CLI shape: `kora --config <toml> --rpc-url <url> rpc start --signers-config <toml> --port <n>`. The global flags come before `rpc`, and `RPC_URL` is also read from the environment.
-- `KORA_API_KEY` and `KORA_HMAC_SECRET` in the environment override `[kora.auth]`. The start script clears both and sets `KORA_API_KEY` from `SPONSOR_API_KEY`; on first run it appends a random `SPONSOR_API_KEY` (`openssl rand -hex 32`) to `kora/.env`. Never print it.
-- Check a config: `kora --config kora/sponsor.toml --rpc-url $RPC_URL config validate-with-rpc --signers-config kora/signers.toml`
+- Kora 2.0.5 always binds `0.0.0.0` (hard-coded in `run_rpc_server`). Only `--port` is configurable, so the API key is what closes :8090-8093: any call without it gets HTTP 401 (only the `liveness` method and `GET /metrics` bypass it). Phones use the gateway URLs the script prints (`KORA_SPONSOR_URL=http://<lan-ip>:8080`, paymaster `http://<lan-ip>:8081`). They must be on the same Wi-Fi, and the host firewall must allow TCP 8080 and 8081. Do not open 8090-8093.
+- The gateway runs with `dart run tool/kora_gateway.dart` in its own process group (`kora/gateway.pid`) and logs to `kora/logs/gateway.log`. It reads these variables from the environment:
+  - Sponsor: `SPONSOR_API_KEY`, `RPC_URL`, `GATEWAY_PORT`, `KORA_UPSTREAM`, `GATEWAY_STATE`, `GATEWAY_PER_VAULT`, `GATEWAY_PER_SIGNER`, `GATEWAY_GLOBAL`, `GATEWAY_PER_IP_MINUTE`.
+  - Paymaster (the 8081 listener exists only when `PAYMASTER_API_KEY` is set): `PAYMASTER_API_KEY`, `PAYMASTER_PORT`, `PAYMASTER_UPSTREAM` (plan tier, :8091), `PAYMASTER_ACCOUNT_UPSTREAM` (:8092), `PAYMASTER_BASIC_UPSTREAM` (:8093), `PAYMASTER_STATE`, `PAYMASTER_PER_OWNER`, `PAYMASTER_GLOBAL`, `PAYMASTER_CREATES_STATE`, `PAYMASTER_CREATES_PER_OWNER`, `PAYMASTER_CREATES_GLOBAL`.
 
-## Gateway policy (`tool/kora_gateway.dart`)
+  The app needs no API key: the gateway adds it.
+
+- On start, the paymaster listener reads each tier node's `getConfig` to get its fixed price and `allowed_spl_paid_tokens` (`loadPaymentAtas`). It reads each mint's token program and decimals, converts every tier price to each mint's decimals, and derives the payment ATAs from `getPayerSigner.payment_address`. All tiers must accept the same mints. Change prices only in `kora/paymaster.toml` (plan) and `render_tier` in `kora_start.sh` (account, basic), then restart.
+- CLI shape: `kora --config <toml> --rpc-url <url> rpc start --signers-config <toml> --port <n>`. The global flags come before `rpc`, and `RPC_URL` is also read from the environment.
+- `KORA_API_KEY` and `KORA_HMAC_SECRET` in the environment override `[kora.auth]`. The start script clears both and sets `KORA_API_KEY` per node, from `SPONSOR_API_KEY` or `PAYMASTER_API_KEY` (shared by the three paymaster tiers). On first run it appends a random key (`openssl rand -hex 32`) for each to `kora/.env`. Never print them. Kora's startup validation still warns "No authentication configured", because it checks the TOML before the env override. The 401 checks below show the key is enforced.
+- Check a config: `kora --config kora/sponsor.toml --rpc-url $RPC_URL config validate-with-rpc --signers-config kora/signers.toml` (the same for each `kora/paymaster-*.run.toml`)
+- Payment ATAs: `kora --config kora/paymaster-plan.run.toml --rpc-url $RPC_URL rpc initialize-atas --signers-config kora/signers.toml` creates the signer's ATA for every `allowed_spl_paid_tokens` mint (fee payer pays the ATA rent). `kora_start.sh` runs it on every start; once the ATAs exist it does nothing. Devnet USDC ATA: `BmGw5huqX9EaddNKjPHeC8Gp5yBkdPSScd1tejhMCJ4L`.
+
+## Sponsor gateway policy (:8080, `tool/kora_gateway.dart`)
 
 Kora cannot filter by instruction, and its usage limit is skipped when Kora is the only signer (audit M-4). The gateway closes both:
 
@@ -90,14 +124,71 @@ Kora cannot filter by instruction, and its usage limit is skipped when Kora is t
 - Worst case drain: 2 000 × 50 000 lamports = 0.1 SOL per day. A normal guard pulse costs 10 000 lamports.
 - Reset a vault's counter: stop the gateway, edit `kora/gateway-usage.json`, then start it again.
 
+## Paymaster gateway policy (:8081)
+
+Methods: `getPayerSigner` (cached), `getBlockhash` (cached 1 s), `estimateTransactionFee` and `signAndSendTransaction`. Anything else gets `-32601`. Only `{transaction}` is forwarded, plus `fee_token` for estimates. `signAndSendTransaction` is forwarded only if all of these hold (`validatePaymasterTx`, which is pure and covered by `test/tool/kora_gateway_test.dart`):
+
+- Exactly 2 required signatures: account 0 is the Kora payer and account 1 is the owner. The owner's ed25519 signature must verify, so nobody can spend an owner's quota or Kora's rent float with unsigned copies.
+- Legacy or v0 with no lookup tables, 1 to 12 instructions. Each top-level instruction is one of the following:
+  - ComputeBudget `SetComputeUnitLimit` (≤ 400 000) or `SetComputeUnitPrice`, each at most once. The fee, 2 × 5 000 + ceil(limit × price / 10⁶), must be ≤ 50 000 lamports.
+  - Associated Token `CreateIdempotent` paid by the owner or by Kora. Kora may be only its payer, and at most 2 Kora-paid ATAs per transaction (`maxKoraAtas`).
+  - SPL Token or Token-2022 `TransferChecked` / `Transfer`, single signer, with the owner as authority.
+  - System `Transfer` from the owner (a SOL deposit).
+  - A Deadman instruction from the allowlist: `create_vault`, `create_vesting`, `update_policy`, `set_guard`, `pulse`, `lockdown`, `withdraw_sol`, `withdraw_token`, `execute_sol_rule`, `execute_token_rule`, `skip_rule`, `release_vested_sol`, `release_vested_token`, `revoke_vesting`, `close_vault`. Each has its exact IDL account count (the `*_token` ones allow up to 8 extra Token-2022 hook accounts), and the owner is its first account. `init_config`, `set_config` and `unlock` (3 signers) are refused.
+- Kora appears only as the fee payer, as the `payer` of `create_vault` / `create_vesting` (at most one per transaction, which bounds the rent outflow to one vault), as the payer of at most 2 ATA creates, or as the `rent_payer` of `close_vault`, where it is a lamport destination only. It is never a token account, token authority, wallet, System transfer source or destination, or any other Deadman account.
+- **Tier.** What Kora funds picks the tier and the Kora node (`PaymasterTier`, `upstreamFor`): a Kora-paid create → **plan**; otherwise any Kora-paid ATA → **account**; otherwise **basic**.
+- The **last** instruction is the payment: a token transfer to a paymaster payment ATA, with that ATA's mint and token program, of at least the tier's price in that mint's decimals (3 000 000, 1 000 000 or 20 000 base units of USDC). Kora checks the payment value again.
+- Rate limits over a rolling 24 h, persisted in `kora/paymaster-*.json`:
+  - 60 paid transactions per owner and 2 000 in total.
+  - Kora-funded vaults separately: 3 per owner and 20 in total, which bounds the locked vault-rent float to about 0.15 SOL per day.
+
+  Each forwarded transaction counts, even when Kora then rejects it.
+
+- `estimateTransactionFee` runs the same structural checks but does not need the payment or a valid signature: the client prices first, then appends the payment and signs. `fee_token` must be an accepted mint. The estimate goes to the tier's node, and the gateway raises the returned `fee_in_token` to the tier price (`minFee`), because Kora's Mock oracle may quote less for a mint other than the configured price token (see `TEST_USDC_MINT` below).
+
+Client flow (`DeadmanClient._buildPaid`, `lib/solana/deadman_client.dart`): call `getPayerSigner` and `getBlockhash`. Build the message with Kora as fee payer and, where the app lets Kora fund accounts, Kora as `payer` of `create_vault` / `create_vesting` and of new ATAs (vault ATA on a USDC deposit, beneficiary and treasury ATAs on a token release). Drop every Kora-paid ATA create whose ATA already exists (`_withoutExistingKoraAtas`), so the owner lands in the cheapest tier that fits. Call `estimateTransactionFee` with `fee_token` = USDC to get `fee_in_token`, check the wallet holds that plus any USDC moved, append `transferCheckedIx(owner USDC ATA → payment ATA, fee_in_token, 6)` as the last instruction, have the owner sign, and call `signAndSendTransaction` once.
+
+## Pricing (paymaster)
+
+Kora's `fixed` mode charges one amount per node and cannot price `create_vault` differently from a `pulse`. Deadman therefore runs one node per tier, and the gateway routes each transaction by what Kora funds:
+
+| Tier        | Port | Price          | Kora funds                                    | `max_allowed_lamports` | `allow_create_account` | Typical transactions                                                       |
+| ----------- | ---- | -------------- | --------------------------------------------- | ---------------------- | ---------------------- | -------------------------------------------------------------------------- |
+| **plan**    | 8091 | **3.00 USDC**  | one new vault's rent + up to 2 ATAs + the fee | 11 500 000             | true                   | `create_vault` / `create_vesting` (with a USDC deposit into a new vault ATA) |
+| **account** | 8092 | **1.00 USDC**  | up to 2 ATAs + the fee                        | 4 150 000              | true                   | first USDC deposit into a plan, a token release that opens the heir's ATA  |
+| **basic**   | 8093 | **0.02 USDC**  | the network fee only                          | 60 000                 | false                  | edits, pulses, withdrawals, later releases, `close_vault`                  |
+
+- Vault size: `8 + Vault::INIT_SPACE` = 8 + 1 310 = **1 318 bytes**. That is 32 owner + 2 plan_id + 32 guard + 33 guardian + 8 × 8 timestamps and counters + 2 × 4 streaks + 1 kind + 8 start_at + 1 revocable + 8 revoked_at + 32 rent_payer + (4 + 8 × 131) rules + (4 + 32) label + 1 bump.
+- Rent: vault **7 345 680 lamports** (`getMinimumBalanceForRentExemption(1318)`), ATA (165 bytes) **2 039 280 lamports**, same on devnet and mainnet today. The network fee is capped at 50 000 lamports by the gateway.
+- Outflow caps: plan 7 345 680 + 2 × 2 039 280 + 50 000 = 11 474 240 ≤ 11.5M; account 2 × 2 039 280 + 50 000 = 4 128 560 ≤ 4.15M; basic ≤ 60 000. Kora applies `max_allowed_lamports` separately to the fee payer's outflow and to the network fee, so a second Kora-funded create in one transaction fails in Kora as well as in the gateway.
+- Coverage: 3.00 USDC covers 11.5M lamports up to SOL ≈ $260; 1.00 USDC covers 4.15M up to SOL ≈ $240; 0.02 USDC covers 60 000 lamports up to SOL ≈ $330.
+- **Vault rent comes back.** The program stores `vault.rent_payer` (Kora here) and `close_vault` returns the rent to it; anything above rent goes to the owner (`handle_close_vault`). ATA rent paid by Kora does not come back: those ATAs belong to the vault, the heir or the treasury.
+- `strict = false`. Kora converts the fixed amount to lamports with the price oracle. With the `Mock` source, devnet USDC is priced at 0.0001 SOL, so 3 USDC "is" 300 000 lamports. Strict mode would therefore reject every Kora-funded create (outflow 7.35M > 300k). Non-strict fixed mode requires a payment worth ≥ the fixed amount, priced with the same oracle, so the comparison stays consistent.
+- `TEST_USDC_MINT`: the Mock oracle prices unknown mints at 0.001 SOL, ten times devnet USDC, so Kora alone would accept, and quote, a tenth of the price in a test token. The gateway closes both: it requires ≥ the tier price in base units of every accepted mint, after adjusting for decimals, and raises `estimateTransactionFee`'s `fee_in_token` to that price.
+- **Mainnet**: use `[validation.price] type = "margin"`, `margin = 0.1` (or more), `price_source = "Jupiter"` (needs `JUPITER_API_KEY`) and mainnet USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. Margin pricing bills the real fee plus the fee-payer outflow (vault and ATA rent) at the live SOL price, so one node would replace the three tiers. Keep `max_allowed_lamports` at the plan-tier outflow, keep the gateway, use a remote signer, and consider refunding the vault-rent part when Kora gets it back on close (an off-chain credit, since Kora keeps the lamports).
+
 ## Node policies
 
+These apply to every node unless a node's section says otherwise.
+
 - Only allowlisted programs may appear in **any** instruction. Kora simulates the transaction (`innerInstructions: true`) and checks CPIs too.
-- The fee payer policy denies everything: no SOL transfer, assign, allocate or nonce use, and no SPL/Token-2022 transfer, approve, burn, close, set-authority, mint, init or freeze.
+- The fee payer policy denies everything: no SOL transfer, assign, allocate or nonce use, and no SPL/Token-2022 transfer, approve, burn, close, set-authority, mint, init or freeze. The one exception is the plan and account paymaster tiers, which may fund account creation.
 - `transfer_transaction` is disabled. It would let callers make the fee payer create ATAs. Disabled methods return HTTP 405 with an empty body.
 - `allow_durable_transactions = false`.
 - `rate_limit = 20`: a global requests-per-second cap for the node, not per wallet.
-- Per-wallet usage limit (`[kora.usage_limit]`) through Redis. The key is `kora:usage_limit:<wallet>`, where the wallet is the first signer that is not Kora. It is a **lifetime** counter with no time window. It counts every `signTransaction` / `signAndSendTransaction` call, including rejected ones. It fails closed if Redis is down.
+- Sponsor only: a per-wallet usage limit (`[kora.usage_limit]`) through Redis. The key is `kora:usage_limit:<wallet>`, where the wallet is the first signer that is not Kora. It is a **lifetime** counter with no time window. It counts every `signTransaction` / `signAndSendTransaction` call, including rejected ones. It fails closed if Redis is down.
+
+### paymaster tiers (8091, 8092, 8093)
+
+The three nodes share one config (`kora/paymaster.toml`, rendered per tier by `render_tier` in `kora_start.sh`), one signer and one API key. Only the price, `max_allowed_lamports`, `allow_create_account` and the metrics port differ ([Pricing](#pricing-paymaster)).
+
+- `allowed_programs`: Deadman, System, SPL Token, Token-2022, Associated Token and Compute Budget. Kora checks CPIs too.
+- `fee_payer_policy`: only `system.allow_create_account` may be `true` (plan and account tiers), which is what Anchor's `init` with `payer = Kora` and the Associated Token program's create use. Everything else is `false`, and the basic tier sets `allow_create_account = false`. Kora's config validator warns about this; the gateway is the guard (Kora is only allowed in the `payer` slot of one create and at most 2 ATA creates per transaction).
+- `max_allowed_lamports`: 11 500 000 (plan), 4 150 000 (account), 60 000 (basic).
+- `max_signatures = 2`, `allow_durable_transactions = false`, `transfer_transaction = false`.
+- Pricing: `fixed`, 3 000 000 / 1 000 000 / 20 000 base units of devnet USDC, `strict = false`, `price_source = "Mock"`. `allowed_tokens` and `allowed_spl_paid_tokens` are Circle devnet USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (6 decimals), plus `TEST_USDC_MINT` from `kora/.env` when it is set.
+- No Kora usage limit (`[kora.usage_limit] enabled = false`). Every transaction is paid, and Kora's counter is lifetime-only. The gateway's rolling per-owner limits apply instead.
+- Payments go to the signer's ATAs (no `payment_address`), so the USDC sits on the same hot key. Sweep it regularly.
 
 ### sponsor (8090)
 
@@ -131,13 +222,38 @@ With the gateway (2026-10-03):
 | pulse naming the vault's guard, signature left zeroed | `Invalid guard signature`                                                         |
 | guard-signed `skip_rule`                              | `Only Deadman pulse and lockdown are sponsored`                                   |
 
-## Adding a token paymaster later
+## Paymaster smoke test (2026-10-04, devnet)
 
-Kora simulates transactions with inner instructions, so rent a program pays from the fee payer through a CPI (our `create_vault` with `payer` = Kora) counts as fee-payer outflow: it needs `fee_payer_policy.system.allow_create_account = true`, must fit under `max_allowed_lamports` (a vault is ~5.7M lamports of rent), and is billed under `margin` pricing. On mainnet use `margin` with `price_source = "Jupiter"` (needs `JUPITER_API_KEY`); Jupiter has no devnet prices, and the `Mock` source misprices devnet USDC.
+| Test                                                                                | Result                                                                                                      |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `getPayerSigner` through :8081                                                      | OK, `HCAeeSv4…s3pL`                                                                                         |
+| any method on :8091 without or with a wrong key                                     | HTTP 401                                                                                                    |
+| `getConfig` through :8081                                                           | `-32601 Method getConfig is not available on the Deadman paymaster`                                         |
+| `estimateTransactionFee` (create_vault, Kora payer, `fee_token` USDC) through :8081 | `fee_in_lamports: 300000, fee_in_token: 3000000`                                                            |
+| `signAndSendTransaction` of that create_vault without a payment                     | gateway: `The last instruction must pay the paymaster: a token transfer to BmGw5huq…CJ4L`                   |
+| same create_vault + 3 USDC payment from an owner with no USDC                       | passes the gateway; Kora: `simulation failed: Error processing Instruction 1: invalid account data`         |
+| unpaid create_vault, `signTransaction` direct on :8091 (with key)                   | `Insufficient token payment. Required 300000 lamports`: programs, CPI create_account and 7.35M outflow pass |
+| the paid create_vault through the sponsor :8080                                     | `Instructions may not reference the sponsor account`                                                        |
+
+That smoke test ran against the single 3 USDC node that preceded the tiers.
+
+## USDC paymaster end to end (2026-10-04, devnet)
+
+`dart run tool/e2e_usdc_vesting.dart --mint <test mint>` with the test mint `Ew8Z6hhRp7MFK8KJAxRqaBQvBEjtRj4Y4K4YhWsPMFGk` accepted through `TEST_USDC_MINT` (6 decimals; this machine holds no Circle devnet USDC, faucet: https://faucet.circle.com). A fresh owner holding **0 SOL** and 20 test USDC created a revocable vesting plan of 10 USDC to a fresh heir (no cliff, 90 s), released twice and closed it. Every transaction was paid in USDC through :8081.
+
+| Step                                                     | Tier    | Owner paid | Signature                                                                                    |
+| -------------------------------------------------------- | ------- | ---------- | -------------------------------------------------------------------------------------------- |
+| `create_vesting` + 10 USDC deposit (Kora: vault + vault ATA rent) | plan    | 3.00 USDC  | `3kQi625SuoQVJ3dTyLtHViwibgW3w7kq5HUygmLTzNq1tas4ZVeqwPk8Fv66vzdL8fQNubvGPKt2Vshb3LiK7Vp4` |
+| `release_vested_token` #1 (Kora: heir ATA)               | account | 1.00 USDC  | `5qq4m9LYDoaRt2WehJqqdz1v81snUywy5tteojg2Yinr7XEPBgnUnWX4KzsRvsANqyv42ntg4cyNVCX2gvCSvpkv` |
+| `release_vested_token` #2 (fully vested, ATAs exist)     | basic   | 0.02 USDC  | `4uJQbZFmYiUfiyTYM7QyMte4RaQXGpK1oJNUDevjxqV3crHEHNTGTiWKMQUAHKfapdBhj365U48hFiN8xP4f5JpX` |
+| `close_vault` (vault rent back to Kora)                  | basic   | 0.02 USDC  | `2oSV6gm8zbdsQX4BMpoLxBHf5Z6dpWxPSzC2k9UAoxNmsZPZmABiUUMpAdikZwoaKG82S5ztj62fbt33z1dsk9PM` |
+
+- The heir received **9.800001 USDC**: 10 USDC minus the 2% Solana-rail fee, which each release rounds down (two releases, one unit more for the heir).
+- Release #2 landed in the basic tier because the client dropped the Kora-paid ATA creates for ATAs that already existed (`_withoutExistingKoraAtas`).
 
 ## JSON-RPC (verified against the running 2.0.5 nodes)
 
-This section describes Kora itself (:8090, with the key). Through the gateway (:8080) only `getPayerSigner`, `getBlockhash` and `signAndSendTransaction` exist, with the same shapes; `signer_key` and `sig_verify` are dropped.
+This section describes Kora itself (:8090-8093, with the key). Through the sponsor gateway (:8080) only `getPayerSigner`, `getBlockhash` and `signAndSendTransaction` exist, with the same shapes. The paymaster gateway (:8081) also has `estimateTransactionFee` (`transaction`, `fee_token`). Both gateways drop `signer_key` and `sig_verify`.
 
 - Transport: HTTP POST, `Content-Type: application/json`, JSON-RPC 2.0.
 - `params` is a named object with snake_case keys. Methods without parameters accept no `params` at all, or `{}` / `[]`.
@@ -181,9 +297,10 @@ Client notes:
 
 ## Funding and monitoring
 
-- Balance: `solana balance HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL --url devnet`, or the `signer_balance_lamports` gauge at `http://127.0.0.1:8090/metrics` (refreshed every 30 s).
+- Balance: `solana balance HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL --url devnet`, or the `signer_balance_lamports` gauge at `http://127.0.0.1:8090/metrics` or `:8091`-`:8093/metrics` (refreshed every 30 s). All nodes spend from this one key. Each Kora-funded vault locks 0.0073 SOL until it is closed; each Kora-funded ATA spends 0.00204 SOL for good (covered by the account or plan price).
+- USDC received: `spl-token balance --address BmGw5huqX9EaddNKjPHeC8Gp5yBkdPSScd1tejhMCJ4L --url devnet`
 - Top up: `solana transfer HCAeeSv4vBHGqWLEV7AdWK19xFYuosN76jwUGuoCs3pL 0.5 --url devnet`
-- Logs: `tail -f kora/logs/gateway.log` (one line per sponsored or rejected transaction) and `kora/logs/sponsor.log`
+- Logs: `tail -f kora/logs/gateway.log` (one line per sponsored, paid or rejected transaction, prefixed `sponsor` or `paymaster`; paid lines show `tier=`), `kora/logs/sponsor.log` and `kora/logs/paymaster{,-account,-basic}.log`
 - Usage counters:
   - Read: `docker exec deadman-kora-redis redis-cli -n 0 get kora:usage_limit:<wallet>`.
   - Reset: run `del` on the same key.
@@ -194,7 +311,8 @@ Client notes:
 - The fee payer is a hot key in an environment variable. Fund it only with what you can lose. On mainnet, use a remote signer.
 - The sponsor cannot be made to transfer SOL or tokens, create accounts or approve delegates, and each transaction's fee is capped at 50 000 lamports.
 - The API key never ships in the app; only the gateway holds it. The gateway's own policy (guard signature, vault guard binding, instruction allowlist, rate limits) is what protects the float, so keep 8090 closed at the firewall anyway.
-- Kora's `/metrics` on :8090 is not behind the API key (it shows the fee payer balance and request counts).
+- Kora's `/metrics` on :8090-8093 is not behind the API key (it shows the fee payer balance and request counts).
+- The paymaster can be made to fund account rent, and only that: at most one vault and 2 ATAs per transaction (≤ 11.5M lamports), and only in a transaction that also pays that tier's price (3.00 USDC with a vault, 1.00 USDC with ATAs only). Kora-funded vaults are capped at 3 per owner and 20 in total per 24 h. Vault rent returns to Kora on `close_vault` (the program pins `rent_payer`); ATA rent does not. Keep 8091-8093 closed at the firewall: with the key, Kora alone would accept a payment below the tier price in a `TEST_USDC_MINT` (Mock oracle), any instruction shape, and a cheap tier's node for a transaction that belongs in a dearer one.
 - Residual risk: anyone can create vaults (rent is refundable on close) to get 24 pulses per day each. The global cap bounds that at about 0.1 SOL per day, but a determined attacker can use up the global cap and deny pulses to everyone else until the window rolls. The app then falls back to the guard paying its own fee (it holds 0.01 SOL from plan creation).
 - Config gotcha: the sample `kora.toml` writes `[validation.token2022]`. Kora 2.0.5 deserializes `[validation.token_2022]` and silently ignores the other spelling.
 - All `fee_payer_policy` sub-tables must list every field. In 2.0.5 an omitted sub-table defaults to all `false`.

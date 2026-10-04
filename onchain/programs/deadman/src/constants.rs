@@ -27,6 +27,11 @@ pub const MAX_GUARD_ONLY_SECS: i64 = 365 * SECS_PER_DAY;
 pub const MIN_LOCK_SECS: i64 = 60;
 pub const MAX_LOCK_SECS: i64 = 30 * SECS_PER_DAY;
 
+/// Vesting schedules: up to this long from start to fully vested, and a
+/// start at most this far in the past or future of creation.
+pub const MAX_VEST_SECS: i64 = 20 * 366 * SECS_PER_DAY;
+pub const MAX_VEST_START_SKEW_SECS: i64 = 366 * SECS_PER_DAY;
+
 /// SOL sent along with token payouts on private rails so a fresh claim key
 /// can pay the fees to route its funds onward.
 pub const PRIVATE_GAS_STIPEND: u64 = 3_000_000;

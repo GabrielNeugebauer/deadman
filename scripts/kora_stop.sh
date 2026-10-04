@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Stop the Deadman sponsor gateway (:8080) and Kora node (:8090). `--all` also
-# stops the Redis container (usage counters persist in the deadman-kora-redis
-# volume; gateway counters in kora/gateway-usage.json).
+# Stop the Deadman gateway (:8080 sponsor, :8081 paymaster) and the Kora
+# nodes (:8090 sponsor, :8091-8093 paymaster tiers). `--all` also stops the Redis
+# container (usage counters persist in the deadman-kora-redis volume; gateway
+# counters in kora/gateway-usage.json and kora/paymaster-*.json).
 set -uo pipefail
 
 KDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/kora"
 
-for name in gateway sponsor; do
+for name in gateway sponsor paymaster paymaster-account paymaster-basic; do
   pidf="$KDIR/$name.pid"
   if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
     pid="$(cat "$pidf")"

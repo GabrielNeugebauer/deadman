@@ -5,6 +5,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     anchor_spl::associated_token::get_associated_token_address_with_program_id,
+    deadman::VestingInput,
     deadman::{AmountMode, Config, Rail, RuleInput, Vault, CONFIG_SEED, VAULT_SEED},
     litesvm::LiteSVM,
     litesvm_token::{
@@ -974,6 +975,7 @@ fn close_vault_blocked_while_locked() {
         deadman::accounts::CloseVault {
             owner: env.owner.pubkey(),
             vault: env.vault_addr(),
+            rent_payer: env.owner.pubkey(),
         }
         .to_account_metas(None),
     );
@@ -1539,4 +1541,347 @@ fn guard_cannot_check_in_after_a_skip_until_the_owner_confirms() {
         .contains("OwnerConfirmationRequired"));
     env.pulse(&owner).unwrap();
     env.pulse(&guard).unwrap();
+}
+
+// Rent refunds and vesting plans.
+
+impl Env {
+    fn close_ix(&self, rent_payer: &Pubkey) -> Instruction {
+        Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::CloseVault {}.data(),
+            deadman::accounts::CloseVault {
+                owner: self.owner.pubkey(),
+                vault: self.vault_addr(),
+                rent_payer: *rent_payer,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    fn create_vesting(
+        &mut self,
+        start_at: i64,
+        revocable: bool,
+        schedules: Vec<VestingInput>,
+    ) -> Result<u64, String> {
+        let ix = Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::CreateVesting {
+                plan_id: self.plan,
+                label: "Vesting".to_string(),
+                guard: self.guard.pubkey(),
+                lock_secs: LOCK,
+                start_at,
+                revocable,
+                schedules,
+            }
+            .data(),
+            deadman::accounts::CreateVault {
+                owner: self.owner.pubkey(),
+                payer: self.owner.pubkey(),
+                vault: self.vault_addr(),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        );
+        let owner = self.owner.insecure_clone();
+        self.send(ix, &[&owner])
+    }
+
+    fn release(&mut self, index: u8, beneficiary: &Pubkey) -> Result<u64, String> {
+        let treasury = self.treasury.pubkey();
+        let ix = Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::ReleaseVestedSol { index }.data(),
+            deadman::accounts::ExecuteSolRule {
+                executor: self.keeper.pubkey(),
+                vault: self.vault_addr(),
+                config: config_pda(),
+                beneficiary: *beneficiary,
+                treasury,
+            }
+            .to_account_metas(None),
+        );
+        let keeper = self.keeper.insecure_clone();
+        self.send(ix, &[&keeper])
+    }
+
+    fn release_token(
+        &mut self,
+        index: u8,
+        beneficiary: &Pubkey,
+        mint: &Pubkey,
+    ) -> Result<u64, String> {
+        let admin = self.admin.insecure_clone();
+        CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, mint)
+            .owner(beneficiary)
+            .send()
+            .map_err(|e| format!("{:?}", e.err))?;
+        let vault = self.vault_addr();
+        let ix = Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::ReleaseVestedToken { index }.data(),
+            deadman::accounts::ExecuteTokenRule {
+                executor: self.keeper.pubkey(),
+                vault,
+                config: config_pda(),
+                mint: *mint,
+                vault_token: ata(&vault, mint),
+                beneficiary: *beneficiary,
+                beneficiary_token: ata(beneficiary, mint),
+                treasury_token: ata(&self.treasury.pubkey(), mint),
+                token_program: TOKEN_ID,
+            }
+            .to_account_metas(None),
+        );
+        let keeper = self.keeper.insecure_clone();
+        self.send(ix, &[&keeper])
+    }
+
+    fn revoke(&mut self) -> Result<u64, String> {
+        let ix = self.owner_ix(deadman::instruction::RevokeVesting {});
+        let owner = self.owner.insecure_clone();
+        self.send(ix, &[&owner])
+    }
+}
+
+fn schedule(
+    b: &Pubkey,
+    mint: Option<Pubkey>,
+    total: u64,
+    cliff: i64,
+    duration: i64,
+) -> VestingInput {
+    VestingInput {
+        beneficiary: *b,
+        rail: Rail::Solana,
+        mint,
+        total,
+        cliff_secs: cliff,
+        duration_secs: duration,
+    }
+}
+
+fn vesting_env(revocable: bool, b: &Keypair) -> Env {
+    let mut env = Env::new();
+    env.init_config();
+    let now = env.now();
+    env.create_vesting(
+        now,
+        revocable,
+        vec![schedule(&b.pubkey(), None, 10 * SOL, 30 * DAY, 100 * DAY)],
+    )
+    .unwrap();
+    env.deposit_sol(12 * SOL);
+    env
+}
+
+#[test]
+fn close_returns_rent_to_the_sponsor_and_the_rest_to_the_owner() {
+    let a = Keypair::new();
+    let sponsor = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &deadman::instruction::CreateVault {
+            plan_id: 0,
+            label: String::new(),
+            guard: env.guard.pubkey(),
+            interval_secs: INTERVAL,
+            lock_secs: LOCK,
+            skip_grace_secs: GRACE,
+            rules: all_to(&a.pubkey()),
+        }
+        .data(),
+        deadman::accounts::CreateVault {
+            owner: env.owner.pubkey(),
+            payer: sponsor.pubkey(),
+            vault: env.vault_addr(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let owner = env.owner.insecure_clone();
+    env.send(ix, &[&sponsor, &owner]).unwrap();
+    env.deposit_sol(2 * SOL);
+    let rent = env.lamports(&env.vault_addr()) - 2 * SOL;
+    let (s0, o0) = (
+        env.lamports(&sponsor.pubkey()),
+        env.lamports(&env.owner.pubkey()),
+    );
+
+    // The owner cannot send the rent to himself instead.
+    let ix = env.close_ix(&env.owner.pubkey());
+    assert!(env.send(ix, &[&owner]).is_err());
+    let ix = env.close_ix(&sponsor.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&sponsor.pubkey()) - s0, rent);
+    // Two owner-signed transactions: the refused close and the real one.
+    assert_eq!(env.lamports(&env.owner.pubkey()) + 10_000 - o0, 2 * SOL);
+}
+
+#[test]
+fn vesting_releases_linearly_after_the_cliff() {
+    let b = Keypair::new();
+    let mut env = vesting_env(false, &b);
+    env.advance(29 * DAY);
+    assert!(env
+        .release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("NothingToPay"));
+    env.advance(21 * DAY); // day 50: half vested
+    env.release(0, &b.pubkey()).unwrap();
+    let half = 5 * SOL;
+    assert_eq!(env.lamports(&b.pubkey()), half - fee(half, FEE_PUBLIC));
+    assert!(env
+        .release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("NothingToPay"));
+    env.advance(60 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(
+        env.lamports(&b.pubkey()),
+        10 * SOL - fee(half, FEE_PUBLIC) * 2
+    );
+    let v = env.vault();
+    assert_eq!(v.rules[0].released, 10 * SOL);
+    assert!(v.rules[0].executed_at > 0);
+    assert!(env.release(0, &b.pubkey()).is_err());
+}
+
+#[test]
+fn vesting_funds_are_committed_but_surplus_is_withdrawable() {
+    let b = Keypair::new();
+    let mut env = vesting_env(false, &b);
+    assert!(env
+        .withdraw_sol(3 * SOL)
+        .unwrap_err()
+        .contains("FundsCommitted"));
+    env.withdraw_sol(2 * SOL).unwrap();
+    assert!(env.revoke().unwrap_err().contains("NotRevocable"));
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&env.owner.pubkey());
+    assert!(env
+        .send(ix, &[&owner])
+        .unwrap_err()
+        .contains("FundsCommitted"));
+}
+
+#[test]
+fn revoking_keeps_what_vested_and_frees_the_rest() {
+    let b = Keypair::new();
+    let mut env = vesting_env(true, &b);
+    env.advance(40 * DAY);
+    env.revoke().unwrap();
+    assert!(env.revoke().unwrap_err().contains("AlreadyRevoked"));
+    // 40% stays owed; the owner takes back the rest.
+    env.withdraw_sol(8 * SOL).unwrap();
+    assert!(env.withdraw_sol(1).unwrap_err().contains("FundsCommitted"));
+    env.advance(100 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    let vested = 4 * SOL;
+    assert_eq!(env.lamports(&b.pubkey()), vested - fee(vested, FEE_PUBLIC));
+    assert!(env.vault().rules[0].executed_at > 0);
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&env.owner.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+}
+
+#[test]
+fn vesting_tokens_release_with_fee() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let usdc = env.token_setup(0);
+    let now = env.now();
+    env.create_vesting(
+        now,
+        false,
+        vec![schedule(&b.pubkey(), Some(usdc), 1_000_000, 0, 10 * DAY)],
+    )
+    .unwrap();
+    let admin = env.admin.insecure_clone();
+    let vault = env.vault_addr();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    MintTo::new(&mut env.svm, &admin, &usdc, &ata(&vault, &usdc), 1_500_000)
+        .send()
+        .unwrap();
+    env.advance(5 * DAY);
+    env.release_token(0, &b.pubkey(), &usdc).unwrap();
+    let half = 500_000;
+    assert_eq!(
+        env.token_balance(&ata(&b.pubkey(), &usdc)),
+        half - fee(half, FEE_PUBLIC)
+    );
+    assert!(env
+        .withdraw_token(&usdc, 500_001)
+        .unwrap_err()
+        .contains("FundsCommitted"));
+    env.withdraw_token(&usdc, 500_000).unwrap();
+}
+
+#[test]
+fn plan_kinds_do_not_mix() {
+    let b = Keypair::new();
+    let mut env = vesting_env(false, &b);
+    let guard = env.guard.insecure_clone();
+    assert!(env.pulse(&guard).unwrap_err().contains("WrongPlanKind"));
+    env.advance(200 * DAY);
+    assert!(env
+        .execute_sol(0, &b.pubkey())
+        .unwrap_err()
+        .contains("WrongPlanKind"));
+    assert!(env.skip(0).unwrap_err().contains("WrongPlanKind"));
+    assert!(env
+        .update_policy(all_to(&b.pubkey()), None)
+        .unwrap_err()
+        .contains("WrongPlanKind"));
+    // Lockdown still protects a vesting plan from a coerced withdrawal.
+    env.lockdown(&guard).unwrap();
+    assert!(env.withdraw_sol(SOL).unwrap_err().contains("VaultLocked"));
+
+    let mut inh = ready(all_to(&b.pubkey()));
+    inh.deposit_sol(SOL);
+    inh.advance(20 * DAY);
+    assert!(inh
+        .release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("WrongPlanKind"));
+}
+
+#[test]
+fn vesting_schedules_are_validated() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let now = env.now();
+    let bad = [
+        schedule(&b.pubkey(), None, 0, 0, DAY),
+        schedule(&b.pubkey(), None, SOL, 2 * DAY, DAY),
+        schedule(&b.pubkey(), None, SOL, 0, 0),
+        schedule(&b.pubkey(), None, SOL, 0, 21 * 366 * DAY),
+        schedule(&env.owner.pubkey(), None, SOL, 0, DAY),
+    ];
+    for s in bad {
+        assert!(env.create_vesting(now, false, vec![s]).is_err());
+    }
+    assert!(env
+        .create_vesting(
+            now + 367 * DAY,
+            false,
+            vec![schedule(&b.pubkey(), None, SOL, 0, DAY)]
+        )
+        .is_err());
+    env.create_vesting(
+        now - 30 * DAY,
+        false,
+        vec![schedule(&b.pubkey(), None, SOL, 0, DAY)],
+    )
+    .unwrap();
 }

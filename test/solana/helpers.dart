@@ -38,6 +38,8 @@ List<int> ruleStateBytes(RuleState r) => [
   ...le(8, r.paid),
   ...le(8, r.skippedAt),
   ...le(8, r.reserved),
+  ...le(8, r.durationSecs),
+  ...le(8, r.released),
 ];
 
 List<int> vaultBytes({
@@ -56,6 +58,11 @@ List<int> vaultBytes({
   int totalPulses = 42,
   int streak = 7,
   int bestStreak = 12,
+  PlanKind kind = PlanKind.inheritance,
+  int startAt = 0,
+  bool revocable = false,
+  int revokedAt = 0,
+  String? rentPayer,
   List<RuleState> rules = const [],
 }) => [
   ...Disc.vaultAccount,
@@ -73,6 +80,11 @@ List<int> vaultBytes({
   ...le(8, totalPulses),
   ...le(4, streak),
   ...le(4, bestStreak),
+  kind.index,
+  ...le(8, startAt),
+  if (revocable) 1 else 0,
+  ...le(8, revokedAt),
+  ...keyBytes(rentPayer ?? owner),
   ...le(4, rules.length),
   for (final r in rules) ...ruleStateBytes(r),
   ...le(4, utf8.encode(label).length),
