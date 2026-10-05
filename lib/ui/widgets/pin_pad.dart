@@ -68,28 +68,36 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
             ),
             child: child,
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(widget.length, (i) {
-              final filled = i < _pin.length;
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
-                margin: const EdgeInsets.symmetric(horizontal: 8),
-                width: 14,
-                height: 14,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: filled ? DmColors.alive : Colors.transparent,
-                  border: Border.all(
-                    color: filled ? DmColors.alive : DmColors.muted,
-                    width: 1.5,
+          child: Semantics(
+            label: '${_pin.length} of ${widget.length} digits entered',
+            liveRegion: true,
+            excludeSemantics: true,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(widget.length, (i) {
+                final filled = i < _pin.length;
+                // Square cells, like the status dots on chips.
+                return AnimatedContainer(
+                  key: ValueKey('pin-cell-$i'),
+                  duration: const Duration(milliseconds: 120),
+                  curve: Curves.easeOutCubic,
+                  margin: const EdgeInsets.symmetric(horizontal: 7),
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: filled ? DM.signal : Colors.transparent,
+                    borderRadius: BorderRadius.circular(2),
+                    border: Border.all(
+                      color: filled ? DM.signal : DM.mist,
+                      width: 1.5,
+                    ),
                   ),
-                ),
-              );
-            }),
+                );
+              }),
+            ),
           ),
         ),
-        const SizedBox(height: 36),
+        const SizedBox(height: DMSpace.xxxl),
         for (final row in const [
           ['1', '2', '3'],
           ['4', '5', '6'],
@@ -101,34 +109,29 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
             children: [
               for (final k in row)
                 Padding(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(DMSpace.xs),
                   child: SizedBox(
-                    width: 76,
-                    height: 76,
+                    width: 84,
+                    height: 64,
                     child: k.isEmpty
                         ? null
-                        : TextButton(
-                            style: TextButton.styleFrom(
-                              shape: const CircleBorder(),
-                              backgroundColor: k == '<'
-                                  ? Colors.transparent
-                                  : DmColors.surface,
-                              foregroundColor: DmColors.text,
+                        : k == '<'
+                        ? IconButton(
+                            tooltip: 'Delete digit',
+                            style: IconButton.styleFrom(
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  DMRadius.card,
+                                ),
+                              ),
                             ),
-                            onPressed: () => k == '<' ? _back() : _tap(k),
-                            child: k == '<'
-                                ? const Icon(
-                                    Icons.backspace_outlined,
-                                    color: DmColors.muted,
-                                  )
-                                : Text(
-                                    k,
-                                    style: const TextStyle(
-                                      fontSize: 26,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                          ),
+                            onPressed: _back,
+                            icon: const Icon(
+                              Icons.backspace_outlined,
+                              color: DM.sub,
+                            ),
+                          )
+                        : _Key(digit: k, onTap: () => _tap(k)),
                   ),
                 ),
             ],
@@ -136,4 +139,27 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
       ],
     );
   }
+}
+
+/// A graphite key with a 1px line, digit in mono.
+class _Key extends StatelessWidget {
+  const _Key({required this.digit, required this.onTap});
+
+  final String digit;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    style: TextButton.styleFrom(
+      backgroundColor: DM.graphite,
+      foregroundColor: DM.bone,
+      overlayColor: DM.signal,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(DMRadius.card),
+        side: const BorderSide(color: DM.line),
+      ),
+    ),
+    onPressed: onTap,
+    child: Text(digit, style: DMType.mono(size: 26)),
+  );
 }

@@ -4,6 +4,8 @@ import 'package:deadman/state/actions.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/state/vesting.dart';
 import 'package:deadman/ui/screens/vesting_editor.dart';
+import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/vesting_progress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,6 +62,7 @@ Future<List<_Created>> _pump(
   FakeApi? api,
   Size size = const Size(1200, 6000),
   double textScale = 1,
+  ThemeData? theme,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -84,6 +87,7 @@ Future<List<_Created>> _pump(
         walletTokenProvider.overrideWith((ref, mint) async => 2000000000),
       ],
       child: MaterialApp(
+        theme: theme,
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context)
               .copyWith(textScaler: TextScaler.linear(textScale)),
@@ -393,6 +397,7 @@ void main() {
       api: heldUsdc,
       size: const Size(400, 860),
       textScale: 2,
+      theme: buildTheme(),
     );
     expect(tester.takeException(), isNull);
     await _tap(tester, 'Add a schedule');
@@ -416,5 +421,51 @@ void main() {
     expect(tester.takeException(), isNull);
     await _tap(tester, 'Next: review');
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('brand: schedule editor and card use the signal accent', (
+    tester,
+  ) async {
+    await _pump(tester, api: heldUsdc, theme: buildTheme());
+    await _schedule(tester, total: '1200');
+    // Milestones: the date in mono, what unlocks in Outfit.
+    final milestone = tester.widget<Text>(
+      find.textContaining('first installment, 100 USDC'),
+    );
+    final spans = (milestone.textSpan! as TextSpan).children!.cast<TextSpan>();
+    expect(spans.first.style?.fontFamily, contains('JetBrains'));
+    expect(spans.first.text, endsWith(':'));
+    for (final bar in tester.widgetList<VestingBar>(find.byType(VestingBar))) {
+      expect(bar.color, DM.signal);
+    }
+    await _tap(tester, 'Done');
+    final card = tester.widget<VestingBar>(find.byType(VestingBar));
+    expect(card.color, DM.signal);
+    expect(find.text('START'), findsOneWidget);
+    expect(find.text('END'), findsOneWidget);
+    // Selected chips (Today, Yes, Month) read in signal, never purple.
+    final today = tester.widget<ChoiceChip>(
+      find.widgetWithText(ChoiceChip, 'Today'),
+    );
+    expect(today.labelStyle?.color, DM.signal);
+    for (final w in tester.allWidgets) {
+      if (w is Text) expect(w.style?.color, isNot(DM.locked));
+      if (w is Icon) expect(w.color, isNot(DM.locked));
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('brand: review numbers each schedule and sets deposits in mono', (
+    tester,
+  ) async {
+    await _pump(tester, api: heldUsdc, theme: buildTheme());
+    await _schedule(tester, total: '1200');
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    expect(find.text('Schedule 1'), findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
+    final deposit = tester.widget<Text>(find.text('1200 USDC'));
+    expect(deposit.style?.fontFamily, contains('JetBrains'));
   });
 }

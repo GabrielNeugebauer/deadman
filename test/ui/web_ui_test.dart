@@ -206,8 +206,9 @@ void main() {
         saved: {'owner': addr(1), 'web_wallet': 'phantom'},
       );
       expect(find.text('Web'), findsOneWidget);
-      expect(find.textContaining('Phantom ·'), findsOneWidget);
-      expect(find.text('Guard key (this browser)'), findsOneWidget);
+      expect(find.textContaining('· Phantom'), findsOneWidget);
+      expect(find.text('Guard key'), findsOneWidget);
+      expect(find.textContaining('· this browser'), findsOneWidget);
       expect(find.text('Move guard to this phone'), findsNothing);
       expect(find.text('Private rails check'), findsNothing);
       expect(find.text('Forget this browser'), findsOneWidget);
@@ -242,7 +243,9 @@ void main() {
       );
       expect(find.text('Web'), findsNothing);
       expect(find.text('Get the Android app'), findsNothing);
-      expect(find.text('Guard key (this phone)'), findsOneWidget);
+      expect(find.text('Guard key'), findsOneWidget);
+      expect(find.textContaining('· this phone'), findsOneWidget);
+      expect(find.textContaining('· Seed Vault'), findsOneWidget);
       expect(find.text('Move guard to this phone'), findsOneWidget);
       expect(find.text('Private rails check'), findsOneWidget);
       expect(find.text('Forget this device'), findsOneWidget);
@@ -282,7 +285,7 @@ void main() {
       vault(planId: 1, guard: addr(7), lastPulse: now, ownerLastSeen: now),
     ];
 
-    testWidgets("web I'm alive checks in every plan with the wallet", (
+    testWidgets('web Check in checks in every plan with the wallet', (
       tester,
     ) async {
       final h = _Harness();
@@ -298,7 +301,7 @@ void main() {
       expect(find.text('Guarded by another device'), findsNothing);
       expect(find.byIcon(Icons.account_balance_wallet_outlined), findsWidgets);
 
-      await tester.tap(find.text("I'm alive"));
+      await tester.tap(find.text('Check in'));
       // The tab ticks every second, so it never settles.
       for (var i = 0; i < 5; i++) {
         await tester.pump(const Duration(milliseconds: 100));

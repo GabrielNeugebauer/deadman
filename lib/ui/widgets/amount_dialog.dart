@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../state/assets.dart';
-import '../theme.dart';
+import '../theme/tokens.dart';
 
 typedef AssetAmount = ({String? mint, int amount});
 
@@ -41,7 +41,6 @@ Future<AssetAmount?> askAssetAmount(
         }
 
         return AlertDialog(
-          backgroundColor: DmColors.surface,
           title: Text(title),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -60,7 +59,7 @@ Future<AssetAmount?> askAssetAmount(
                     error = null;
                   }),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: DMSpace.lg),
               ],
               TextField(
                 controller: controller,
@@ -69,6 +68,7 @@ Future<AssetAmount?> askAssetAmount(
                   decimal: true,
                 ),
                 onSubmitted: (_) => submit(),
+                style: DMType.mono(size: 20),
                 decoration: InputDecoration(
                   suffixText: asset.symbol,
                   labelText: 'Amount',
@@ -78,16 +78,13 @@ Future<AssetAmount?> askAssetAmount(
               ),
               if (max != null)
                 Padding(
-                  padding: const EdgeInsets.only(top: 8),
+                  padding: const EdgeInsets.only(top: DMSpace.sm),
                   child: Row(
                     children: [
                       Expanded(
                         child: Text(
                           '${amountText(max, asset.mint)} $availableLabel',
-                          style: const TextStyle(
-                            color: DmColors.muted,
-                            fontSize: 12,
-                          ),
+                          style: DMType.data(size: 12.5),
                         ),
                       ),
                       if (capped && max > 0)
@@ -108,7 +105,11 @@ Future<AssetAmount?> askAssetAmount(
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel'),
             ),
-            TextButton(onPressed: submit, child: const Text('Confirm')),
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: const Size(96, 44)),
+              onPressed: submit,
+              child: const Text('Confirm'),
+            ),
           ],
         );
       },

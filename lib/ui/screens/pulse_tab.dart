@@ -13,11 +13,10 @@ import '../../state/subscription.dart';
 import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
-import '../theme.dart';
 import '../widgets/amount_dialog.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 import '../widgets/plan_pricing.dart';
-import '../widgets/pulse_ring.dart';
 import '../widgets/vesting_progress.dart';
 import 'rules_editor.dart';
 import 'vesting_editor.dart';
@@ -68,27 +67,22 @@ class _PulseTabState extends ConsumerState<PulseTab> {
           message: '$e',
           onRetry: () => ref.invalidate(vaultsProvider),
         ),
-        data: (list) => Column(
-          children: [
-            const _LegacyPlansCard(),
-            Expanded(
-              child: list.isEmpty
-                  ? const _ArmIntro()
-                  : RefreshIndicator(
-                      onRefresh: () async {
-                        ref.invalidate(vaultsProvider);
-                        ref.invalidate(planUsdcProvider);
-                        ref.invalidate(planTokenBalancesProvider);
-                        ref.invalidate(accountSubscriptionProvider);
-                      },
-                      child: _Dashboard(plans: list, now: _now),
-                    ),
-            ),
-          ],
-        ),
+        data: (list) => list.isEmpty
+            ? const _ArmIntro()
+            : RefreshIndicator(
+                onRefresh: () async => _refresh(ref),
+                child: _Dashboard(plans: list, now: _now),
+              ),
       ),
     );
   }
+}
+
+void _refresh(WidgetRef ref) {
+  ref.invalidate(vaultsProvider);
+  ref.invalidate(planUsdcProvider);
+  ref.invalidate(planTokenBalancesProvider);
+  ref.invalidate(accountSubscriptionProvider);
 }
 
 void openEditor(BuildContext context, {VaultState? vault}) => Navigator.push(
@@ -105,50 +99,47 @@ void openVestingEditor(BuildContext context) => Navigator.push(
 Future<void> chooseNewPlan(BuildContext context) async {
   final kind = await showModalBottomSheet<PlanKind>(
     context: context,
-    backgroundColor: DmColors.surface,
     showDragHandle: true,
     builder: (context) => SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.gutter,
+          0,
+          DMSpace.gutter,
+          DMSpace.gutter,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('New plan', style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 12),
-            for (final (kind, icon, color, title, blurb) in [
-              (
-                PlanKind.inheritance,
-                Icons.monitor_heart_outlined,
-                DmColors.alive,
-                'Inheritance',
-                'Release when I go silent. Tiers pay out if you stop checking in.',
-              ),
-              (
-                PlanKind.vesting,
-                Icons.stacked_line_chart,
-                DmColors.plus,
-                'Vesting',
-                'Release in installments over time, with an optional cliff. No check-ins.',
-              ),
-            ])
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Card(
-                  color: DmColors.raised,
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.fromLTRB(16, 6, 12, 6),
-                    leading: Icon(icon, color: color, size: 28),
-                    title: Text(title),
-                    subtitle: Text(
-                      blurb,
-                      style: const TextStyle(color: DmColors.muted),
-                    ),
-                    trailing: const Icon(Icons.chevron_right),
+            const SizedBox(height: DMSpace.lg),
+            DMListGroup(
+              children: [
+                for (final (kind, icon, title, blurb) in [
+                  (
+                    PlanKind.inheritance,
+                    Icons.monitor_heart_outlined,
+                    'Inheritance',
+                    'Release when I go silent. Tiers pay out if you stop checking in.',
+                  ),
+                  (
+                    PlanKind.vesting,
+                    Icons.stacked_line_chart,
+                    'Vesting',
+                    'Release in installments over time, with an optional cliff. No check-ins.',
+                  ),
+                ])
+                  DMListRow(
+                    leading: IconTile(icon: icon),
+                    title: title,
+                    subtitle: blurb,
+                    monoSubtitle: false,
+                    trailing: const Icon(Icons.chevron_right, color: DM.mist),
                     onTap: () => Navigator.pop(context, kind),
                   ),
-                ),
-              ),
+              ],
+            ),
           ],
         ),
       ),
@@ -157,6 +148,25 @@ Future<void> chooseNewPlan(BuildContext context) async {
   if (kind == null || !context.mounted) return;
   kind == PlanKind.vesting ? openVestingEditor(context) : openEditor(context);
 }
+
+/// Index of [v]'s pending tier that comes due first, or null.
+int? _nextTier(VaultState v) {
+  int? next;
+  for (var i = 0; i < v.rules.length; i++) {
+    if (v.rules[i].settled) continue;
+    if (next == null || v.ruleDueAt(i) < v.ruleDueAt(next)) next = i;
+  }
+  return next;
+}
+
+/// What the ring says: status, countdown, captions and how full it is.
+typedef _Readout = ({
+  DMStatus status,
+  String chip,
+  String big,
+  String caption,
+  double progress,
+});
 
 /// One check-in covers every active plan, so the ring follows the most
 /// urgent one.
@@ -168,12 +178,11 @@ class _Dashboard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final t = Theme.of(context).textTheme;
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
     final guard = ref.watch(guardAddressProvider);
-    // On the web "I'm alive" is wallet-signed, so guard coverage is moot.
+    // On the web a check-in is wallet-signed, so guard coverage is moot.
     final web = ref.watch(isWebProvider);
-    // "I'm alive" covers inheritance plans only; vesting runs on its own.
+    // A check-in covers inheritance plans only; vesting runs on its own.
     final switches = switchPlans(plans);
     final vestings = [
       for (final v in plans)
@@ -192,153 +201,169 @@ class _Dashboard extends ConsumerWidget {
     final next = urgent?.nextRuleDue;
     final inGrace = urgent != null && now > urgent.pulseDue;
     final firing = next != null && now > next;
+    final tier = urgent == null ? null : _nextTier(urgent);
 
-    final color = urgent == null
-        ? DmColors.muted
-        : firing
-        ? DmColors.danger
-        : inGrace
-        ? DmColors.warn
-        : DmColors.alive;
-    final (big, label, progress) = urgent == null && switches.isEmpty
-        ? ('Off', 'no inheritance plan to check in', 0.0)
-        : urgent == null
-        ? (
-            'Done',
-            switches.every((v) => v.completed)
-                ? 'every plan released'
-                : 'no tier pending; reserved shares await claim',
-            0.0,
-          )
-        : firing
-        ? (span(now - next), 'tier due, releasing', 0.0)
-        : inGrace
-        ? (
-            span(next! - now),
-            'until next tier',
-            (next - now) / (next - urgent.pulseDue),
-          )
-        : (
-            span(urgent.pulseDue - now),
-            'until next check-in',
-            (urgent.pulseDue - now) / urgent.intervalSecs,
-          );
+    final _Readout ring;
+    if (urgent == null) {
+      final allReleased = switches.every((v) => v.completed);
+      ring = switches.isEmpty
+          ? (
+              status: DMStatus.released,
+              chip: 'NOT ARMED',
+              big: 'Off',
+              caption: 'no inheritance plan to check in',
+              progress: 0.0,
+            )
+          : (
+              status: DMStatus.released,
+              chip: allReleased ? 'ALL RELEASED' : 'NOTHING PENDING',
+              big: 'Done',
+              caption: allReleased
+                  ? 'every plan released'
+                  : 'no tier pending; reserved shares await claim',
+              progress: 0.0,
+            );
+    } else if (firing) {
+      ring = (
+        status: DMStatus.due,
+        chip: 'TIER DUE',
+        big: span(now - next),
+        caption: tier == null
+            ? 'tier due, releasing'
+            : 'past due, releasing to '
+                  '${short(urgent.rules[tier].beneficiary)}',
+        progress: 0.0,
+      );
+    } else if (inGrace) {
+      ring = (
+        status: DMStatus.attention,
+        chip: 'CHECK-IN OVERDUE',
+        big: span(next! - now),
+        caption: tier == null
+            ? 'until next tier'
+            : 'until tier ${tier + 1} releases',
+        progress: (next - now) / (next - urgent.pulseDue),
+      );
+    } else {
+      final left = (urgent.pulseDue - now) / urgent.intervalSecs;
+      final soon = left <= 0.25;
+      ring = (
+        status: soon ? DMStatus.attention : DMStatus.onTrack,
+        chip: soon ? 'CHECK IN SOON' : 'ON TRACK',
+        big: span(urgent.pulseDue - now),
+        caption: 'until next check-in',
+        progress: left,
+      );
+    }
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.gutter,
+        DMSpace.md,
+        DMSpace.gutter,
+        DMSpace.xxxl,
+      ),
       children: [
-        Row(
-          children: [
-            Text('Pulse', style: t.headlineMedium),
-            const Spacer(),
-            if (locked) const _Chip(text: 'LOCKED', color: DmColors.warn),
-            // No pull-to-refresh with a mouse.
-            if (web)
-              IconButton(
-                tooltip: 'Refresh',
-                onPressed: () {
-                  ref.invalidate(vaultsProvider);
-                  ref.invalidate(planUsdcProvider);
-                  ref.invalidate(planTokenBalancesProvider);
-                  ref.invalidate(accountSubscriptionProvider);
-                },
-                icon: const Icon(Icons.refresh),
-              ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        const MonthlyPlanCard(
-          compact: true,
-          margin: EdgeInsets.only(bottom: 4),
-        ),
-        const SizedBox(height: 12),
-        Center(
-          child: PulseRing(
-            progress: progress,
-            color: color,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  big,
-                  style: t.displayLarge?.copyWith(fontSize: 38, color: color),
-                ),
-                const SizedBox(height: 4),
-                Text(label, style: const TextStyle(color: DmColors.muted)),
-                if (urgent != null && active.length > 1) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    urgent.label,
-                    style: const TextStyle(color: DmColors.muted, fontSize: 12),
-                  ),
-                ],
+        PageHeader(
+          title: 'Pulse',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (locked) ...[
+                const StatusChip(DMStatus.locked),
+                const SizedBox(width: DMSpace.sm),
               ],
+              // No pull-to-refresh with a mouse.
+              if (web)
+                IconButton(
+                  tooltip: 'Refresh',
+                  onPressed: () => _refresh(ref),
+                  icon: const Icon(Icons.refresh),
+                ),
+              const DeadmanMark(size: 30),
+            ],
+          ),
+        ),
+        const _LegacyPlansCard(),
+        const SizedBox(height: DMSpace.xl),
+        Center(
+          child: LayoutBuilder(
+            builder: (context, box) => PulseRing(
+              progress: ring.progress,
+              status: ring.status,
+              size: box.maxWidth < 300 ? box.maxWidth * 0.8 : 240,
+              child: PulseReadout(
+                status: ring.status,
+                statusLabel: ring.chip,
+                countdown: ring.big,
+                countdownKey: const Key('pulse-countdown'),
+                caption: ring.caption,
+                detail: urgent != null && active.length > 1
+                    ? planName(urgent)
+                    : null,
+              ),
             ),
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: DMSpace.xxl),
         _PulseButton(
-          color: color,
           activePlans: active.length,
           hasSwitch: switches.isNotEmpty,
+          firing: firing,
           wallet: web,
         ),
         if (web && active.isNotEmpty)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
+          Padding(
+            padding: const EdgeInsets.only(top: DMSpace.sm),
             child: Text(
               'On the web you check in with your wallet. Reminders and one-tap '
               'check-ins are in the Android app.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: DmColors.muted, fontSize: 12),
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
         if (cover != null && cover.otherGuard.isNotEmpty) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
           _OtherGuardBanner(plans: cover.otherGuard),
         ],
         if (switches.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          _StreakCard(plans: active.isEmpty ? switches : active),
+          const SizedBox(height: DMSpace.md),
+          _StreakTiles(plans: active.isEmpty ? switches : active),
         ],
-        const SizedBox(height: 18),
-        Row(
-          children: [
-            Text(
-              switches.isEmpty ? 'Vesting plans' : 'Release plans',
-              style: t.titleLarge,
-            ),
-            const Spacer(),
-            TextButton.icon(
-              onPressed: () => chooseNewPlan(context),
-              icon: const Icon(Icons.add),
-              label: const Text('New plan'),
-            ),
-          ],
+        const SizedBox(height: DMSpace.xxl),
+        SectionHeader(
+          title: switches.isEmpty ? 'Vesting plans' : 'Release plans',
+          actionLabel: 'New plan',
+          actionKey: const Key('new-plan'),
+          onAction: () => chooseNewPlan(context),
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: DMSpace.sm),
         for (final v in switches) ...[
           _PlanCard(
             vault: v,
             now: now,
             otherGuard: cover?.otherGuard.contains(v) ?? false,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
         ],
         if (switches.isNotEmpty && vestings.isNotEmpty) ...[
-          const SizedBox(height: 6),
-          Text('Vesting plans', style: t.titleLarge),
-          const SizedBox(height: 4),
-          const Text(
-            'Release on their own schedule; check-ins do not affect them. Panic lockdown still covers them.',
-            style: TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35),
+          const SizedBox(height: DMSpace.md),
+          const SectionHeader(title: 'Vesting plans'),
+          Text(
+            'Release on their own schedule; check-ins do not affect them. '
+            'Panic lockdown still covers them.',
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: DMSpace.md),
         ],
         for (final v in vestings) ...[
           VestingPlanCard(vault: v, now: now),
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
         ],
+        const MonthlyPlanCard(
+          compact: true,
+          margin: EdgeInsets.only(top: DMSpace.md),
+        ),
       ],
     );
   }
@@ -346,13 +371,12 @@ class _Dashboard extends ConsumerWidget {
 
 class _PulseButton extends ConsumerStatefulWidget {
   const _PulseButton({
-    required this.color,
     required this.activePlans,
     required this.hasSwitch,
+    this.firing = false,
     this.wallet = false,
   });
 
-  final Color color;
   final int activePlans;
 
   /// Check in with the owner's wallet (web) instead of the guard key.
@@ -360,6 +384,9 @@ class _PulseButton extends ConsumerStatefulWidget {
 
   /// The owner has at least one inheritance plan.
   final bool hasSwitch;
+
+  /// A tier is due; checking in now stops it.
+  final bool firing;
 
   @override
   ConsumerState<_PulseButton> createState() => _PulseButtonState();
@@ -406,36 +433,35 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
   Widget build(BuildContext context) {
     final closed = widget.activePlans == 0;
     return FilledButton.icon(
-      style: FilledButton.styleFrom(
-        backgroundColor: widget.color,
-        minimumSize: const Size.fromHeight(64),
-      ),
+      key: const Key('check-in'),
+      style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56)),
       onPressed: _busy || closed ? null : _pulse,
       icon: _busy
           ? const SizedBox.square(
               dimension: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
+              child: CircularProgressIndicator(strokeWidth: 2, color: DM.mist),
             )
           : Icon(
               widget.wallet
                   ? Icons.account_balance_wallet_outlined
                   : Icons.fingerprint,
-              size: 28,
+              size: 24,
             ),
       label: Text(
         !widget.hasSwitch
             ? 'No plan to check in'
             : closed
             ? 'All plans released'
-            : "I'm alive",
-        style: const TextStyle(fontSize: 18),
+            : widget.firing
+            ? 'Check in to stop'
+            : 'Check in',
       ),
     );
   }
 }
 
-class _StreakCard extends StatelessWidget {
-  const _StreakCard({required this.plans});
+class _StreakTiles extends StatelessWidget {
+  const _StreakTiles({required this.plans});
 
   final List<VaultState> plans;
 
@@ -445,37 +471,15 @@ class _StreakCard extends StatelessWidget {
     final best = plans
         .map((v) => v.bestStreak)
         .fold(0, (a, b) => a > b ? a : b);
-    Widget stat(String value, String label) => Expanded(
-      child: Column(
-        children: [
-          Text(value, style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: const TextStyle(color: DmColors.muted, fontSize: 12),
-          ),
-        ],
-      ),
-    );
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
-        child: Row(
-          children: [
-            const Padding(
-              padding: EdgeInsets.only(left: 10),
-              child: Icon(
-                Icons.local_fire_department,
-                color: DmColors.warn,
-                size: 30,
-              ),
-            ),
-            stat('$streak', 'day streak'),
-            stat('$best', 'best'),
-            stat('${plans.length}', plans.length == 1 ? 'plan' : 'plans'),
-          ],
+    return StatTiles(
+      children: [
+        StatTile(value: '$streak', label: 'Day streak'),
+        StatTile(value: '$best', label: 'Best'),
+        StatTile(
+          value: '${plans.length}',
+          label: plans.length == 1 ? 'Plan' : 'Plans',
         ),
-      ),
+      ],
     );
   }
 }
@@ -507,31 +511,78 @@ class _OtherGuardBannerState extends ConsumerState<_OtherGuardBanner> {
   @override
   Widget build(BuildContext context) {
     final n = widget.plans.length;
-    return Card(
-      color: DmColors.warn.withValues(alpha: 0.12),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${n == 1 ? '1 plan is' : '$n plans are'} guarded by another device '
-              '(${widget.plans.map(planName).join(', ')}). "I\'m alive" can\'t check '
-              '${n == 1 ? 'it' : 'them'} in from this phone.',
-              style: const TextStyle(color: DmColors.warn, height: 1.35),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _busy ? null : _move,
-                child: const Text('Move guard to this phone'),
+    return DMCard(
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.lg,
+        DMSpace.lg,
+        DMSpace.sm,
+        DMSpace.xs,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const IconTile(
+                icon: Icons.phonelink_lock_outlined,
+                tone: DM.attention,
               ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(right: DMSpace.sm),
+                  child: Text(
+                    '${n == 1 ? '1 plan is' : '$n plans are'} guarded by '
+                    'another device (${widget.plans.map(planName).join(', ')}). '
+                    'Check in on this phone can\'t reach '
+                    '${n == 1 ? 'it' : 'them'}.',
+                    style: DMType.outfit(size: 15, height: 1.4),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: _busy ? null : _move,
+              child: const Text('Move guard to this phone'),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+}
+
+/// Status of pending tier [index] of [v]: due once its time has come,
+/// attention while the owner is past the check-in, else on track.
+DMStatus _tierStatus(VaultState v, int index, int now) =>
+    now >= v.ruleDueAt(index)
+    ? DMStatus.due
+    : now > v.pulseDue
+    ? DMStatus.attention
+    : DMStatus.onTrack;
+
+/// The plan card's header chip: only when something is happening.
+StatusChip? _planChip(VaultState v, int now) {
+  if (v.completed) return const StatusChip(DMStatus.released);
+  final next = v.nextRuleDue;
+  if (next != null && now > next) {
+    return const StatusChip(DMStatus.due, label: 'Due now');
+  }
+  if (next != null && now > v.pulseDue) {
+    return StatusChip(DMStatus.attention, label: 'Tier in ${span(next - now)}');
+  }
+  final released = v.rules.where((r) => r.executed).length;
+  if (released > 0) {
+    return StatusChip(
+      DMStatus.released,
+      label: '$released/${v.rules.length} released',
+    );
+  }
+  return null;
 }
 
 class _PlanCard extends ConsumerWidget {
@@ -553,7 +604,6 @@ class _PlanCard extends ConsumerWidget {
     final actions = ref.read(actionsProvider);
     final earn = ref.watch(earnProvider);
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
-    final released = vault.rules.where((r) => r.executed).length;
     final id = vault.planId;
     final usdc = ref.watch(planUsdcProvider(vault.address)).value;
     final unfunded = unfundedAssets(
@@ -562,6 +612,8 @@ class _PlanCard extends ConsumerWidget {
           .watch(planTokenBalancesProvider)
           .whenOrNull(data: (b) => b[vault.address] ?? const <String, int>{}),
     );
+    final chip = _planChip(vault, now);
+    final rails = {for (final r in vault.rules) r.rail};
 
     Future<void> run(
       String title,
@@ -573,190 +625,258 @@ class _PlanCard extends ConsumerWidget {
       await runGuarded(context, () => action(lamports), success: done);
     }
 
-    final small = OutlinedButton.styleFrom(minimumSize: const Size(0, 42));
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 14, 8, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    vault.label.isEmpty ? 'Plan ${id + 1}' : vault.label,
-                    style: t.titleLarge,
-                  ),
+    const button = Size.fromHeight(48);
+    return DMCard(
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.cardPadding,
+        DMSpace.sm,
+        DMSpace.cardPadding,
+        DMSpace.cardPadding,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  planName(vault),
+                  style: t.titleLarge,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                if (vault.completed)
-                  const _Chip(text: 'RELEASED', color: DmColors.muted)
-                else if (released > 0)
-                  _Chip(
-                    text: '$released/${vault.rules.length} RELEASED',
-                    color: DmColors.warn,
-                  ),
-                TextButton(
+              ),
+              if (chip != null) ...[const SizedBox(width: DMSpace.sm), chip],
+              Transform.translate(
+                offset: const Offset(DMSpace.md, 0),
+                child: TextButton(
                   onPressed: () => openEditor(context, vault: vault),
                   child: Text(vault.completed ? 'Start again' : 'Edit'),
                 ),
-              ],
-            ),
+              ),
+            ],
+          ),
+          Text(
+            '${sol(vault.withdrawableLamports)} SOL'
+            '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} protected',
+            style: DMType.data(),
+          ),
+          if (!vault.completed)
             Text(
-              '${sol(vault.withdrawableLamports)} SOL'
-              '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} protected'
-              '${vault.completed ? '' : ' · check in every ${span(vault.intervalSecs)}'}',
-              style: const TextStyle(color: DmColors.muted),
+              'check in every ${span(vault.intervalSecs)}',
+              style: DMType.data(),
             ),
-            for (final mint in unfunded)
-              Padding(
-                padding: const EdgeInsets.only(top: 8, right: 10),
-                child: Wrap(
-                  spacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _Chip(
-                      text: 'No ${assetSymbol(mint)} in this plan',
-                      color: DmColors.warn,
-                    ),
-                    TextButton(
-                      onPressed: () => depositToPlan(
-                        context,
-                        ref,
-                        id,
-                        asset: assetInfo(mint),
-                      ),
-                      child: Text('Deposit ${assetSymbol(mint)}'),
-                    ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 10),
-            for (final (i, r) in vault.rules.indexed)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 5),
-                child: Row(
-                  children: [
-                    Icon(
-                      r.executed
-                          ? Icons.check_circle
-                          : r.skipped
-                          ? Icons.savings_outlined
-                          : Icons.schedule,
-                      size: 18,
-                      color: r.executed
-                          ? DmColors.muted
-                          : r.skipped
-                          ? DmColors.warn
-                          : r.rail.color,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('${amountLabel(r)} → ${short(r.beneficiary)}'),
-                          const SizedBox(height: 2),
-                          Text(
-                            r.executed
-                                ? '${doneLabel(r)} ${ago(r.executedAt, now)}'
-                                : r.skipped
-                                ? skippedLabel(r)
-                                : 'After ${span(r.afterSecs)} silent · '
-                                      '${vault.ruleDueAt(i) > now ? 'in ${span(vault.ruleDueAt(i) - now)}' : 'due now'}',
-                            style: const TextStyle(
-                              color: DmColors.muted,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: RailBadge(r.rail),
-                    ),
-                  ],
-                ),
-              ),
-            if (vault.guardian != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.shield_outlined,
-                      size: 18,
-                      color: DmColors.plus,
-                    ),
-                    const SizedBox(width: 10),
-                    Text('Guardian ${short(vault.guardian!)}'),
-                  ],
-                ),
-              ),
-            if (otherGuard)
-              const Padding(
-                padding: EdgeInsets.only(top: 6),
-                child: Text(
-                  'Guarded by another device',
-                  style: TextStyle(color: DmColors.warn),
-                ),
-              ),
-            // Every web check-in is already wallet-signed.
-            if (needsWalletCheckIn(vault, now) && !ref.watch(isWebProvider))
-              _WalletCheckIn(vault: vault, now: now),
-            if (vault.isLocked(now) && !duress)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  'Locked down for ${span(vault.lockedUntil - now)}',
-                  style: const TextStyle(color: DmColors.warn),
-                ),
-              ),
-            PlanFeeLine(vault: vault, now: now),
-            const SizedBox(height: 10),
+          for (final mint in unfunded)
             Padding(
-              padding: const EdgeInsets.only(right: 10),
+              padding: const EdgeInsets.only(top: DMSpace.sm),
               child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
+                spacing: DMSpace.sm,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  OutlinedButton(
-                    style: small,
-                    onPressed: () => depositToPlan(context, ref, id),
-                    child: const Text('Deposit'),
+                  StatusChip(
+                    DMStatus.attention,
+                    label: 'No ${assetSymbol(mint)} in this plan',
+                    dense: true,
                   ),
-                  OutlinedButton(
-                    style: small,
-                    onPressed: () => withdrawFromPlan(context, ref, vault, {
-                      null: vault.withdrawableLamports,
-                      AppConfig.usdcMint: ?usdc,
-                    }),
-                    child: const Text('Withdraw'),
-                  ),
-                  OutlinedButton.icon(
-                    style: small.copyWith(
-                      foregroundColor: const WidgetStatePropertyAll(
-                        DmColors.alive,
-                      ),
-                    ),
-                    onPressed: earn.available
-                        ? () => run(
-                            'Earn with SOL',
-                            (l) => actions.earn(id, l),
-                            'Earning in this plan',
-                          )
-                        : null,
-                    icon: const Icon(Icons.trending_up, size: 18),
-                    label: Text(earn.available ? 'Earn' : 'Earn · mainnet'),
+                  TextButton(
+                    onPressed: () =>
+                        depositToPlan(context, ref, id, asset: assetInfo(mint)),
+                    child: Text('Deposit ${assetSymbol(mint)}'),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: DMSpace.lg),
+            child: Divider(height: 1),
+          ),
+          for (final (i, r) in vault.rules.indexed)
+            _TierRow(
+              icon: r.executed
+                  ? Icons.check
+                  : r.skipped
+                  ? Icons.savings_outlined
+                  : Icons.schedule,
+              iconColor: r.executed || r.skipped
+                  ? DM.sub
+                  : _tierStatus(vault, i, now).color,
+              title: '${amountLabel(r)} → ${short(r.beneficiary)}',
+              detail: r.executed
+                  ? '${doneLabel(r)} ${ago(r.executedAt, now)}'
+                  : r.skipped
+                  ? skippedLabel(r)
+                  : 'After ${span(r.afterSecs)} silent',
+              chip: r.executed
+                  ? const StatusChip(DMStatus.released, dense: true)
+                  : r.skipped
+                  ? const StatusChip(
+                      DMStatus.released,
+                      label: 'Skipped',
+                      dense: true,
+                    )
+                  : StatusChip(
+                      _tierStatus(vault, i, now),
+                      label: vault.ruleDueAt(i) > now
+                          ? 'In ${span(vault.ruleDueAt(i) - now)}'
+                          : 'Due now',
+                      dense: true,
+                    ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: DMSpace.xxs),
+            child: Wrap(
+              spacing: DMSpace.sm,
+              runSpacing: DMSpace.sm,
+              children: [
+                for (final rail in rails)
+                  DMTag(label: rail.label, icon: rail.icon),
+                if (otherGuard)
+                  const StatusChip(
+                    DMStatus.attention,
+                    label: 'Guarded by another device',
+                  ),
+              ],
+            ),
+          ),
+          if (vault.guardian != null)
+            Padding(
+              padding: const EdgeInsets.only(top: DMSpace.md),
+              child: Row(
+                children: [
+                  const Icon(Icons.shield_outlined, size: 16, color: DM.mist),
+                  const SizedBox(width: DMSpace.sm),
+                  Text(
+                    'Guardian ${short(vault.guardian!)}',
+                    style: DMType.data(),
+                  ),
+                ],
+              ),
+            ),
+          // Every web check-in is already wallet-signed.
+          if (needsWalletCheckIn(vault, now) && !ref.watch(isWebProvider))
+            _WalletCheckIn(vault: vault, now: now),
+          if (vault.isLocked(now) && !duress)
+            _LockedLine(until: vault.lockedUntil, now: now),
+          PlanFeeLine(vault: vault, now: now),
+          const SizedBox(height: DMSpace.lg),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(minimumSize: button),
+                  onPressed: () => depositToPlan(context, ref, id),
+                  child: const Text('Deposit'),
+                ),
+              ),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(minimumSize: button),
+                  onPressed: () => withdrawFromPlan(context, ref, vault, {
+                    null: vault.withdrawableLamports,
+                    AppConfig.usdcMint: ?usdc,
+                  }),
+                  child: const Text('Withdraw'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: DMSpace.md),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              minimumSize: button,
+              foregroundColor: DM.signal,
+            ),
+            onPressed: earn.available
+                ? () => run(
+                    'Earn with SOL',
+                    (l) => actions.earn(id, l),
+                    'Earning in this plan',
+                  )
+                : null,
+            icon: const Icon(Icons.trending_up, size: 18),
+            label: Text(earn.available ? 'Earn' : 'Earn · mainnet'),
+          ),
+        ],
       ),
     );
   }
+}
+
+/// One tier on a plan card: icon tile, what goes where, when, and a chip.
+class _TierRow extends StatelessWidget {
+  const _TierRow({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.detail,
+    required this.chip,
+  });
+
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String detail;
+  final Widget chip;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: DMSpace.lg),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox.square(
+          dimension: 32,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: DM.raise,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 17, color: iconColor),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: DMType.outfit(size: 15.5, height: 1.3)),
+              const SizedBox(height: 3),
+              Text(detail, style: DMType.data(size: 12.5)),
+              const SizedBox(height: DMSpace.sm),
+              chip,
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// "Locked down for 2d 3h", in the lockdown color. Hidden under duress by
+/// the caller.
+class _LockedLine extends StatelessWidget {
+  const _LockedLine({required this.until, required this.now});
+
+  final int until;
+  final int now;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: DMSpace.md),
+    child: Row(
+      children: [
+        const Icon(Icons.lock_outline, size: 16, color: DM.locked),
+        const SizedBox(width: DMSpace.sm),
+        Expanded(
+          child: Text(
+            'Locked down for ${span(until - now)}',
+            style: DMType.data(color: DM.locked),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Guard-key check-ins stop a year after the owner's last wallet action,
@@ -788,22 +908,31 @@ class _WalletCheckInState extends ConsumerState<_WalletCheckIn> {
   Widget build(BuildContext context) {
     final v = widget.vault;
     final stopped = !v.guardCanPulse(widget.now);
-    return Container(
-      margin: const EdgeInsets.only(top: 8, right: 10),
-      padding: const EdgeInsets.fromLTRB(12, 10, 8, 4),
-      decoration: BoxDecoration(
-        color: DmColors.warn.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-      ),
+    return Padding(
+      padding: const EdgeInsets.only(top: DMSpace.lg),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            stopped
-                ? "This phone can no longer check in for this plan. Confirm with your wallet, or the next tier releases on schedule."
-                : 'This phone can check in for this plan for ${span(v.guardWindowEnd - widget.now)} more. '
-                      'Confirm with your wallet to extend it by a year.',
-            style: const TextStyle(color: DmColors.warn, height: 1.35),
+          const Divider(height: 1),
+          const SizedBox(height: DMSpace.lg),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(top: 2),
+                child: Icon(Icons.update, size: 18, color: DM.attention),
+              ),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: Text(
+                  stopped
+                      ? "This phone can no longer check in for this plan. Confirm with your wallet, or the next tier releases on schedule."
+                      : 'This phone can check in for this plan for ${span(v.guardWindowEnd - widget.now)} more. '
+                            'Confirm with your wallet to extend it by a year.',
+                  style: DMType.outfit(size: 14, height: 1.4),
+                ),
+              ),
+            ],
           ),
           Align(
             alignment: Alignment.centerRight,
@@ -836,45 +965,51 @@ class _LegacyPlansCardState extends ConsumerState<_LegacyPlansCard> {
     final ids = ref.watch(legacyPlansProvider).value ?? const [];
     if (ids.isEmpty) return const SizedBox.shrink();
     final n = ids.length;
+    // Sits under the page title, inside the tab's gutter.
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      child: Card(
-        color: DmColors.raised,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.history, color: DmColors.warn),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      n == 1
-                          ? '1 plan from an older version'
-                          : '$n plans from an older version',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+      padding: const EdgeInsets.only(top: DMSpace.xl),
+      child: DMCard(
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.lg,
+          DMSpace.lg,
+          DMSpace.sm,
+          DMSpace.xs,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const IconTile(icon: Icons.history, tone: DM.attention),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    n == 1
+                        ? '1 plan from an older version'
+                        : '$n plans from an older version',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              const Text(
+                ),
+              ],
+            ),
+            const SizedBox(height: DMSpace.md),
+            Padding(
+              padding: const EdgeInsets.only(right: DMSpace.sm),
+              child: Text(
                 'An upgrade changed the plan format, so these plans no longer '
                 'run. Recover them to close them and return all their SOL to '
                 'your wallet, then create new plans.',
-                style: TextStyle(color: DmColors.muted, height: 1.4),
+                style: Theme.of(context).textTheme.bodyMedium,
               ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: _busy ? null : () => _recover(ids),
-                  child: Text(_busy ? 'Recovering…' : 'Recover SOL'),
-                ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _busy ? null : () => _recover(ids),
+                child: Text(_busy ? 'Recovering…' : 'Recover SOL'),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -898,87 +1033,82 @@ class _ArmIntro extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final t = Theme.of(context).textTheme;
     final fees = ref.watch(feesProvider).value;
     final terms = ref.watch(subscriptionTermsProvider).value;
+    String? fee(Rail r) => fees == null
+        ? null
+        : percentText(
+            (r == Rail.solana ? fees.feeBpsPublic : fees.feeBpsPrivate) / 10000,
+          );
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.gutter,
+        DMSpace.md,
+        DMSpace.gutter,
+        DMSpace.xxxl,
+      ),
       children: [
-        Text('Arm your switch', style: t.headlineMedium),
-        const SizedBox(height: 10),
-        Text(
-          'Build a release plan: who receives what, after how long without a check-in, '
-          'and how it gets there: a plain Solana transfer, privately through Cloak, or as shielded Zcash. '
-          'Create as many plans as you like; one check-in keeps them all alive.',
-          style: t.bodyMedium?.copyWith(color: DmColors.muted, height: 1.45),
+        const PageHeader(
+          title: 'Arm your switch',
+          subtitle:
+              'Build a release plan: who receives what, after how long without '
+              'a check-in, and how it gets there. Create as many plans as you '
+              'like; one check-in keeps them all alive.',
+          trailing: DeadmanMark(size: 30),
         ),
-        const SizedBox(height: 22),
-        for (final r in Rail.values)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Card(
-              child: ListTile(
-                leading: Icon(r.icon, color: r.color),
-                title: Text(r.label),
-                subtitle: Text(r.blurb),
+        const _LegacyPlansCard(),
+        const SizedBox(height: DMSpace.xxl),
+        DMListGroup(
+          children: [
+            for (final r in Rail.values)
+              DMListRow(
+                leading: IconTile(icon: r.icon),
+                title: r.label,
+                subtitle: r.blurb,
+                trailing: switch (fee(r)) {
+                  final f? => Text(f, style: DMType.data(color: DM.mist)),
+                  null => null,
+                },
               ),
-            ),
-          ),
-        const SizedBox(height: 14),
+          ],
+        ),
+        const SizedBox(height: DMSpace.xxl),
         FilledButton(
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56)),
           onPressed: () => openEditor(context),
           child: const Text('Build release plan'),
         ),
-        const SizedBox(height: 10),
-        OutlinedButton.icon(
+        const SizedBox(height: DMSpace.md),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(48),
+            padding: const EdgeInsets.symmetric(
+              horizontal: DMSpace.lg,
+              vertical: DMSpace.md,
+            ),
+          ),
           onPressed: () => openVestingEditor(context),
-          icon: const Icon(Icons.stacked_line_chart, color: DmColors.plus),
-          label: const Text(
+          child: const Text(
             'Or set up vesting: release in installments over time',
+            textAlign: TextAlign.center,
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: DMSpace.xl),
         Text(
-          '${fees == null ? 'Deadman only charges when a tier releases funds.' : 'Deadman only charges when a tier releases funds: '
-                    '${percentText(fees.feeBpsPublic / 10000)} on Solana transfers, ${percentText(fees.feeBpsPrivate / 10000)} on private rails.'}'
-          '${terms == null ? '' : ' Or pay a flat ${amountText(terms.pricePerPeriod, terms.mint)} '
-                    '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} for all your plans instead '
-                    '(${terms.minPeriods} ${periodWord(terms, terms.minPeriods)} minimum).'}',
+          terms == null
+              ? 'No subscription. Deadman only charges when a tier releases '
+                    'funds.'
+              : 'Deadman only charges when a tier releases funds. Or pay a '
+                    'flat ${amountText(terms.pricePerPeriod, terms.mint)} '
+                    '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} '
+                    'for all your plans instead (${terms.minPeriods} '
+                    '${periodWord(terms, terms.minPeriods)} minimum).',
           textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: DmColors.muted,
-            fontSize: 12,
-            height: 1.4,
-          ),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.45),
         ),
       ],
     );
   }
-}
-
-class _Chip extends StatelessWidget {
-  const _Chip({required this.text, required this.color});
-
-  final String text;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-    decoration: BoxDecoration(
-      color: color.withValues(alpha: 0.14),
-      borderRadius: BorderRadius.circular(99),
-    ),
-    child: Text(
-      text,
-      style: TextStyle(
-        color: color,
-        fontWeight: FontWeight.w700,
-        fontSize: 12,
-        letterSpacing: 1,
-      ),
-    ),
-  );
 }
 
 class _Retry extends StatelessWidget {
@@ -990,18 +1120,18 @@ class _Retry extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
     child: Padding(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(DMSpace.xxl),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.cloud_off, color: DmColors.muted, size: 36),
-          const SizedBox(height: 12),
+          const Icon(Icons.cloud_off, color: DM.mist, size: 32),
+          const SizedBox(height: DMSpace.md),
           Text(
             message,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: DmColors.muted),
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
           TextButton(onPressed: onRetry, child: const Text('Retry')),
         ],
       ),
@@ -1014,11 +1144,11 @@ Future<int?> askAmount(BuildContext context, String title) {
   return showDialog<int>(
     context: context,
     builder: (context) => AlertDialog(
-      backgroundColor: DmColors.surface,
       title: Text(title),
       content: TextField(
         controller: controller,
         autofocus: true,
+        style: DMType.mono(size: 20),
         keyboardType: const TextInputType.numberWithOptions(decimal: true),
         decoration: const InputDecoration(
           suffixText: 'SOL',
@@ -1030,7 +1160,8 @@ Future<int?> askAmount(BuildContext context, String title) {
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
-        TextButton(
+        FilledButton(
+          style: FilledButton.styleFrom(minimumSize: const Size(96, 44)),
           onPressed: () => Navigator.pop(context, parseSol(controller.text)),
           child: const Text('Confirm'),
         ),
@@ -1105,7 +1236,7 @@ Future<void> withdrawFromPlan(
 }
 
 /// A vesting plan: per-schedule progress, committed funds, and owner
-/// actions. Not part of "I'm alive"; panic lockdown still freezes it.
+/// actions. A check-in does not touch it; panic lockdown still freezes it.
 class VestingPlanCard extends ConsumerStatefulWidget {
   const VestingPlanCard({super.key, required this.vault, required this.now});
 
@@ -1130,7 +1261,6 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: const Text('Revoke vesting?'),
         content: Text(
           'Vesting on ${planName(v)} stops now for every schedule. What has vested so far '
@@ -1143,7 +1273,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
             child: const Text('Cancel'),
           ),
           TextButton(
-            style: TextButton.styleFrom(foregroundColor: DmColors.danger),
+            style: TextButton.styleFrom(foregroundColor: DM.due),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Revoke'),
           ),
@@ -1181,64 +1311,86 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     ];
     final revoked = v.revokedAt != 0;
     final settled = vestingSettled(v);
-    final small = OutlinedButton.styleFrom(minimumSize: const Size(0, 42));
+    const button = Size.fromHeight(48);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(child: Text(planName(v), style: t.titleLarge)),
-                if (revoked)
-                  const _Chip(text: 'REVOKED', color: DmColors.warn)
-                else if (settled)
-                  const _Chip(text: 'PAID OUT', color: DmColors.muted)
-                else
-                  const _Chip(text: 'VESTING', color: DmColors.plus),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '${sol(v.withdrawableLamports)} SOL'
-              '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} in plan · '
-              '${v.revocable ? 'revocable' : 'irrevocable'} · '
-              '${now < v.startAt ? 'starts in ${span(v.startAt - now)}' : 'started ${ago(v.startAt, now)}'}',
-              style: const TextStyle(color: DmColors.muted),
-            ),
-            if (committed.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                'Committed: ${committed.join(' · ')}',
-                style: const TextStyle(color: DmColors.plus, fontSize: 13),
-              ),
-            ],
-            if (shortBy.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
+    return DMCard(
+      padding: const EdgeInsets.all(DMSpace.cardPadding),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
                 child: Text(
-                  'Underfunded by ${shortBy.join(' · ')}: deposit more or releases stop when the plan runs dry.',
-                  style: const TextStyle(
-                    color: DmColors.warn,
-                    fontSize: 12,
-                    height: 1.35,
-                  ),
+                  planName(v),
+                  style: t.titleLarge,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-            for (final (i, r) in v.rules.indexed) ...[
-              const Divider(height: 24, color: DmColors.line),
-              Builder(
-                builder: (context) {
-                  final p = scheduleProgress(v, i, now);
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      VestingScheduleView(rule: r, progress: p, now: now),
-                      if (p.claimable > 0)
-                        Align(
-                          alignment: Alignment.centerRight,
+              const SizedBox(width: DMSpace.sm),
+              if (revoked)
+                const StatusChip(DMStatus.attention, label: 'Revoked')
+              else if (settled)
+                const StatusChip(DMStatus.released, label: 'Paid out')
+              else
+                const StatusChip(DMStatus.onTrack, label: 'Vesting'),
+            ],
+          ),
+          const SizedBox(height: DMSpace.sm),
+          Text(
+            '${sol(v.withdrawableLamports)} SOL'
+            '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'} in plan · '
+            '${v.revocable ? 'revocable' : 'irrevocable'} · '
+            '${now < v.startAt ? 'starts in ${span(v.startAt - now)}' : 'started ${ago(v.startAt, now)}'}',
+            style: DMType.data(),
+          ),
+          if (committed.isNotEmpty)
+            Text(
+              'Committed: ${committed.join(' · ')}',
+              style: DMType.data(color: DM.bone),
+            ),
+          if (shortBy.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: DMSpace.md),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.warning_amber_rounded,
+                      size: 18,
+                      color: DM.attention,
+                    ),
+                  ),
+                  const SizedBox(width: DMSpace.md),
+                  Expanded(
+                    child: Text(
+                      'Underfunded by ${shortBy.join(' · ')}: deposit more or releases stop when the plan runs dry.',
+                      style: DMType.outfit(size: 14, height: 1.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          for (final (i, r) in v.rules.indexed) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: DMSpace.lg),
+              child: Divider(height: 1),
+            ),
+            Builder(
+              builder: (context) {
+                final p = scheduleProgress(v, i, now);
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    VestingScheduleView(rule: r, progress: p, now: now),
+                    if (p.claimable > 0)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Transform.translate(
+                          offset: const Offset(DMSpace.md, 0),
                           child: TextButton.icon(
                             onPressed: _busy
                                 ? null
@@ -1254,34 +1406,31 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
                             ),
                           ),
                         ),
-                    ],
-                  );
-                },
-              ),
-            ],
-            if (v.isLocked(now) && !duress)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  'Locked down for ${span(v.lockedUntil - now)}',
-                  style: const TextStyle(color: DmColors.warn),
-                ),
-              ),
-            PlanFeeLine(vault: v, now: now),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton(
-                  style: small,
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+          if (v.isLocked(now) && !duress)
+            _LockedLine(until: v.lockedUntil, now: now),
+          PlanFeeLine(vault: v, now: now),
+          const SizedBox(height: DMSpace.lg),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(minimumSize: button),
                   onPressed: _busy
                       ? null
                       : () => depositToPlan(context, ref, v.planId),
                   child: const Text('Deposit'),
                 ),
-                OutlinedButton(
-                  style: small,
+              ),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(minimumSize: button),
                   onPressed: _busy
                       ? null
                       : () => withdrawFromPlan(context, ref, v, {
@@ -1295,20 +1444,21 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
                         }),
                   child: const Text('Withdraw'),
                 ),
-                if (v.revocable && !revoked)
-                  OutlinedButton(
-                    style: small.copyWith(
-                      foregroundColor: const WidgetStatePropertyAll(
-                        DmColors.danger,
-                      ),
-                    ),
-                    onPressed: _busy ? null : _revoke,
-                    child: const Text('Revoke'),
-                  ),
-              ],
+              ),
+            ],
+          ),
+          if (v.revocable && !revoked) ...[
+            const SizedBox(height: DMSpace.md),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                minimumSize: button,
+                foregroundColor: DM.due,
+              ),
+              onPressed: _busy ? null : _revoke,
+              child: const Text('Revoke'),
             ),
           ],
-        ),
+        ],
       ),
     );
   }

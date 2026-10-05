@@ -2,7 +2,9 @@ import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/assets.dart';
 import 'package:deadman/state/providers.dart';
+import 'package:deadman/ui/format.dart';
 import 'package:deadman/ui/screens/pulse_tab.dart';
+import 'package:deadman/ui/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,6 +19,8 @@ Future<void> _pump(
   Map<String, Map<String, int>> planTokens = const {},
   SubscriptionTerms? terms,
   AccountSubscription? sub,
+  bool duress = false,
+  List<int> legacy = const [],
 }) async {
   tester.view.physicalSize = const Size(1200, 6000);
   tester.view.devicePixelRatio = 1;
@@ -28,6 +32,7 @@ Future<void> _pump(
       overrides: [
         prefsProvider.overrideWithValue(prefs),
         vaultsProvider.overrideWith((ref) async => plans),
+        legacyPlansProvider.overrideWith((ref) async => legacy),
         guardAddressProvider.overrideWith((ref) async => addr(2)),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
         planTokenBalancesProvider.overrideWith((ref) async => planTokens),
@@ -42,12 +47,25 @@ Future<void> _pump(
           ),
         ),
       ],
-      child: const MaterialApp(home: Scaffold(body: PulseTab())),
+      child: MaterialApp(
+        theme: buildTheme(),
+        home: const Scaffold(body: PulseTab()),
+      ),
     ),
   );
+  if (duress) {
+    ProviderScope.containerOf(tester.element(find.byType(PulseTab)))
+        .read(sessionProvider.notifier)
+        .unlock(duress: true);
+  }
   await tester.pump();
   await tester.pump();
 }
+
+int _nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+Color? _countdownColor(WidgetTester tester) =>
+    tester.widget<Text>(find.byKey(const Key('pulse-countdown'))).style?.color;
 
 /// Disposes the tab so its 1 s ticker stops.
 Future<void> _unmount(WidgetTester tester) =>
@@ -78,8 +96,8 @@ void main() {
     );
     await _pump(tester, [inheritance, vesting]);
 
-    expect(find.text("I'm alive"), findsOneWidget);
-    expect(find.text('plan'), findsOneWidget); // streak card: 1 plan
+    expect(find.text('Check in'), findsOneWidget);
+    expect(find.text('PLAN'), findsOneWidget); // stat tiles: 1 plan
     expect(find.text('Kids'), findsOneWidget);
     expect(find.text('Vesting plans'), findsOneWidget);
     expect(find.text('VESTING'), findsOneWidget);
@@ -159,8 +177,8 @@ void main() {
       },
     );
 
-    expect(find.text('No USDC in this plan'), findsOneWidget);
-    expect(find.text('No SOL in this plan'), findsNothing);
+    expect(find.text('NO USDC IN THIS PLAN'), findsOneWidget);
+    expect(find.text('NO SOL IN THIS PLAN'), findsNothing);
     await tester.tap(find.text('Deposit USDC'));
     await tester.pumpAndSettle();
     expect(find.text('Deposit USDC'), findsWidgets);
@@ -192,7 +210,217 @@ void main() {
         kids.address: {usdc: 1},
       },
     );
-    expect(find.textContaining('in this plan'), findsNothing);
+    expect(find.textContaining('IN THIS PLAN'), findsNothing);
+    await _unmount(tester);
+  });
+
+  group('pulse ring', () {
+    VaultState kids(
+      int now, {
+      required int silentFor,
+      List<RuleState>? rules,
+    }) => vault(
+      planId: 0,
+      label: 'Kids',
+      guard: addr(2),
+      lastPulse: now - silentFor,
+      ownerLastSeen: now,
+      rules: rules,
+    );
+
+    testWidgets('on track: signal ring, Check in, stat tiles, tier chip', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)]);
+      expect(find.text('ON TRACK'), findsOneWidget);
+      expect(find.text('until next check-in'), findsOneWidget);
+      expect(_countdownColor(tester), DM.signal);
+      expect(find.text('Check in'), findsOneWidget);
+      expect(find.byIcon(Icons.fingerprint), findsOneWidget);
+      for (final label in ['DAY STREAK', 'BEST', 'PLAN']) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(find.text('Release plans'), findsOneWidget);
+      expect(find.byKey(const Key('new-plan')), findsOneWidget);
+      // A calm plan carries no header chip, only its tier countdown.
+      expect(find.textContaining(RegExp(r'^IN \d+D')), findsOneWidget);
+      expect(find.text('After 10d 0h silent'), findsOneWidget);
+      expect(find.text('Solana'), findsOneWidget); // rail tag
+      expect(find.text('Deposit'), findsOneWidget);
+      expect(find.text('Withdraw'), findsOneWidget);
+      expect(find.text('Earn · mainnet'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('the last quarter of the window asks for a check-in soon', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 6 * 86400 + 43200)]);
+      expect(find.text('CHECK IN SOON'), findsOneWidget);
+      expect(_countdownColor(tester), DM.attention);
+      expect(find.text('Check in'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('past the check-in: attention ring counts to the tier', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 8 * 86400)]);
+      expect(find.text('CHECK-IN OVERDUE'), findsOneWidget);
+      expect(find.text('until tier 1 releases'), findsOneWidget);
+      expect(_countdownColor(tester), DM.attention);
+      expect(find.textContaining('TIER IN '), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('a due tier: dashed due ring and Check in to stop', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 11 * 86400)]);
+      expect(find.text('TIER DUE'), findsOneWidget);
+      expect(
+        find.text('past due, releasing to ${short(addr(10))}'),
+        findsOneWidget,
+      );
+      expect(_countdownColor(tester), DM.due);
+      expect(find.text('Check in to stop'), findsOneWidget);
+      // Plan header and the tier itself.
+      expect(find.text('DUE NOW'), findsNWidgets(2));
+      await _unmount(tester);
+    });
+
+    testWidgets('released tiers stay as history with a grey chip', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [
+        kids(
+          now,
+          silentFor: 0,
+          rules: [
+            rule(executedAt: now - 7200),
+            rule(seed: 11),
+          ],
+        ),
+      ]);
+      expect(find.text('1/2 RELEASED'), findsOneWidget);
+      expect(find.text('RELEASED'), findsOneWidget);
+      expect(find.textContaining('Released 2h 0m ago'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('every plan released: nothing to check in', (tester) async {
+      final now = _nowSecs();
+      await _pump(tester, [
+        kids(now, silentFor: 0, rules: [rule(executedAt: now - 60)]),
+      ]);
+      expect(find.text('ALL RELEASED'), findsOneWidget);
+      expect(find.text('Done'), findsOneWidget);
+      expect(find.text('All plans released'), findsOneWidget);
+      expect(find.text('Start again'), findsOneWidget);
+      await _unmount(tester);
+    });
+  });
+
+  testWidgets('older-version plans are listed under the page title', (
+    tester,
+  ) async {
+    final now = _nowSecs();
+    await _pump(
+      tester,
+      [vault(guard: addr(2), lastPulse: now, ownerLastSeen: now)],
+      legacy: const [7],
+    );
+    final card = find.text('1 plan from an older version');
+    expect(card, findsOneWidget);
+    expect(
+      tester.getTopLeft(card).dy,
+      greaterThan(tester.getBottomLeft(find.text('Pulse').first).dy),
+    );
+    expect(find.text('Recover SOL'), findsOneWidget);
+    await _unmount(tester);
+
+    await _pump(tester, const [], legacy: const [7, 8]);
+    expect(
+      tester.getTopLeft(find.text('2 plans from an older version')).dy,
+      greaterThan(tester.getBottomLeft(find.text('Arm your switch')).dy),
+    );
+    await _unmount(tester);
+  });
+
+  testWidgets('no plans: the arm-switch intro lists rails with their fee', (
+    tester,
+  ) async {
+    await _pump(tester, const []);
+    expect(find.text('Arm your switch'), findsOneWidget);
+    for (final rail in ['Solana', 'Cloak', 'Zcash']) {
+      expect(find.text(rail), findsOneWidget);
+    }
+    expect(find.text('2%'), findsOneWidget);
+    expect(find.text('5%'), findsNWidgets(2));
+    expect(find.text('Build release plan'), findsOneWidget);
+    expect(
+      find.text(
+        'No subscription. Deadman only charges when a tier releases funds.',
+      ),
+      findsOneWidget,
+    );
+    await _unmount(tester);
+  });
+
+  testWidgets('Deposit asks for SOL or USDC and rejects zero', (tester) async {
+    final now = _nowSecs();
+    await _pump(tester, [
+      vault(guard: addr(2), lastPulse: now, ownerLastSeen: now),
+    ]);
+    await tester.tap(find.text('Deposit'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SegmentedButton<AssetInfo>), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '0');
+    await tester.tap(find.text('Confirm'));
+    await tester.pump();
+    expect(find.text('Enter an amount in SOL'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await _unmount(tester);
+  });
+
+  testWidgets('under duress the lock stays hidden', (tester) async {
+    final now = _nowSecs();
+    final plan = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
+    final locked = VaultState(
+      address: plan.address,
+      owner: plan.owner,
+      planId: plan.planId,
+      label: plan.label,
+      guard: plan.guard,
+      guardian: plan.guardian,
+      intervalSecs: plan.intervalSecs,
+      lockSecs: plan.lockSecs,
+      skipGraceSecs: plan.skipGraceSecs,
+      lastPulse: plan.lastPulse,
+      ownerLastSeen: plan.ownerLastSeen,
+      lockedUntil: now + 3600,
+      guardianReadyAt: 0,
+      totalPulses: 1,
+      streak: 1,
+      bestStreak: 1,
+      rules: plan.rules,
+      lamports: 0,
+      withdrawableLamports: 0,
+    );
+    await _pump(tester, [locked]);
+    expect(find.text('LOCKED'), findsOneWidget);
+    expect(find.textContaining('Locked down for'), findsOneWidget);
+    await _unmount(tester);
+
+    await _pump(tester, [locked], duress: true);
+    expect(find.text('LOCKED'), findsNothing);
+    expect(find.textContaining('Locked down for'), findsNothing);
     await _unmount(tester);
   });
 

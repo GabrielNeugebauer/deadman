@@ -4,7 +4,6 @@ import '../solana/deadman_api.dart';
 import '../state/assets.dart';
 import '../state/plan_math.dart';
 import 'format.dart';
-import 'theme.dart';
 
 extension RailUi on Rail {
   String get label => switch (this) {
@@ -17,12 +16,6 @@ extension RailUi on Rail {
     Rail.solana => 'Direct transfer to a Solana wallet',
     Rail.cloak => 'Shielded on Solana via Cloak',
     Rail.zcash => 'Delivered as shielded ZEC',
-  };
-
-  Color get color => switch (this) {
-    Rail.solana => DmColors.alive,
-    Rail.cloak => DmColors.plus,
-    Rail.zcash => DmColors.warn,
   };
 
   IconData get icon => switch (this) {
@@ -72,34 +65,4 @@ enum Cadence {
 
   static Cadence of(int interval) =>
       values.firstWhere((c) => c.interval == interval, orElse: () => week);
-}
-
-class RailBadge extends StatelessWidget {
-  const RailBadge(this.rail, {super.key});
-
-  final Rail rail;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-    decoration: BoxDecoration(
-      color: rail.color.withValues(alpha: 0.14),
-      borderRadius: BorderRadius.circular(99),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(rail.icon, size: 13, color: rail.color),
-        const SizedBox(width: 4),
-        Text(
-          rail.label,
-          style: TextStyle(
-            color: rail.color,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    ),
-  );
 }

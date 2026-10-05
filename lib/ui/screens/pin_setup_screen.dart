@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/providers.dart';
-import '../theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/pin_pad.dart';
+import '../widgets/pin_scaffold.dart';
 
 enum _Step { pin, confirm, duress }
 
@@ -53,18 +53,9 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
-    final (title, body, color) = switch (_step) {
-      _Step.pin => (
-        'Choose your PIN',
-        'Six digits to open Deadman.',
-        DmColors.alive,
-      ),
-      _Step.confirm => (
-        'Confirm your PIN',
-        'Enter it once more.',
-        DmColors.alive,
-      ),
+    final (title, body) = switch (_step) {
+      _Step.pin => ('Choose your PIN', 'Six digits to open Deadman.'),
+      _Step.confirm => ('Confirm your PIN', 'Enter it once more.'),
       _Step.duress => (
         'Choose a duress PIN',
         ref.read(isWebProvider)
@@ -72,41 +63,14 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
                   'but plans guarded by this browser are silently locked while the page stays open. '
                   'Duress protection is strongest in the Android app.'
             : 'If someone forces you to open the app, enter this instead. Everything looks normal, but your vault is silently locked down and withdrawals stall.',
-        DmColors.warn,
       ),
     };
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Spacer(),
-              Icon(
-                _step == _Step.duress
-                    ? Icons.front_hand_outlined
-                    : Icons.pin_outlined,
-                color: color,
-                size: 36,
-              ),
-              const SizedBox(height: 16),
-              Text(title, style: t.headlineMedium, textAlign: TextAlign.center),
-              const SizedBox(height: 10),
-              Text(
-                body,
-                textAlign: TextAlign.center,
-                style: t.bodyMedium?.copyWith(
-                  color: DmColors.muted,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 32),
-              PinPad(key: ValueKey(_step), onComplete: _onPin),
-              const Spacer(),
-            ],
-          ),
-        ),
-      ),
+    return PinScaffold(
+      title: title,
+      body: body,
+      step: _step.index + 1,
+      steps: _Step.values.length,
+      pad: PinPad(key: ValueKey(_step), onComplete: _onPin),
     );
   }
 }

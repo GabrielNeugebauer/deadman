@@ -42,12 +42,11 @@ void main() {
     );
     expect(find.text('Pricing'), findsOneWidget);
     expect(
-      find.text(
-        'Free to use. A fee is taken from each release: 2% via Solana, '
-        '5% via Cloak or Zcash.',
-      ),
+      find.text('Free to use. A fee is taken from each release:'),
       findsOneWidget,
     );
+    expect(find.bySemanticsLabel('Via Solana: 2%'), findsOneWidget);
+    expect(find.bySemanticsLabel('Via Cloak or Zcash: 5%'), findsOneWidget);
     expect(
       find.textContaining(
         'Or pay 10 USDC a month and releases carry no fee: one subscription '
@@ -64,7 +63,8 @@ void main() {
 
   testWidgets('not offered: only the release fee', (tester) async {
     await _pump(tester, null);
-    expect(find.textContaining('2% via Solana'), findsOneWidget);
+    expect(find.text('Via Solana'), findsOneWidget);
+    expect(find.text('2%'), findsOneWidget);
     expect(find.textContaining('a month'), findsNothing);
   });
 }

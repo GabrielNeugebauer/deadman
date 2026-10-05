@@ -3,13 +3,32 @@ import 'package:flutter/material.dart';
 import '../../solana/deadman_client.dart';
 import '../theme.dart';
 
+/// A snackbar on raise. Errors keep the raise fill and carry a due-colored
+/// icon: status color marks the message, it never floods the bar.
 void toast(BuildContext context, String message, {bool error = false}) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: Text(message),
-        backgroundColor: error ? DmColors.danger : DmColors.raised,
+        key: error ? const ValueKey('toast-error') : null,
+        content: error
+            ? Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 1),
+                    child: Icon(
+                      Icons.error_outline,
+                      size: 18,
+                      color: DM.due,
+                      semanticLabel: 'Error',
+                    ),
+                  ),
+                  const SizedBox(width: DMSpace.md),
+                  Expanded(child: Text(message)),
+                ],
+              )
+            : Text(message),
         duration: Duration(seconds: message.length > 90 ? 8 : 4),
       ),
     );

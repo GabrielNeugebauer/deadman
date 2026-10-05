@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import '../../../state/assets.dart';
 import '../../../state/vesting.dart' show isAddress;
 import '../../format.dart';
-import '../../theme.dart';
+import '../brand/brand.dart';
 import '../feedback.dart';
+import 'plan_steps.dart' show pickChip;
 
 /// "Which money": one chip per asset in [assets], plus "More…" for any other
 /// token when [allowOther].
@@ -29,10 +30,10 @@ class AssetChips extends StatelessWidget {
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: const Text('Other token'),
         content: TextField(
           controller: controller,
+          style: DMType.mono(size: 14),
           decoration: const InputDecoration(
             labelText: 'Token mint address',
             helperText: 'Fixed amounts for other tokens are in base units.',
@@ -61,18 +62,19 @@ class AssetChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Wrap(
-    spacing: 8,
-    runSpacing: 4,
+    spacing: DMSpace.sm,
+    runSpacing: DMSpace.xxs,
     children: [
       for (final a in assets)
-        ChoiceChip(
-          label: Text(a.symbol),
+        pickChip(
+          label: a.symbol,
+          mono: true,
           selected: mint == a.mint,
           onSelected: (_) => onChanged(a.mint),
         ),
       if (allowOther)
-        ChoiceChip(
-          label: Text(_custom ? 'Other: ${short(mint!)}' : 'More…'),
+        pickChip(
+          label: _custom ? 'Other: ${short(mint!)}' : 'More…',
           selected: _custom,
           onSelected: (_) => _pickOther(context),
         ),

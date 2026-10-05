@@ -4,6 +4,7 @@ import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/format.dart';
+import 'package:deadman/ui/theme.dart';
 import 'package:deadman/ui/widgets/plan_pricing.dart';
 import 'package:deadman/wallet/wallet_bridge.dart';
 import 'package:flutter/material.dart';
@@ -91,6 +92,7 @@ Future<_SubApi> _pump(
         ),
       ],
       child: MaterialApp(
+        theme: buildTheme(),
         home: Scaffold(body: ListView(children: [child])),
       ),
     ),
@@ -139,12 +141,20 @@ void main() {
       await line(tester, vault());
       expect(find.text('Release fee: 2% (5% private rails)'), findsOneWidget);
       expect(find.byType(TextButton), findsNothing);
+      final icon = tester.widget<Icon>(
+        find.byIcon(Icons.receipt_long_outlined),
+      );
+      expect(icon.color, DM.mist);
     });
 
     testWidgets('covered by the account subscription: 0%', (tester) async {
       await line(tester, vault(), sub: _sub(_now() + 86400));
       expect(find.text('0% release fee · monthly plan'), findsOneWidget);
       expect(find.byType(TextButton), findsNothing);
+      final icon = tester.widget<Icon>(
+        find.byIcon(Icons.receipt_long_outlined),
+      );
+      expect(icon.color, DM.signal);
     });
 
     testWidgets('inheritance: a check-in after the end brings the fee back', (

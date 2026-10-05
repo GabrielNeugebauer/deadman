@@ -7,7 +7,7 @@ import '../../state/actions.dart';
 import '../../state/assets.dart';
 import '../../state/providers.dart';
 import '../format.dart';
-import '../theme.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 
 /// Shielded notes paid to this phone's Cloak address. Scans on open: the
@@ -46,7 +46,6 @@ class _ShieldedInboxScreenState extends ConsumerState<ShieldedInboxScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: const Text('Withdraw to your wallet?'),
         content: Text(
           '${amountText(total, mint)} leaves the shielded pool to ${short(owner)}.'
@@ -122,60 +121,91 @@ class _ShieldedInboxScreenState extends ConsumerState<ShieldedInboxScreen> {
                 for (final n in notes) {
                   (byMint[n.mint] ??= []).add(n);
                 }
+                // One filled button per screen: with several assets, each
+                // withdrawal is an outlined action.
+                final single = byMint.length == 1;
                 return ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+                  padding: const EdgeInsets.fromLTRB(
+                    DMSpace.gutter,
+                    DMSpace.md,
+                    DMSpace.gutter,
+                    DMSpace.xxxl,
+                  ),
                   children: [
                     for (final MapEntry(key: mint, value: group)
-                        in byMint.entries)
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(18),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Text(
-                                amountText(
-                                  group.fold(0, (sum, n) => sum + n.amount),
-                                  mint,
-                                ),
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '${group.length} shielded '
-                                '${group.length == 1 ? 'note' : 'notes'}',
-                                style: const TextStyle(color: DmColors.muted),
-                              ),
-                              if (group.length > 1)
-                                for (final n in group)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 6),
-                                    child: Text(
-                                      amountText(n.amount, n.mint),
-                                      style: const TextStyle(
-                                        color: DmColors.muted,
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                  ),
-                              const SizedBox(height: 14),
-                              FilledButton.icon(
-                                onPressed: _busy || !hasWallet
-                                    ? null
-                                    : () => _withdraw(group),
-                                icon: const Icon(
-                                  Icons.account_balance_wallet_outlined,
-                                ),
-                                label: const Text('Withdraw to my wallet'),
-                              ),
-                            ],
-                          ),
-                        ),
+                        in byMint.entries) ...[
+                      _NoteGroup(
+                        mint: mint,
+                        notes: group,
+                        primary: single,
+                        onWithdraw: _busy || !hasWallet
+                            ? null
+                            : () => _withdraw(group),
                       ),
+                      const SizedBox(height: DMSpace.md),
+                    ],
                   ],
                 );
               },
             ),
+    );
+  }
+}
+
+/// Unspent notes of one asset: the total, each note when there are
+/// several, and the withdraw action.
+class _NoteGroup extends StatelessWidget {
+  const _NoteGroup({
+    required this.mint,
+    required this.notes,
+    required this.primary,
+    required this.onWithdraw,
+  });
+
+  final String? mint;
+  final List<CloakNote> notes;
+  final bool primary;
+  final VoidCallback? onWithdraw;
+
+  @override
+  Widget build(BuildContext context) {
+    const icon = Icon(Icons.account_balance_wallet_outlined);
+    const label = Text('Withdraw to my wallet');
+    return DMCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            amountText(notes.fold(0, (sum, n) => sum + n.amount), mint),
+            style: DMType.stat(),
+          ),
+          const SizedBox(height: DMSpace.xxs),
+          Text(
+            '${notes.length} shielded ${notes.length == 1 ? 'note' : 'notes'}',
+            style: DMType.data(),
+          ),
+          if (notes.length > 1) ...[
+            const SizedBox(height: DMSpace.sm),
+            for (final n in notes)
+              Padding(
+                padding: const EdgeInsets.only(top: DMSpace.xxs),
+                child: Text(
+                  amountText(n.amount, n.mint),
+                  style: DMType.data(color: DM.mist),
+                ),
+              ),
+          ],
+          const SizedBox(height: DMSpace.lg),
+          if (primary)
+            FilledButton.icon(onPressed: onWithdraw, icon: icon, label: label)
+          else
+            OutlinedButton.icon(
+              onPressed: onWithdraw,
+              icon: icon,
+              label: label,
+            ),
+        ],
+      ),
     );
   }
 }
@@ -190,18 +220,27 @@ class _Message extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Center(
     child: Padding(
-      padding: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(DMSpace.xxxl),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (busy) ...[
             const CircularProgressIndicator(),
-            const SizedBox(height: 16),
+            const SizedBox(height: DMSpace.lg),
+          ],
+          if (error) ...[
+            const Icon(
+              Icons.error_outline,
+              color: DM.due,
+              semanticLabel: 'Error',
+            ),
+            const SizedBox(height: DMSpace.md),
           ],
           Text(
             text,
             textAlign: TextAlign.center,
-            style: TextStyle(color: error ? DmColors.danger : DmColors.muted),
+            style: Theme.of(context).textTheme.bodyMedium
+                ?.copyWith(color: error ? DM.bone : DM.sub),
           ),
         ],
       ),

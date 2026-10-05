@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import '../../../solana/deadman_api.dart';
 import '../../../state/plan_draft.dart';
 import '../../../state/vesting.dart';
-import '../../theme.dart';
+import '../../widgets/brand/brand.dart';
 import '../../widgets/editor/plan_steps.dart';
 import 'editor_providers.dart';
 
@@ -97,6 +97,7 @@ class RecipientSection extends StatelessWidget {
             r.applyClaimCode();
             onChanged();
           },
+          style: DMType.mono(size: 14),
           decoration: InputDecoration(
             labelText: private
                 ? 'Their claim code'
@@ -128,24 +129,28 @@ class RecipientSection extends StatelessWidget {
         ),
         if (r.codeRail != null && r.rail == r.codeRail)
           Padding(
-            padding: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.only(top: DMSpace.sm),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.check_circle, size: 18, color: DmColors.alive),
-                const SizedBox(width: 6),
+                const Icon(Icons.check_circle, size: 18, color: DM.signal),
+                const SizedBox(width: DMSpace.sm),
                 Expanded(
                   child: Text(
                     "Claim code recognised: they'll receive it privately via "
                     '${r.codeRail == Rail.cloak ? 'Cloak' : 'Zcash'}.',
-                    style: const TextStyle(color: DmColors.alive, fontSize: 13),
+                    style: DMType.outfit(
+                      size: 14,
+                      color: DM.bone,
+                      height: 1.35,
+                    ),
                   ),
                 ),
               ],
             ),
           ),
         if (notice != null) WarningTile.of(notice!),
-        const SizedBox(height: 14),
+        const SizedBox(height: DMSpace.lg),
         TextField(
           controller: r.name,
           maxLength: ContactNames.maxLength,
@@ -158,12 +163,8 @@ class RecipientSection extends StatelessWidget {
             helperMaxLines: 4,
           ),
         ),
-        const SizedBox(height: 10),
-        const Text(
-          'How it arrives',
-          style: TextStyle(color: DmColors.muted, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 8),
+        const SizedBox(height: DMSpace.md),
+        const FieldLabel('How it arrives'),
         for (final rail in Rail.values)
           RailOptionTile(
             rail: rail,
