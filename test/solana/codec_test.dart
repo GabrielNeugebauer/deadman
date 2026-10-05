@@ -784,6 +784,7 @@ void main() {
         (configPda().address, false, false),
         (alice, true, false),
         (treasury, true, false),
+        (subPda(owner).address, false, false),
       ]);
       expect(ixs.single.data.toList(), [...Disc.executeSolRule, 0]);
     });
@@ -825,6 +826,7 @@ void main() {
         (ataAddress(bob, usdc), true, false),
         (ataAddress(treasury, usdc), true, false),
         (tokenProgramId, false, false),
+        (subPda(owner).address, false, false),
       ]);
       expect(exec.data.toList(), [...Disc.executeTokenRule, 1]);
     });
@@ -1048,7 +1050,7 @@ void main() {
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(29));
+      expect(errors, hasLength(31));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -1120,6 +1122,8 @@ void main() {
         (6025, 'FundsCommitted', 'owed to vesting beneficiaries'),
         (6026, 'InvalidConfig', 'Treasury'),
         (6027, 'MathOverflow', 'overflow'),
+        (6029, 'SubscriptionDisabled', 'not available'),
+        (6030, 'InvalidSubscription', 'at least 12 months'),
       ]) {
         final e = DeadmanException.fromTxError({
           'InstructionError': [
@@ -1148,6 +1152,8 @@ void main() {
         (DeadmanException.notRevocable, 'NotRevocable'),
         (DeadmanException.alreadyRevoked, 'AlreadyRevoked'),
         (DeadmanException.fundsCommitted, 'FundsCommitted'),
+        (DeadmanException.subscriptionDisabled, 'SubscriptionDisabled'),
+        (DeadmanException.invalidSubscription, 'InvalidSubscription'),
       ]) {
         expect(code, codeOf(name), reason: name);
       }
@@ -1216,6 +1222,7 @@ void main() {
           'start_at',
           'revocable',
           'schedules',
+          'period_secs',
         ],
       );
       expect(idlIx('revoke_vesting')['args'], isEmpty);
@@ -1252,6 +1259,7 @@ void main() {
         'label',
         'bump',
         'stipend_paid',
+        'vest_period_secs',
         '_reserved',
       ]);
       final kinds = [
@@ -1299,7 +1307,20 @@ void main() {
         ...le(8, 1200000000),
         ...le(8, 0),
         ...le(8, 86400 * 730),
+        ...le(8, 0),
       ]);
+      final monthly = encodeCreateVesting(
+        planId: 0x0203,
+        label: 'Team',
+        guard: guard,
+        lockSecs: 3600,
+        startAt: 1790000000,
+        revocable: true,
+        schedules: [solSchedule, usdcSchedule],
+        periodSecs: 30 * 86400,
+      );
+      expect(monthly.sublist(0, data.length - 8), data.sublist(0, data.length - 8));
+      expect(monthly.sublist(data.length - 8), le(8, 30 * 86400));
       final irrevocable = encodeCreateVesting(
         planId: 0,
         label: '',
@@ -1337,6 +1358,7 @@ void main() {
         (configPda().address, false, false),
         (alice, true, false),
         (treasury, true, false),
+        (subPda(owner).address, false, false),
       ]);
 
       final token = releaseVestedIxs(
@@ -1373,6 +1395,7 @@ void main() {
         (ataAddress(bob, usdc), true, false),
         (ataAddress(treasury, usdc), true, false),
         (tokenProgramId, false, false),
+        (subPda(owner).address, false, false),
       ]);
 
       final revoke = ownerActionIx(owner, planId, Disc.revokeVesting);
@@ -1654,6 +1677,316 @@ void main() {
       expect(Limits.gasStipend(Rail.solana), 0);
       expect(Limits.gasStipend(Rail.cloak), 12000000);
       expect(Limits.gasStipend(Rail.zcash), 3000000);
+    });
+  });
+
+  group('subscription', () {
+    final treasury = key(7);
+    const planId = 2;
+    const now = 1790500000;
+    const lastPulse = 1790000000;
+    final idl = loadIdl();
+    Map<String, dynamic> idlIx(String name) =>
+        ((idl['instructions'] as List).firstWhere(
+          (i) => i['name'] == name,
+        ) as Map).cast<String, dynamic>();
+    List<String> fields(String type) => [
+      for (final f
+          in ((idl['types'] as List).firstWhere(
+                (t) => t['name'] == type,
+              )['type']['fields']
+              as List))
+        f['name'] as String,
+    ];
+    List<int> accDisc(String name) => List<int>.from(
+      (idl['accounts'] as List).firstWhere(
+            (a) => a['name'] == name,
+          )['discriminator']
+          as List,
+    );
+
+    VaultState plan({PlanKind kind = PlanKind.inheritance}) => decodeVault(
+      vaultBytes(
+        owner: owner,
+        planId: planId,
+        guard: guard,
+        lastPulse: lastPulse,
+        kind: kind,
+        stipendPaid: 0xff,
+      ),
+      address: vaultPda(owner, planId).address,
+      lamports: 1,
+      rentExemptMinimum: 1,
+    );
+    AccountSubscription sub(int paidUntil, {String? of}) =>
+        AccountSubscription(owner: of ?? owner, paidUntil: paidUntil);
+
+    test('discriminators, args and accounts match the IDL', () {
+      expect(Disc.subscribe, idlIx('subscribe')['discriminator']);
+      expect(Disc.setSubscription, idlIx('set_subscription')['discriminator']);
+      expect(Disc.subscriptionConfigAccount, accDisc('SubscriptionConfig'));
+      expect(Disc.subscriptionAccount, accDisc('Subscription'));
+      expect(
+        (idl['instructions'] as List).where(
+          (i) => i['name'] == 'subscribe_plan',
+        ),
+        isEmpty,
+      );
+      expect(idlIx('subscribe')['args'], [
+        {'name': 'periods', 'type': 'u16'},
+      ]);
+      expect(
+        [for (final a in idlIx('set_subscription')['args'] as List) a['name']],
+        ['price_per_period', 'period_secs', 'mint', 'enabled', 'min_periods'],
+      );
+      expect(fields('SubscriptionConfig'), [
+        'price_per_period',
+        'period_secs',
+        'mint',
+        'enabled',
+        'bump',
+        'min_periods',
+      ]);
+      expect(fields('Subscription'), [
+        'owner',
+        'paid_until',
+        'bump',
+        '_reserved',
+      ]);
+      (bool, bool) f(AccountMeta a) => (a.isWriteable, a.isSigner);
+      List<(bool, bool)> flags(String name) => [
+        for (final a in idlIx(name)['accounts'] as List)
+          (a['writable'] == true, a['signer'] == true),
+      ];
+      final kora = key(9);
+      final ix = subscribeIx(
+        owner: owner,
+        payer: kora,
+        mint: usdc,
+        treasury: treasury,
+        periods: 12,
+      );
+      expect(ix.accounts.map(f), flags('subscribe'));
+      expect(
+        [for (final a in ix.accounts) a.pubKey.toBase58()],
+        [
+          owner,
+          kora,
+          subPda(owner).address,
+          configPda().address,
+          subConfigPda().address,
+          usdc,
+          ataAddress(owner, usdc),
+          ataAddress(treasury, usdc),
+          tokenProgramId,
+          systemProgramId,
+        ],
+      );
+      expect(ix.data.toList(), [...Disc.subscribe, 12, 0]);
+      expect(
+        subscribeIx(
+          owner: owner,
+          mint: usdc,
+          treasury: treasury,
+          periods: 1,
+        ).accounts[1].pubKey.toBase58(),
+        owner,
+        reason: 'the owner pays by default',
+      );
+      // Every payout names the owner's subscription last.
+      for (final name in [
+        'execute_sol_rule',
+        'release_vested_sol',
+        'execute_token_rule',
+        'release_vested_token',
+      ]) {
+        expect(
+          ((idlIx(name)['accounts'] as List).last as Map)['name'],
+          'subscription',
+          reason: name,
+        );
+      }
+      final set = setSubscriptionIx(
+        admin: owner,
+        pricePerPeriod: 5000000,
+        periodSecs: 30 * 86400,
+        mint: usdc,
+        enabled: true,
+        minPeriods: 12,
+      );
+      expect(set.accounts.map(f), flags('set_subscription'));
+      expect(set.accounts[2].pubKey.toBase58(), subConfigPda().address);
+      expect(set.data.toList(), [
+        ...Disc.setSubscription,
+        ...le(8, 5000000),
+        ...le(8, 30 * 86400),
+        ...keyBytes(usdc),
+        1,
+        12,
+        0,
+      ]);
+    });
+
+    test(
+      'sub_config and sub PDAs match the async package derivation',
+      () async {
+        final program = Ed25519HDPublicKey.fromBase58(AppConfig.programId);
+        final config = await Ed25519HDPublicKey.findProgramAddress(
+          seeds: [utf8.encode('sub_config')],
+          programId: program,
+        );
+        expect(subConfigPda().address, config.toBase58());
+        final own = await Ed25519HDPublicKey.findProgramAddress(
+          seeds: [utf8.encode('sub'), keyBytes(owner)],
+          programId: program,
+        );
+        expect(subPda(owner).address, own.toBase58());
+        expect(subPda(guard).address, isNot(own.toBase58()));
+      },
+    );
+
+    test('decodes a Subscription account', () {
+      final bytes = subscriptionBytes(owner: owner, paidUntil: now + 99);
+      expect(bytes, hasLength(subscriptionAccountSize));
+      final s = decodeSubscription(bytes);
+      expect(s.owner, owner);
+      expect(s.paidUntil, now + 99);
+      expect(s.active(now + 99), isTrue);
+      expect(s.active(now + 100), isFalse);
+      expect(
+        () => decodeSubscription(subConfigBytes(mint: usdc)),
+        throwsFormatException,
+      );
+      expect(
+        () => decodeSubscription(
+          subscriptionBytes(owner: owner, paidUntil: 1).sublist(0, 48),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('the vault layout keeps 55 reserved bytes after vest_period_secs', () {
+      expect(plan().lastPulse, lastPulse);
+      expect(
+        (((idl['types'] as List).firstWhere(
+                      (t) => t['name'] == 'Vault',
+                    )['type']['fields']
+                    as List)
+                .last
+            as Map)['type'],
+        {
+          'array': ['u8', 55],
+        },
+      );
+    });
+
+    test('decodes SubscriptionConfig', () {
+      final t = decodeSubscriptionConfig(
+        subConfigBytes(mint: usdc, pricePerPeriod: 4990000, minPeriods: 12),
+      );
+      expect(t.pricePerPeriod, 4990000);
+      expect(t.periodSecs, 30 * 86400);
+      expect(t.mint, usdc);
+      expect(t.enabled, isTrue);
+      expect(t.minPeriods, 12);
+      expect(t.monthly, isTrue);
+      expect(t.cost(12), 59880000);
+      expect(
+        decodeSubscriptionConfig(subConfigBytes(mint: usdc, enabled: false))
+            .enabled,
+        isFalse,
+      );
+      expect(
+        () => decodeSubscriptionConfig(
+          configBytes(admin: owner, treasury: owner),
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('feeWaivedFor mirrors Subscription::covers', () {
+      const fees = FeeSchedule(
+        treasury: '11111111111111111111111111111111',
+        feeBpsPublic: 200,
+        feeBpsPrivate: 500,
+      );
+      final v = plan();
+      // Inheritance: covered while the last check-in fell in a paid period,
+      // however late the payout runs.
+      expect(feeWaivedFor(v, null, now), isFalse, reason: 'never created');
+      expect(feeWaivedFor(v, sub(0), now), isFalse, reason: 'never paid');
+      expect(feeWaivedFor(v, sub(lastPulse), now), isTrue);
+      expect(feeWaivedFor(v, sub(lastPulse), now * 2), isTrue);
+      expect(feeWaivedFor(v, sub(lastPulse - 1), now), isFalse);
+      expect(
+        feeWaivedFor(v, sub(now, of: guard), now),
+        isFalse,
+        reason: "another owner's subscription",
+      );
+      // Vesting: covered while paid at the time of the payout.
+      final vesting = plan(kind: PlanKind.vesting);
+      expect(feeWaivedFor(vesting, sub(now), now), isTrue);
+      expect(feeWaivedFor(vesting, sub(now), now + 1), isFalse);
+      expect(feeWaivedFor(vesting, sub(0), 0), isFalse, reason: 'never paid');
+
+      expect(payoutFeeBps(fees, v, null, Rail.solana, now), 200);
+      expect(payoutFeeBps(fees, v, sub(lastPulse - 1), Rail.cloak, now), 500);
+      expect(payoutFeeBps(fees, v, sub(now), Rail.zcash, now), 0);
+    });
+
+    test('subscribeError mirrors subscribe: 12 to start, any to extend', () {
+      final terms = decodeSubscriptionConfig(subConfigBytes(mint: usdc));
+      final lapsed = sub(now - 1);
+      final active = sub(now);
+      expect(subscribeError(terms, null, 11, now), 6030);
+      expect(subscribeError(terms, null, 12, now), isNull);
+      expect(subscribeError(terms, null, 36, now), isNull);
+      expect(subscribeError(terms, null, 37, now), 6030);
+      expect(subscribeError(terms, lapsed, 1, now), 6030);
+      expect(subscribeError(terms, lapsed, 12, now), isNull);
+      expect(subscribeError(terms, active, 1, now), isNull);
+      expect(subscribeError(terms, active, 0, now), 6030);
+      expect(subscribeError(terms, active, 37, now), 6030);
+      expect(
+        subscribeError(
+          decodeSubscriptionConfig(subConfigBytes(mint: usdc, enabled: false)),
+          active,
+          1,
+          now,
+        ),
+        6029,
+      );
+      expect(terms.minPeriodsFor(null, now), 12);
+      expect(terms.minPeriodsFor(lapsed, now), 12);
+      expect(terms.minPeriodsFor(active, now), 1);
+      expect(terms.paidUntilAfter(null, 12, now), now + 12 * 30 * 86400);
+      expect(terms.paidUntilAfter(lapsed, 12, now), now + 12 * 30 * 86400);
+      expect(
+        terms.paidUntilAfter(sub(now + 50), 1, now),
+        now + 50 + 30 * 86400,
+      );
+    });
+
+    test('setSubscriptionError mirrors set_subscription', () {
+      int? err({
+        int price = 1,
+        int period = 86400,
+        String? mint,
+        int min = 1,
+      }) => setSubscriptionError(
+        pricePerPeriod: price,
+        periodSecs: period,
+        mint: mint ?? usdc,
+        minPeriods: min,
+      );
+      expect(err(), isNull);
+      expect(err(period: 366 * 86400, min: 36), isNull);
+      expect(err(price: 0), 6030);
+      expect(err(period: 86399), 6030);
+      expect(err(period: 366 * 86400 + 1), 6030);
+      expect(err(min: 0), 6030);
+      expect(err(min: 37), 6030);
+      expect(err(mint: defaultPubkey), 6030);
     });
   });
 }

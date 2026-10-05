@@ -65,6 +65,8 @@ List<int> vaultBytes({
   String? rentPayer,
   int rentPaid = 0,
   List<RuleState> rules = const [],
+  int stipendPaid = 0,
+  int vestPeriodSecs = 0,
 }) => _padVault([
   ...Disc.vaultAccount,
   ...keyBytes(owner),
@@ -92,7 +94,9 @@ List<int> vaultBytes({
   ...le(4, utf8.encode(label).length),
   ...utf8.encode(label),
   254,
-  ...List<int>.filled(64, 0), // _reserved
+  stipendPaid,
+  ...le(8, vestPeriodSecs),
+  ...List<int>.filled(55, 0), // _reserved
 ]);
 
 /// Unused rule and label space stays zeroed up to the fixed account size.
@@ -113,6 +117,35 @@ List<int> configBytes({
   ...le(2, feeBpsPublic),
   ...le(2, feeBpsPrivate),
   253,
+];
+
+List<int> subConfigBytes({
+  int pricePerPeriod = 5000000,
+  int periodSecs = 30 * 86400,
+  required String mint,
+  bool enabled = true,
+  int minPeriods = 12,
+}) => [
+  ...Disc.subscriptionConfigAccount,
+  ...le(8, pricePerPeriod),
+  ...le(8, periodSecs),
+  ...keyBytes(mint),
+  if (enabled) 1 else 0,
+  252,
+  ...le(2, minPeriods),
+];
+
+/// `Subscription` account of [owner] (81 bytes).
+List<int> subscriptionBytes({
+  required String owner,
+  required int paidUntil,
+  int bump = 251,
+}) => [
+  ...Disc.subscriptionAccount,
+  ...keyBytes(owner),
+  ...le(8, paidUntil),
+  bump,
+  ...List<int>.filled(32, 0), // _reserved
 ];
 
 List<int> mintBytes(int decimals) => List<int>.filled(82, 0)
@@ -165,6 +198,9 @@ class FakeRpc {
 
   /// Params of each getProgramAccounts call.
   final programScans = <List<dynamic>>[];
+
+  /// Keys of each getMultipleAccounts call.
+  final multiReads = <List<String>>[];
 
   /// Transactions passed to sendTransaction (wire bytes).
   final sent = <Uint8List>[];
@@ -239,7 +275,13 @@ class FakeRpc {
       },
       'getMultipleAccounts' => {
         'context': ctx,
-        'value': [for (final a in params[0] as List) accounts[a]?.toJson()],
+        'value': [
+          for (final a
+              in (multiReads
+                    ..add([for (final k in params[0] as List) k as String]))
+                  .last)
+            accounts[a]?.toJson(),
+        ],
       },
       'getProgramAccounts' => _programAccounts(params),
       'getBalance' => {

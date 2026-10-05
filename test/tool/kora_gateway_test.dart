@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/codec.dart';
+import 'package:deadman/solana/deadman_api.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
@@ -155,7 +156,7 @@ void main() {
 
     for (final (name, disc) in [
       ('update_policy', Disc.updatePolicy),
-      ('execute_sol_rule', Disc.executeSolRule),
+      ('execute_sol_rule without its accounts', Disc.executeSolRule),
       ('skip_rule', [...Disc.skipRule, 0]),
       ('set_guard', Disc.setGuard),
       ('withdraw_sol', Disc.withdrawSol),
@@ -164,7 +165,7 @@ void main() {
         final tx = await wire([ix(guard.address, 0, disc)], signers: [guard]);
         expect(
           () => validateSponsorTx(tx, policy),
-          rejects('Only Deadman pulse and lockdown'),
+          rejects('Only Deadman pulse, lockdown and'),
         );
       });
     }
@@ -541,6 +542,7 @@ void main() {
     });
   });
 
+  claimTests();
   paymasterTests();
 }
 
@@ -554,7 +556,7 @@ final pmPolicy = PaymasterPolicy(
       tokenProgram: tokenProgramId,
       minAmounts: {
         PaymasterTier.basic: 20000,
-        PaymasterTier.account: 1000000,
+        PaymasterTier.account: 500000,
         PaymasterTier.plan: 3000000,
       },
     ),
@@ -658,7 +660,7 @@ Instruction ataCreateFor(String payer, String wallet, String mint) =>
     );
 
 /// `execute_token_rule` / `release_vested_token` accounts, as the client
-/// builds them.
+/// builds them; [subscription] defaults to the vault owner's PDA.
 Instruction payoutIx(
   String executor,
   String vaultOwner,
@@ -666,6 +668,7 @@ Instruction payoutIx(
   String treasury,
   List<int> disc, {
   String mint = usdc,
+  String? subscription,
 }) {
   final vault = vaultPda(vaultOwner, 0).address;
   return deadmanIx(
@@ -679,6 +682,7 @@ Instruction payoutIx(
       rw(associatedTokenAddress(beneficiary, mint, tokenProgramId)),
       rw(associatedTokenAddress(treasury, mint, tokenProgramId)),
       ro(tokenProgramId),
+      ro(subscription ?? subPda(vaultOwner).address),
     ],
     [...disc, 0],
   );
@@ -781,7 +785,7 @@ void paymasterTests() {
       final account = await check([
         ataCreateIdempotent(kora, vault),
         deposit,
-      ], 1000000);
+      ], 500000);
       expect(account.tier, PaymasterTier.account);
       expect(account.koraAtas, 1);
       expect(
@@ -1128,13 +1132,14 @@ void paymasterTests() {
       );
       expect(
         () => validatePaymasterTx(tx, pmPolicy),
-        rejects('At most one paymaster-funded vault'),
+        rejects('At most one paymaster-funded account'),
       );
     });
 
     for (final (name, data) in [
       ('init_config', [23, 235, 115, 232, 168, 96, 1, 231]),
       ('set_config', [108, 158, 154, 175, 212, 98, 52, 66]),
+      ('set_subscription', Disc.setSubscription),
     ]) {
       test('rejects $name', () async {
         final tx = await wire(
@@ -1150,6 +1155,231 @@ void paymasterTests() {
         );
       });
     }
+
+    group('subscribe', () {
+      final treasury = key(41);
+      Instruction subscribe({
+        String? payer,
+        String? treasuryAccount,
+        String? subscription,
+      }) {
+        final ix = subscribeIx(
+          owner: owner.address,
+          payer: payer,
+          mint: usdc,
+          treasury: treasury,
+          periods: 12,
+        );
+        return deadmanIx([
+          ix.accounts[0],
+          ix.accounts[1],
+          if (subscription == null) ix.accounts[2] else rw(subscription),
+          ...ix.accounts.sublist(3, 7),
+          if (treasuryAccount == null) ix.accounts[7] else rw(treasuryAccount),
+          ...ix.accounts.sublist(8),
+        ], ix.data.toList());
+      }
+
+      test('the owner as payer: the basic price, Kora in no slot', () async {
+        final tx = await wire(
+          [subscribe(), pay(owner.address, amount: 20000)],
+          signers: [owner],
+        );
+        final r = validatePaymasterTx(tx, pmPolicy);
+        expect(r.signer, owner.address);
+        expect(r.instructions, ['deadman.subscribe', 'token.transfer_checked']);
+        expect(r.tier, PaymasterTier.basic);
+        expect(r.koraFundsRent, isFalse);
+        expect(r.koraAtas, 0);
+        expect(r.vaultChecks, isEmpty);
+        expect(await verifyOwnerSignature(r), isTrue);
+      });
+
+      test('Kora as payer funds the subscription account: a Kora-funded '
+          'creation at the plan price', () async {
+        final r = validatePaymasterTx(
+          await wire(
+            [subscribe(payer: kora), pay(owner.address)],
+            signers: [owner],
+          ),
+          pmPolicy,
+        );
+        expect(r.koraFundsRent, isTrue);
+        expect(r.tier, PaymasterTier.plan);
+        await expectLater(
+          wire(
+            [subscribe(payer: kora), pay(owner.address, amount: 2999999)],
+            signers: [owner],
+          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
+          rejects('below the plan price'),
+        );
+        await expectLater(
+          wire(
+            [
+              subscribe(payer: kora),
+              createVault(owner.address, kora),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
+          rejects('At most one paymaster-funded account'),
+        );
+      });
+
+      test('rejects Kora in any other slot', () async {
+        final tx = await wire(
+          [subscribe(treasuryAccount: kora), pay(owner.address)],
+          signers: [owner],
+        );
+        expect(
+          () => validatePaymasterTx(tx, pmPolicy),
+          rejects('The paymaster may only be the payer'),
+        );
+      });
+
+      test('rejects a payer other than the owner or Kora', () async {
+        final ix = subscribe();
+        final tx = await wire(
+          [
+            deadmanIx([
+              ix.accounts[0],
+              rw(key(48)),
+              ...ix.accounts.sublist(2),
+            ], ix.data.toList()),
+            pay(owner.address),
+          ],
+          signers: [owner],
+        );
+        expect(
+          () => validatePaymasterTx(tx, pmPolicy),
+          rejects('The subscribe payer must be the paymaster or the owner'),
+        );
+      });
+
+      test("rejects any account but the owner's subscription PDA", () async {
+        for (final wrong in [
+          subPda(key(49)).address,
+          vaultPda(owner.address, 0).address,
+          key(49),
+        ]) {
+          final tx = await wire(
+            [subscribe(payer: kora, subscription: wrong), pay(owner.address)],
+            signers: [owner],
+          );
+          expect(
+            () => validatePaymasterTx(tx, pmPolicy),
+            rejects("the owner's own subscription"),
+          );
+        }
+      });
+
+      test(
+        'rejects a missing account and the removed subscribe_plan',
+        () async {
+          final ix = subscribe();
+          final short = await wire(
+            [
+              deadmanIx(ix.accounts.take(9).toList(), ix.data.toList()),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          );
+          expect(
+            () => validatePaymasterTx(short, pmPolicy),
+            rejects('Malformed Deadman subscribe'),
+          );
+          final old = await wire(
+            [
+              deadmanIx(ix.accounts.take(8).toList(), [
+                ...[35, 47, 216, 174, 106, 203, 179, 39],
+                12,
+                0,
+              ]),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          );
+          expect(
+            () => validatePaymasterTx(old, pmPolicy),
+            rejects('Deadman instruction is not paid by the paymaster'),
+          );
+        },
+      );
+
+      test('Kora never funds the treasury account it pays into, nor a '
+          'token account of the subscription PDA', () async {
+        await expectLater(
+          wire(
+            [
+              ataCreateIdempotent(kora, treasury),
+              subscribe(),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
+          rejects('only funds a token account'),
+        );
+        final sub = subPda(owner.address).address;
+        final r = validatePaymasterTx(
+          await wire(
+            [
+              subscribe(),
+              ataCreateFor(kora, sub, usdc),
+              transferChecked(
+                source: usdcAta(owner.address),
+                dest: usdcAta(sub),
+                authority: owner.address,
+              ),
+              pay(owner.address),
+            ],
+            signers: [owner],
+          ),
+          pmPolicy,
+        );
+        expect(r.vaultChecks, [
+          sub,
+        ], reason: 'not a vault: the route rejects it on chain');
+      });
+
+      test('PaymasterRoute: a Kora-funded subscription takes a creation '
+          'slot; an owner-paid one does not', () async {
+        final route = pmRoute(
+          creates: UsageLimiter(
+            perVault: 0,
+            perSigner: 1,
+            clock: () => 5000,
+            signerLabel: 'owner',
+            unit: 'paymaster-funded accounts',
+          ),
+          chain: {
+            usdcAta(owner.address): tokenAccount(owner.address, 90000000),
+          },
+        );
+        final funded = await wire(
+          [subscribe(payer: kora), pay(owner.address)],
+          signers: [owner],
+        );
+        expect((await route.admit(funded)).summary, contains('tier=plan'));
+        await expectLater(
+          route.admit(funded),
+          rejects('reached 1 paymaster-funded accounts'),
+        );
+        await expectLater(
+          route.admit(
+            await wire(
+              [createVault(owner.address, kora), pay(owner.address)],
+              signers: [owner],
+            ),
+          ),
+          rejects('reached 1 paymaster-funded accounts'),
+        );
+        final extend = await wire(
+          [subscribe(), pay(owner.address, amount: 20000)],
+          signers: [owner],
+        );
+        expect((await route.admit(extend)).summary, contains('tier=basic'));
+      });
+    });
 
     test('rejects other programs', () async {
       final tx = await wire(
@@ -1674,5 +1904,601 @@ void paymasterTests() {
         expect(r['error']['message'], contains('Deadman paymaster'));
       }
     });
+  });
+}
+
+final claimVaultOwner = key(70);
+final treasury = key(71);
+
+/// `execute_sol_rule` / `release_vested_sol` on rule [index] of
+/// [claimVaultOwner]'s plan 0, as the client builds it.
+Instruction solClaimIx(
+  String executor,
+  String beneficiary,
+  List<int> disc, {
+  int index = 0,
+  String? config,
+  String? treasuryAccount,
+  String? subscription,
+}) => deadmanIx(
+  [
+    ro(executor, signer: true),
+    rw(vaultPda(claimVaultOwner, 0).address),
+    ro(config ?? configPda().address),
+    rw(beneficiary),
+    rw(treasuryAccount ?? treasury),
+    ro(subscription ?? subPda(claimVaultOwner).address),
+  ],
+  [...disc, index],
+);
+
+/// A current-layout vault of [claimVaultOwner] whose rule 0 pays
+/// [beneficiary] in [mint] (null = SOL).
+VaultAccount claimVault(
+  String beneficiary, {
+  PlanKind kind = PlanKind.inheritance,
+  String? mint,
+  int executedAt = 0,
+}) => (
+  owner: AppConfig.programId,
+  data: Uint8List.fromList(
+    vaultBytes(
+      owner: claimVaultOwner,
+      guard: key(72),
+      kind: kind,
+      rules: [
+        RuleState(
+          beneficiary: beneficiary,
+          rail: Rail.solana,
+          afterSecs: 3600,
+          mode: AmountMode.fixed,
+          amount: 5000000,
+          mint: mint,
+          executedAt: executedAt,
+          paid: 0,
+          durationSecs: kind == PlanKind.vesting ? 7200 : 0,
+        ),
+      ],
+    ),
+  ),
+);
+
+void claimTests() {
+  final policy = policyFor(koraPayer: kora);
+  final vault = vaultPda(claimVaultOwner, 0).address;
+  late Ed25519HDKeyPair heir;
+
+  setUpAll(() async => heir = await keypair(31));
+
+  group('sponsored SOL claims', () {
+    for (final (name, disc, kind) in [
+      ('execute_sol_rule', Disc.executeSolRule, PlanKind.inheritance),
+      ('release_vested_sol', Disc.releaseVestedSol, PlanKind.vesting),
+    ]) {
+      test('accepts the beneficiary claiming its own $name', () async {
+        final tx = await wire(
+          [
+            ComputeBudgetInstruction.setComputeUnitLimit(units: 40000),
+            solClaimIx(heir.address, heir.address, disc, index: 0),
+          ],
+          signers: [heir],
+        );
+        final r = validateSponsorTx(tx, policy);
+        expect(r.signer, heir.address);
+        expect(r.vaults, [vault]);
+        expect(r.claim, (
+          name: name,
+          vault: vault,
+          index: 0,
+          kind: kind,
+          subscription: subPda(claimVaultOwner).address,
+        ));
+        expect(r.feeLamports, 10000);
+        expect(await verifyGuardSignature(r), isTrue);
+        checkClaimVault(r, [claimVault(heir.address, kind: kind)], policy);
+      });
+    }
+
+    test('rejects claiming for someone else', () async {
+      final stranger = await keypair(32);
+      final tx = await wire(
+        [solClaimIx(stranger.address, heir.address, Disc.executeSolRule)],
+        signers: [stranger],
+      );
+      expect(
+        () => validateSponsorTx(tx, policy),
+        rejects('beneficiary claiming for itself'),
+      );
+    });
+
+    test('rejects a claim that references Kora', () async {
+      final tx = await wire(
+        [
+          solClaimIx(
+            heir.address,
+            heir.address,
+            Disc.executeSolRule,
+            treasuryAccount: kora,
+          ),
+        ],
+        signers: [heir],
+      );
+      expect(
+        () => validateSponsorTx(tx, policy),
+        rejects('may not reference the sponsor account'),
+      );
+    });
+
+    test('rejects token claims: they go to the paymaster', () async {
+      for (final disc in [Disc.executeTokenRule, Disc.releaseVestedToken]) {
+        final tx = await wire(
+          [
+            payoutIx(
+              heir.address,
+              claimVaultOwner,
+              heir.address,
+              treasury,
+              disc,
+            ),
+          ],
+          signers: [heir],
+        );
+        expect(
+          () => validateSponsorTx(tx, policy),
+          rejects('Token claims are not sponsored'),
+        );
+      }
+    });
+
+    test('rejects a claim next to a pulse, or two claims', () async {
+      for (final extra in [
+        ix(heir.address, 0, Disc.pulse),
+        solClaimIx(heir.address, heir.address, Disc.executeSolRule, index: 1),
+      ]) {
+        final tx = await wire(
+          [solClaimIx(heir.address, heir.address, Disc.executeSolRule), extra],
+          signers: [heir],
+        );
+        expect(
+          () => validateSponsorTx(tx, policy),
+          rejects('only Deadman instruction'),
+        );
+      }
+    });
+
+    test('rejects a wrong config account or account count', () async {
+      final wrongConfig = await wire(
+        [
+          solClaimIx(
+            heir.address,
+            heir.address,
+            Disc.executeSolRule,
+            config: key(73),
+          ),
+        ],
+        signers: [heir],
+      );
+      expect(
+        () => validateSponsorTx(wrongConfig, policy),
+        rejects('Wrong Deadman config'),
+      );
+      final short = await wire(
+        [
+          deadmanIx(
+            [ro(heir.address, signer: true), rw(vault)],
+            [...Disc.releaseVestedSol, 0],
+          ),
+        ],
+        signers: [heir],
+      );
+      expect(
+        () => validateSponsorTx(short, policy),
+        rejects('Malformed Deadman release_vested_sol'),
+      );
+    });
+
+    group('checkClaimVault', () {
+      Future<SponsorRequest> claim(List<int> disc) async => validateSponsorTx(
+        await wire(
+          [solClaimIx(heir.address, heir.address, disc)],
+          signers: [heir],
+        ),
+        policy,
+      );
+
+      test('wrong plan kind', () async {
+        expect(
+          () async => checkClaimVault(await claim(Disc.executeSolRule), [
+            claimVault(heir.address, kind: PlanKind.vesting),
+          ], policy),
+          rejects('execute_sol_rule needs an inheritance plan'),
+        );
+        expect(
+          () async => checkClaimVault(await claim(Disc.releaseVestedSol), [
+            claimVault(heir.address),
+          ], policy),
+          rejects('release_vested_sol needs a vesting plan'),
+        );
+      });
+
+      test('unknown, foreign or old-layout vaults', () async {
+        final r = await claim(Disc.executeSolRule);
+        final current = claimVault(heir.address);
+        for (final account in <VaultAccount?>[
+          null,
+          (owner: systemProgramId, data: current.data),
+          (owner: AppConfig.programId, data: current.data.sublist(0, 1318)),
+          (owner: AppConfig.programId, data: Uint8List(vaultAccountSize)),
+        ]) {
+          expect(
+            () => checkClaimVault(r, [account], policy),
+            rejects('is not a current Deadman vault'),
+          );
+        }
+      });
+
+      test('another beneficiary, a token rule, a paid rule, a missing '
+          'rule', () async {
+        final r = await claim(Disc.executeSolRule);
+        expect(
+          () => checkClaimVault(r, [claimVault(key(74))], policy),
+          rejects('is not the beneficiary of rule 0'),
+        );
+        expect(
+          () => checkClaimVault(r, [
+            claimVault(heir.address, mint: key(75)),
+          ], policy),
+          rejects('not SOL'),
+        );
+        expect(
+          () => checkClaimVault(r, [
+            claimVault(heir.address, executedAt: 1790000000),
+          ], policy),
+          rejects('already fully paid'),
+        );
+        final second = validateSponsorTx(
+          await wire(
+            [
+              solClaimIx(
+                heir.address,
+                heir.address,
+                Disc.executeSolRule,
+                index: 1,
+              ),
+            ],
+            signers: [heir],
+          ),
+          policy,
+        );
+        expect(
+          () => checkClaimVault(second, [claimVault(heir.address)], policy),
+          rejects('has no rule 1'),
+        );
+      });
+
+      test("the subscription must be the vault owner's PDA", () async {
+        expect(
+          subscriptionPda(claimVaultOwner, AppConfig.programId),
+          subPda(claimVaultOwner).address,
+        );
+        for (final wrong in [
+          subPda(heir.address).address,
+          vault,
+          configPda().address,
+          key(76),
+        ]) {
+          final r = validateSponsorTx(
+            await wire(
+              [
+                solClaimIx(
+                  heir.address,
+                  heir.address,
+                  Disc.executeSolRule,
+                  subscription: wrong,
+                ),
+              ],
+              signers: [heir],
+            ),
+            policy,
+          );
+          expect(r.claim!.subscription, wrong);
+          expect(
+            () => checkClaimVault(r, [claimVault(heir.address)], policy),
+            rejects('must name the subscription account of the owner'),
+          );
+        }
+      });
+    });
+
+    group('SponsorRoute', () {
+      test('counts claims separately from pulses, per claimer', () async {
+        final pulses = UsageLimiter();
+        final claims = UsageLimiter(
+          perVault: 12,
+          perSigner: 1,
+          signerLabel: 'claimer',
+          unit: 'sponsored claims',
+        );
+        final route = SponsorRoute(
+          policy: policy,
+          limiter: pulses,
+          claims: claims,
+          fetchAccounts: (vaults) async => [
+            for (final _ in vaults) claimVault(heir.address),
+          ],
+        );
+        final tx = await wire(
+          [solClaimIx(heir.address, heir.address, Disc.executeSolRule)],
+          signers: [heir],
+        );
+        final a = await route.admit(tx);
+        expect(a.summary, contains('claim=execute_sol_rule#0'));
+        expect(pulses.toJson()['global'], isEmpty);
+        expect(claims.toJson()['vaults'], {vault: hasLength(1)});
+        await expectLater(
+          route.admit(tx),
+          rejects('claimer ${heir.address} reached 1 sponsored claims'),
+        );
+        a.release();
+        await route.admit(tx);
+      });
+
+      test('rejects a forged claimer signature before counting', () async {
+        final claims = UsageLimiter(perVault: 12, perSigner: 12);
+        final route = SponsorRoute(
+          policy: policy,
+          limiter: UsageLimiter(),
+          claims: claims,
+          fetchAccounts: (vaults) async => [claimVault(heir.address)],
+        );
+        final tx = await wire([
+          solClaimIx(heir.address, heir.address, Disc.executeSolRule),
+        ]);
+        await expectLater(
+          route.admit(tx),
+          rejects('Invalid claimer signature'),
+        );
+        expect(claims.toJson()['global'], isEmpty);
+      });
+
+      test('a rejected vault takes no claim quota', () async {
+        final claims = UsageLimiter(perVault: 12, perSigner: 12);
+        final route = SponsorRoute(
+          policy: policy,
+          limiter: UsageLimiter(),
+          claims: claims,
+          fetchAccounts: (vaults) async => [claimVault(key(76))],
+        );
+        final tx = await wire(
+          [solClaimIx(heir.address, heir.address, Disc.executeSolRule)],
+          signers: [heir],
+        );
+        await expectLater(route.admit(tx), rejects('is not the beneficiary'));
+        expect(claims.toJson()['global'], isEmpty);
+      });
+    });
+  });
+
+  group('paymaster token claims funded by the payout', () {
+    // [ATA creates], claim, then the fee from the ATA the claim paid into.
+    Future<Uint8List> claimTx(
+      List<int> disc, {
+      bool createHeirAta = true,
+      bool createTreasuryAta = false,
+      String? beneficiary,
+      int fee = 500000,
+      String? subscription,
+    }) => wire(
+      [
+        if (createTreasuryAta) ataCreateFor(kora, treasury, usdc),
+        if (createHeirAta) ataCreateFor(kora, heir.address, usdc),
+        payoutIx(
+          heir.address,
+          claimVaultOwner,
+          beneficiary ?? heir.address,
+          treasury,
+          disc,
+          subscription: subscription,
+        ),
+        pay(heir.address, amount: fee),
+      ],
+      signers: [heir],
+    );
+
+    for (final (name, disc, kind) in [
+      ('execute_token_rule', Disc.executeTokenRule, PlanKind.inheritance),
+      ('release_vested_token', Disc.releaseVestedToken, PlanKind.vesting),
+    ]) {
+      test('$name: a claimer with no USDC and no ATA pays from the payout '
+          '(account tier)', () async {
+        final r = validatePaymasterTx(await claimTx(disc), pmPolicy);
+        expect(r.fundingClaim, (
+          name: name,
+          vault: vault,
+          index: 0,
+          kind: kind,
+          mint: usdc,
+          subscription: subPda(claimVaultOwner).address,
+        ));
+        expect(r.tier, PaymasterTier.account);
+        expect(r.koraAtas, 1);
+        expect(r.paymentSourceCreated, isTrue);
+
+        final limiter = UsageLimiter(perVault: 0);
+        final route = pmRoute(
+          limiter: limiter,
+          chain: {vault: claimVault(heir.address, kind: kind, mint: usdc)},
+        );
+        final a = await route.admit(await claimTx(disc));
+        expect(a.summary, contains('tier=account'));
+        expect(a.summary, contains('fundedBy=$name#0'));
+        expect(limiter.toJson()['global'], hasLength(1));
+      });
+    }
+
+    test(
+      'an existing empty ATA and an existing treasury ATA: basic tier',
+      () async {
+        final route = pmRoute(
+          chain: {
+            usdcAta(heir.address): tokenAccount(heir.address, 0),
+            vault: claimVault(heir.address, mint: usdc),
+          },
+        );
+        final tx = await claimTx(
+          Disc.executeTokenRule,
+          createHeirAta: false,
+          fee: 20000,
+        );
+        expect(validatePaymasterTx(tx, pmPolicy).tier, PaymasterTier.basic);
+        expect((await route.admit(tx)).summary, contains('tier=basic'));
+      },
+    );
+
+    test('Kora may open the heir and the treasury ATA; 0.50 USDC is the '
+        'floor', () async {
+      final tx = await claimTx(Disc.executeTokenRule, createTreasuryAta: true);
+      final r = validatePaymasterTx(tx, pmPolicy);
+      expect(r.koraAtas, 2);
+      expect(r.tier, PaymasterTier.account);
+      await expectLater(
+        claimTx(
+          Disc.executeTokenRule,
+          fee: 499999,
+        ).then((t) => validatePaymasterTx(t, pmPolicy)),
+        rejects('below the account price 500000'),
+      );
+    });
+
+    test('routes a claim to the account or basic node', () async {
+      final route = pmRoute(
+        upstreams: {
+          PaymasterTier.basic: Uri.parse('http://basic'),
+          PaymasterTier.account: Uri.parse('http://account'),
+        },
+      );
+      final opens = await claimTx(Disc.releaseVestedToken);
+      final exists = await claimTx(
+        Disc.releaseVestedToken,
+        createHeirAta: false,
+        fee: 20000,
+      );
+      expect(route.upstreamFor(opens), Uri.parse('http://account'));
+      expect(route.upstreamFor(exists), Uri.parse('http://basic'));
+      expect(route.minFee(opens, usdc), 500000);
+      expect(route.minFee(exists, usdc), 20000);
+    });
+
+    test('the vault must name the claimer, in the payment mint, for that '
+        'plan kind', () async {
+      Future<void> refused(VaultAccount? onChain, Pattern message) async {
+        final limiter = UsageLimiter(perVault: 0);
+        await expectLater(
+          pmRoute(
+            limiter: limiter,
+            chain: {vault: onChain},
+          ).admit(await claimTx(Disc.executeTokenRule)),
+          rejects(message),
+        );
+        expect(limiter.toJson()['global'], isEmpty);
+      }
+
+      await refused(null, 'is not a current Deadman vault');
+      await refused(
+        claimVault(key(77), mint: usdc),
+        'is not the beneficiary of rule 0',
+      );
+      await refused(claimVault(heir.address, mint: key(78)), 'not $usdc');
+      await refused(
+        claimVault(heir.address, mint: usdc, kind: PlanKind.vesting),
+        'needs an inheritance plan',
+      );
+      await refused(
+        claimVault(heir.address, mint: usdc, executedAt: 1790000000),
+        'already fully paid',
+      );
+    });
+
+    test("the claim must name the vault owner's subscription", () async {
+      for (final wrong in [subPda(heir.address).address, vault, key(80)]) {
+        final limiter = UsageLimiter(perVault: 0);
+        await expectLater(
+          pmRoute(
+            limiter: limiter,
+            chain: {vault: claimVault(heir.address, mint: usdc)},
+          ).admit(await claimTx(Disc.executeTokenRule, subscription: wrong)),
+          rejects('must name the subscription account of the owner'),
+        );
+        expect(limiter.toJson()['global'], isEmpty);
+      }
+    });
+
+    test('Token-2022 hook extras may follow the subscription', () async {
+      final ix = payoutIx(
+        heir.address,
+        claimVaultOwner,
+        heir.address,
+        treasury,
+        Disc.executeTokenRule,
+      );
+      Future<PaymasterRequest> withExtras(int extras) async =>
+          validatePaymasterTx(
+            await wire(
+              [
+                deadmanIx([
+                  ...ix.accounts,
+                  for (var i = 0; i < extras; i++) ro(key(90 + i)),
+                ], ix.data.toList()),
+                pay(heir.address, amount: 20000),
+              ],
+              signers: [heir],
+            ),
+            pmPolicy,
+          );
+      expect(
+        (await withExtras(8)).fundingClaim?.subscription,
+        subPda(claimVaultOwner).address,
+      );
+      await expectLater(withExtras(9), rejects('Malformed Deadman'));
+    });
+
+    test('a payout to someone else does not fund the payer', () async {
+      final other = key(79);
+      final tx = await wire(
+        [
+          payoutIx(
+            heir.address,
+            claimVaultOwner,
+            other,
+            treasury,
+            Disc.executeTokenRule,
+          ),
+          pay(heir.address, amount: 20000),
+        ],
+        signers: [heir],
+      );
+      expect(validatePaymasterTx(tx, pmPolicy).fundingClaim, isNull);
+      await expectLater(
+        pmRoute(chain: {usdcAta(heir.address): tokenAccount(heir.address, 0)})
+            .admit(tx),
+        rejects('holds 0, the transaction needs 20000'),
+      );
+    });
+
+    test(
+      'a missing payment account must be opened by the transaction',
+      () async {
+        await expectLater(
+          pmRoute(chain: {vault: claimVault(heir.address, mint: usdc)}).admit(
+            await claimTx(
+              Disc.executeTokenRule,
+              createHeirAta: false,
+              fee: 20000,
+            ),
+          ),
+          rejects('does not exist'),
+        );
+      },
+    );
   });
 }

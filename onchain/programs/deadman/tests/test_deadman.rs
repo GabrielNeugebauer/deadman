@@ -6,7 +6,10 @@ use {
     },
     anchor_spl::associated_token::get_associated_token_address_with_program_id,
     deadman::VestingInput,
-    deadman::{AmountMode, Config, Rail, RuleInput, Vault, CONFIG_SEED, VAULT_SEED},
+    deadman::{
+        AmountMode, Config, Rail, RuleInput, Subscription, SubscriptionConfig, Vault, CONFIG_SEED,
+        SUBSCRIPTION_SEED, SUB_CONFIG_SEED, VAULT_SEED,
+    },
     litesvm::LiteSVM,
     litesvm_token::{
         get_spl_account, spl_token::state::Account as SplAccount,
@@ -37,6 +40,8 @@ struct Env {
     keeper: Keypair,
     /// Plan the helpers act on.
     plan: u16,
+    /// Subscription account the payout helpers pass instead of the owner's.
+    sub_override: Option<Pubkey>,
 }
 
 fn config_pda() -> Pubkey {
@@ -49,6 +54,10 @@ fn vault_pda(owner: &Pubkey, plan_id: u16) -> Pubkey {
         &deadman::id(),
     )
     .0
+}
+
+fn sub_pda(owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[SUBSCRIPTION_SEED, owner.as_ref()], &deadman::id()).0
 }
 
 fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
@@ -126,6 +135,7 @@ impl Env {
             guard,
             keeper,
             plan: 0,
+            sub_override: None,
         };
         env.set_time(1_800_000_000);
         env
@@ -133,6 +143,12 @@ impl Env {
 
     fn vault_addr(&self) -> Pubkey {
         vault_pda(&self.owner.pubkey(), self.plan)
+    }
+
+    /// Subscription account passed to payouts (the owner's PDA by default).
+    fn sub_addr(&self) -> Pubkey {
+        self.sub_override
+            .unwrap_or_else(|| sub_pda(&self.owner.pubkey()))
     }
 
     fn now(&self) -> i64 {
@@ -363,6 +379,7 @@ impl Env {
                 config: config_pda(),
                 beneficiary: *beneficiary,
                 treasury: *treasury,
+                subscription: self.sub_addr(),
             }
             .to_account_metas(None),
         );
@@ -407,6 +424,7 @@ impl Env {
                 beneficiary_token: *destination,
                 treasury_token: ata(&self.treasury.pubkey(), mint),
                 token_program: TOKEN_ID,
+                subscription: self.sub_addr(),
             }
             .to_account_metas(None),
         );
@@ -1507,6 +1525,7 @@ fn new3_payout_to_a_non_ata_account_needs_the_beneficiary_signature() {
             beneficiary_token: other,
             treasury_token: ata(&env.treasury.pubkey(), &usdc),
             token_program: TOKEN_ID,
+            subscription: env.sub_addr(),
         }
         .to_account_metas(None),
     );
@@ -1570,6 +1589,16 @@ impl Env {
         revocable: bool,
         schedules: Vec<VestingInput>,
     ) -> Result<u64, String> {
+        self.create_vesting_stepped(start_at, revocable, schedules, 0)
+    }
+
+    fn create_vesting_stepped(
+        &mut self,
+        start_at: i64,
+        revocable: bool,
+        schedules: Vec<VestingInput>,
+        period_secs: i64,
+    ) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
             &deadman::instruction::CreateVesting {
@@ -1580,6 +1609,7 @@ impl Env {
                 start_at,
                 revocable,
                 schedules,
+                period_secs,
             }
             .data(),
             deadman::accounts::CreateVault {
@@ -1605,6 +1635,7 @@ impl Env {
                 config: config_pda(),
                 beneficiary: *beneficiary,
                 treasury,
+                subscription: self.sub_addr(),
             }
             .to_account_metas(None),
         );
@@ -1637,6 +1668,7 @@ impl Env {
                 beneficiary_token: ata(beneficiary, mint),
                 treasury_token: ata(&self.treasury.pubkey(), mint),
                 token_program: TOKEN_ID,
+                subscription: self.sub_addr(),
             }
             .to_account_metas(None),
         );
@@ -1891,6 +1923,212 @@ fn vesting_schedules_are_validated() {
     .unwrap();
 }
 
+// Installment vesting: value unlocks only at whole periods from the start.
+
+/// 10 SOL over 10 days, paid out in daily installments.
+fn stepped_env(revocable: bool, b: &Keypair, cliff: i64) -> Env {
+    let mut env = Env::new();
+    env.init_config();
+    let now = env.now();
+    env.create_vesting_stepped(
+        now,
+        revocable,
+        vec![schedule(&b.pubkey(), None, 10 * SOL, cliff, 10 * DAY)],
+        DAY,
+    )
+    .unwrap();
+    env.deposit_sol(12 * SOL);
+    env
+}
+
+fn net(gross: u64) -> u64 {
+    gross - fee(gross, FEE_PUBLIC)
+}
+
+fn nothing_to_pay(env: &mut Env, b: &Keypair) -> bool {
+    env.release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("NothingToPay")
+}
+
+#[test]
+fn installments_release_once_per_period() {
+    let b = Keypair::new();
+    let mut env = stepped_env(false, &b, 0);
+    assert_eq!(env.vault().vest_period_secs, DAY);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(DAY - 1);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(1); // first boundary: exactly one installment
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, SOL);
+    assert_eq!(env.lamports(&b.pubkey()), net(SOL));
+    // Claiming again within the same installment pays nothing.
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(DAY / 2);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(DAY / 2 - 1);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(1);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, 2 * SOL);
+    assert!(nothing_to_pay(&mut env, &b));
+}
+
+#[test]
+fn skipped_installments_are_paid_together() {
+    let b = Keypair::new();
+    let mut env = stepped_env(false, &b, 0);
+    env.advance(5 * DAY + DAY / 2);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, 5 * SOL);
+    assert_eq!(env.lamports(&b.pubkey()), net(5 * SOL));
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(30 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    let v = env.vault();
+    assert_eq!(v.rules[0].released, 10 * SOL);
+    assert!(v.rules[0].executed_at > 0);
+    assert_eq!(env.lamports(&b.pubkey()), net(5 * SOL) * 2);
+    assert!(env
+        .release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("RuleAlreadyExecuted"));
+}
+
+#[test]
+fn installments_fully_vest_at_an_uneven_duration() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let now = env.now();
+    // 7 SOL over 7 days in 2-day installments: 2, 4, 6, then 7 at day 7.
+    env.create_vesting_stepped(
+        now,
+        false,
+        vec![schedule(&b.pubkey(), None, 7 * SOL, 0, 7 * DAY)],
+        2 * DAY,
+    )
+    .unwrap();
+    env.deposit_sol(8 * SOL);
+    env.advance(6 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, 6 * SOL);
+    env.advance(DAY - 1);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(1);
+    env.release(0, &b.pubkey()).unwrap();
+    let v = env.vault();
+    assert_eq!(v.rules[0].released, 7 * SOL);
+    assert!(v.rules[0].executed_at > 0);
+}
+
+#[test]
+fn installments_respect_the_cliff() {
+    let b = Keypair::new();
+    // Cliff at 3.5 days: nothing before it, then the 3 whole days so far.
+    let mut env = stepped_env(false, &b, 3 * DAY + DAY / 2);
+    env.advance(3 * DAY);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(DAY / 2 - 1);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(1);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, 3 * SOL);
+    assert!(nothing_to_pay(&mut env, &b));
+    env.advance(DAY / 2);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.vault().rules[0].released, 4 * SOL);
+}
+
+#[test]
+fn revoking_between_installments_keeps_only_unlocked_ones() {
+    let b = Keypair::new();
+    let mut env = stepped_env(true, &b, 0);
+    env.advance(4 * DAY + DAY / 2);
+    env.revoke().unwrap();
+    // 4 installments stay owed; the half-elapsed fifth goes back.
+    env.withdraw_sol(8 * SOL).unwrap();
+    assert!(env.withdraw_sol(1).unwrap_err().contains("FundsCommitted"));
+    env.advance(100 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), net(4 * SOL));
+    let v = env.vault();
+    assert_eq!(v.rules[0].released, 4 * SOL);
+    assert!(v.rules[0].executed_at > 0);
+    assert!(env.release(0, &b.pubkey()).is_err());
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&env.owner.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+}
+
+#[test]
+fn installment_tokens_release_per_period() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let usdc = env.token_setup(0);
+    let now = env.now();
+    env.create_vesting_stepped(
+        now,
+        false,
+        vec![schedule(&b.pubkey(), Some(usdc), 1_000_000, 0, 10 * DAY)],
+        5 * DAY,
+    )
+    .unwrap();
+    let admin = env.admin.insecure_clone();
+    let vault = env.vault_addr();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    MintTo::new(&mut env.svm, &admin, &usdc, &ata(&vault, &usdc), 1_000_000)
+        .send()
+        .unwrap();
+    env.advance(5 * DAY - 1);
+    assert!(env
+        .release_token(0, &b.pubkey(), &usdc)
+        .unwrap_err()
+        .contains("NothingToPay"));
+    env.advance(1);
+    env.release_token(0, &b.pubkey(), &usdc).unwrap();
+    assert_eq!(env.vault().rules[0].released, 500_000);
+    env.advance(DAY);
+    assert!(env
+        .release_token(0, &b.pubkey(), &usdc)
+        .unwrap_err()
+        .contains("NothingToPay"));
+}
+
+#[test]
+fn installment_period_is_validated() {
+    let b = Keypair::new();
+    let c = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let now = env.now();
+    let two = || {
+        vec![
+            schedule(&b.pubkey(), None, SOL, 0, 10 * DAY),
+            schedule(&c.pubkey(), None, SOL, 0, 5 * DAY),
+        ]
+    };
+    for period in [-1, 30, 59, 5 * DAY + 1, 10 * DAY] {
+        assert!(env
+            .create_vesting_stepped(now, false, two(), period)
+            .unwrap_err()
+            .contains("InvalidVesting"));
+    }
+    env.create_vesting_stepped(now, false, two(), 5 * DAY)
+        .unwrap();
+    env.plan = 1;
+    env.create_vesting_stepped(now, false, two(), 60).unwrap();
+    assert_eq!(env.vault().vest_period_secs, 60);
+    env.plan = 2;
+    env.create_vesting(now, false, two()).unwrap();
+    assert_eq!(env.vault().vest_period_secs, 0);
+}
+
 // Mainnet layout: per-rail stipends, stored rent, reserved space and
 // recovery of accounts left in older layouts.
 
@@ -2099,9 +2337,42 @@ fn vault_layout_keeps_client_offsets_and_reserved_space() {
     assert_eq!(data[74], 1);
     assert_eq!(&data[75..107], guardian.pubkey().as_ref());
     let v = env.vault();
-    assert_eq!(v._reserved, [0u8; 63]);
+    assert_eq!(v._reserved, [0u8; 55]);
+    assert_eq!(v.vest_period_secs, 0);
     assert_eq!(v.stipend_paid, 0);
     assert!(v.rent_paid > 0);
+}
+
+#[test]
+fn vest_period_sits_between_stipend_bits_and_reserved_space() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    env.plan = 0x1234;
+    let now = env.now();
+    env.create_vesting_stepped(
+        now,
+        false,
+        vec![schedule(&b.pubkey(), None, SOL, 0, 10 * DAY)],
+        DAY,
+    )
+    .unwrap();
+    let data = env.svm.get_account(&env.vault_addr()).unwrap().data;
+    assert_eq!(data.len(), Vault::SPACE);
+    assert_eq!(&data[8..40], env.owner.pubkey().as_ref());
+    assert_eq!(&data[40..42], &0x1234u16.to_le_bytes());
+    assert_eq!(&data[42..74], env.guard.pubkey().as_ref());
+    assert_eq!(data[74], 0);
+    let v = env.vault();
+    // Borsh tail: ... bump, stipend_paid, vest_period_secs, _reserved.
+    let mut body = Vec::new();
+    anchor_lang::AnchorSerialize::serialize(&v, &mut body).unwrap();
+    let end = 8 + body.len();
+    let period_at = end - 55 - 8;
+    assert_eq!(&data[period_at..period_at + 8], &DAY.to_le_bytes());
+    assert_eq!(data[period_at - 1], v.stipend_paid);
+    assert_eq!(data[period_at - 2], v.bump);
+    assert!(data[period_at + 8..].iter().all(|&x| x == 0));
 }
 
 impl Env {
@@ -2299,4 +2570,706 @@ fn vesting_stipend_is_paid_once_per_schedule() {
     env.advance(DAY);
     env.release_token(0, &c.pubkey(), &usdc).unwrap();
     assert_eq!(env.withdrawable(), spare);
+}
+
+const SUB_PRICE: u64 = 5_000_000;
+const SUB_PERIOD: i64 = 30 * DAY;
+
+fn sub_config_pda() -> Pubkey {
+    Pubkey::find_program_address(&[SUB_CONFIG_SEED], &deadman::id()).0
+}
+
+impl Env {
+    fn set_subscription_ix(
+        &self,
+        signer: &Pubkey,
+        price: u64,
+        period_secs: i64,
+        mint: &Pubkey,
+        enabled: bool,
+        min_periods: u16,
+    ) -> Instruction {
+        Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::SetSubscription {
+                price_per_period: price,
+                period_secs,
+                mint: *mint,
+                enabled,
+                min_periods,
+            }
+            .data(),
+            deadman::accounts::SetSubscription {
+                admin: *signer,
+                config: config_pda(),
+                sub_config: sub_config_pda(),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    fn set_subscription(&mut self, mint: &Pubkey, enabled: bool) -> Result<u64, String> {
+        self.set_subscription_min(mint, enabled, 1)
+    }
+
+    fn set_subscription_min(
+        &mut self,
+        mint: &Pubkey,
+        enabled: bool,
+        min_periods: u16,
+    ) -> Result<u64, String> {
+        let admin = self.admin.insecure_clone();
+        let ix = self.set_subscription_ix(
+            &admin.pubkey(),
+            SUB_PRICE,
+            SUB_PERIOD,
+            mint,
+            enabled,
+            min_periods,
+        );
+        self.send(ix, &[&admin])
+    }
+
+    fn sub_config(&self) -> SubscriptionConfig {
+        let acc = self.svm.get_account(&sub_config_pda()).unwrap();
+        SubscriptionConfig::try_deserialize(&mut acc.data.as_slice()).unwrap()
+    }
+
+    /// Mint with the owner's ATA funded and the treasury's ATA created.
+    fn sub_mint(&mut self) -> Pubkey {
+        let admin = self.admin.insecure_clone();
+        let mint = CreateMint::new(&mut self.svm, &admin)
+            .decimals(6)
+            .send()
+            .unwrap();
+        for owner in [self.owner.pubkey(), self.treasury.pubkey()] {
+            CreateAssociatedTokenAccountIdempotent::new(&mut self.svm, &admin, &mint)
+                .owner(&owner)
+                .send()
+                .unwrap();
+        }
+        let owner_token = ata(&self.owner.pubkey(), &mint);
+        MintTo::new(
+            &mut self.svm,
+            &admin,
+            &mint,
+            &owner_token,
+            1_000 * SUB_PRICE,
+        )
+        .send()
+        .unwrap();
+        mint
+    }
+
+    /// Enabled subscription priced in a fresh mint.
+    fn sub_setup(&mut self) -> Pubkey {
+        let mint = self.sub_mint();
+        self.set_subscription(&mint, true).unwrap();
+        mint
+    }
+
+    fn subscribe_ix(
+        &self,
+        owner: &Pubkey,
+        payer: &Pubkey,
+        mint: &Pubkey,
+        owner_token: &Pubkey,
+        treasury_token: &Pubkey,
+        periods: u16,
+    ) -> Instruction {
+        self.subscribe_ix_at(
+            &sub_pda(owner),
+            owner,
+            payer,
+            mint,
+            owner_token,
+            treasury_token,
+            periods,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn subscribe_ix_at(
+        &self,
+        subscription: &Pubkey,
+        owner: &Pubkey,
+        payer: &Pubkey,
+        mint: &Pubkey,
+        owner_token: &Pubkey,
+        treasury_token: &Pubkey,
+        periods: u16,
+    ) -> Instruction {
+        Instruction::new_with_bytes(
+            deadman::id(),
+            &deadman::instruction::Subscribe { periods }.data(),
+            deadman::accounts::Subscribe {
+                owner: *owner,
+                payer: *payer,
+                subscription: *subscription,
+                config: config_pda(),
+                sub_config: sub_config_pda(),
+                mint: *mint,
+                owner_token: *owner_token,
+                treasury_token: *treasury_token,
+                token_program: TOKEN_ID,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    fn subscribe(&mut self, mint: &Pubkey, periods: u16) -> Result<u64, String> {
+        let owner = self.owner.insecure_clone();
+        let ix = self.subscribe_ix(
+            &owner.pubkey(),
+            &owner.pubkey(),
+            mint,
+            &ata(&owner.pubkey(), mint),
+            &ata(&self.treasury.pubkey(), mint),
+            periods,
+        );
+        self.send(ix, &[&owner])
+    }
+
+    /// The owner's subscription, if it was ever created.
+    fn subscription(&self) -> Option<Subscription> {
+        let acc = self.svm.get_account(&sub_pda(&self.owner.pubkey()))?;
+        Some(Subscription::try_deserialize(&mut acc.data.as_slice()).unwrap())
+    }
+
+    fn paid_until(&self) -> i64 {
+        self.subscription().map_or(0, |s| s.paid_until)
+    }
+
+    /// Switches the helpers to another owner (fresh plan 0 unless created).
+    fn switch_owner(&mut self, owner: &Keypair) {
+        self.owner = owner.insecure_clone();
+        self.plan = 0;
+    }
+}
+
+/// Plan paying all of the vault's SOL to `b` and all of `usdc` to `a`.
+fn sol_and_token_rules(a: &Pubkey, b: &Pubkey, usdc: Pubkey, rail: Rail) -> Vec<RuleInput> {
+    vec![
+        rule(
+            a,
+            Rail::Solana,
+            10 * DAY,
+            Some(usdc),
+            AmountMode::Percent,
+            10_000,
+        ),
+        rule(b, rail, 10 * DAY, None, AmountMode::Percent, 10_000),
+    ]
+}
+
+#[test]
+fn subscription_config_is_admin_only_and_validated() {
+    let mut env = Env::new();
+    env.init_config();
+    let mint = env.sub_mint();
+    let intruder = Keypair::new();
+    env.svm.airdrop(&intruder.pubkey(), SOL).unwrap();
+    let ix = env.set_subscription_ix(&intruder.pubkey(), SUB_PRICE, SUB_PERIOD, &mint, true, 1);
+    assert!(env
+        .send(ix, &[&intruder])
+        .unwrap_err()
+        .contains("Unauthorized"));
+
+    let admin = env.admin.insecure_clone();
+    for (price, period, m) in [
+        (0, SUB_PERIOD, mint),
+        (SUB_PRICE, DAY - 1, mint),
+        (SUB_PRICE, 366 * DAY + 1, mint),
+        (SUB_PRICE, SUB_PERIOD, Pubkey::default()),
+    ] {
+        let ix = env.set_subscription_ix(&admin.pubkey(), price, period, &m, true, 1);
+        assert!(env
+            .send(ix, &[&admin])
+            .unwrap_err()
+            .contains("InvalidSubscription"));
+    }
+
+    env.set_subscription(&mint, true).unwrap();
+    let c = env.sub_config();
+    assert_eq!(
+        (c.price_per_period, c.period_secs, c.mint, c.enabled),
+        (SUB_PRICE, SUB_PERIOD, mint, true)
+    );
+    let ix = env.set_subscription_ix(&admin.pubkey(), 7, 366 * DAY, &mint, false, 1);
+    env.send(ix, &[&admin]).unwrap();
+    let c = env.sub_config();
+    assert_eq!(
+        (c.price_per_period, c.period_secs, c.enabled),
+        (7, 366 * DAY, false)
+    );
+    let ix = env.set_subscription_ix(&intruder.pubkey(), SUB_PRICE, SUB_PERIOD, &mint, true, 1);
+    assert!(env.send(ix, &[&intruder]).is_err(), "update is admin-only");
+}
+
+#[test]
+fn subscribing_pays_the_treasury_and_extends_coverage() {
+    // No plan needed: the subscription belongs to the account.
+    let mut env = Env::new();
+    env.init_config();
+    let mint = env.sub_setup();
+    let treasury_token = ata(&env.treasury.pubkey(), &mint);
+    let owner_token = ata(&env.owner.pubkey(), &mint);
+    let o0 = env.token_balance(&owner_token);
+
+    for periods in [0, 37] {
+        assert!(env
+            .subscribe(&mint, periods)
+            .unwrap_err()
+            .contains("InvalidSubscription"));
+    }
+    assert!(env.subscription().is_none());
+
+    let t0 = env.now();
+    env.subscribe(&mint, 1).unwrap();
+    let sub = env.subscription().unwrap();
+    assert_eq!(
+        (sub.owner, sub.paid_until, sub.bump),
+        (
+            env.owner.pubkey(),
+            t0 + SUB_PERIOD,
+            Pubkey::find_program_address(
+                &[SUBSCRIPTION_SEED, env.owner.pubkey().as_ref()],
+                &deadman::id()
+            )
+            .1
+        )
+    );
+    assert_eq!(sub._reserved, [0u8; 32]);
+    let acc = env.svm.get_account(&sub_pda(&env.owner.pubkey())).unwrap();
+    assert_eq!(acc.data.len(), Subscription::SPACE);
+    assert_eq!(Subscription::SPACE, 81);
+    assert_eq!(env.token_balance(&treasury_token), SUB_PRICE);
+
+    // Still covered: the new periods stack on the paid end.
+    env.advance(10 * DAY);
+    env.subscribe(&mint, 3).unwrap();
+    assert_eq!(env.paid_until(), t0 + 4 * SUB_PERIOD);
+    assert_eq!(env.token_balance(&treasury_token), 4 * SUB_PRICE);
+
+    // Lapsed: coverage restarts from now.
+    env.advance(200 * DAY);
+    env.subscribe(&mint, 1).unwrap();
+    assert_eq!(env.paid_until(), env.now() + SUB_PERIOD);
+    assert_eq!(env.token_balance(&treasury_token), 5 * SUB_PRICE);
+    assert_eq!(o0 - env.token_balance(&owner_token), 5 * SUB_PRICE);
+}
+
+#[test]
+fn a_sponsor_can_pay_the_subscription_rent() {
+    let mut env = Env::new();
+    env.init_config();
+    let mint = env.sub_setup();
+    let sponsor = Keypair::new();
+    env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
+    let owner = env.owner.insecure_clone();
+    let o0 = env.lamports(&owner.pubkey());
+    let s0 = env.lamports(&sponsor.pubkey());
+    let ix = env.subscribe_ix(
+        &owner.pubkey(),
+        &sponsor.pubkey(),
+        &mint,
+        &ata(&owner.pubkey(), &mint),
+        &ata(&env.treasury.pubkey(), &mint),
+        1,
+    );
+    env.send(ix, &[&sponsor, &owner]).unwrap();
+    let rent = env
+        .svm
+        .minimum_balance_for_rent_exemption(Subscription::SPACE);
+    assert_eq!(env.lamports(&owner.pubkey()), o0);
+    assert_eq!(s0 - env.lamports(&sponsor.pubkey()), rent + 10_000);
+    assert_eq!(env.subscription().unwrap().owner, owner.pubkey());
+
+    // The owner must still sign: a sponsor cannot spend the owner's tokens.
+    let mut ix = env.subscribe_ix(
+        &owner.pubkey(),
+        &sponsor.pubkey(),
+        &mint,
+        &ata(&owner.pubkey(), &mint),
+        &ata(&env.treasury.pubkey(), &mint),
+        1,
+    );
+    ix.accounts[0].is_signer = false;
+    assert!(env.send(ix, &[&sponsor]).is_err());
+}
+
+#[test]
+fn subscribing_rejects_wrong_accounts_and_disabled_config() {
+    let mut env = Env::new();
+    env.init_config();
+    let mint = env.sub_setup();
+    let other = env.sub_mint();
+    let owner = env.owner.insecure_clone();
+    let treasury = env.treasury.pubkey();
+    let owner_ata = ata(&owner.pubkey(), &mint);
+
+    // Wrong mint, even with matching token accounts.
+    let ix = env.subscribe_ix(
+        &owner.pubkey(),
+        &owner.pubkey(),
+        &other,
+        &ata(&owner.pubkey(), &other),
+        &ata(&treasury, &other),
+        1,
+    );
+    assert!(env
+        .send(ix, &[&owner])
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+
+    // Payment must land in the treasury's ATA, not any other account.
+    let admin = env.admin.insecure_clone();
+    let stranger = Keypair::new();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &mint)
+        .owner(&stranger.pubkey())
+        .send()
+        .unwrap();
+    for to in [ata(&stranger.pubkey(), &mint), owner_ata] {
+        let ix = env.subscribe_ix(&owner.pubkey(), &owner.pubkey(), &mint, &owner_ata, &to, 1);
+        assert!(env.send(ix, &[&owner]).is_err());
+    }
+
+    // An intruder cannot spend the owner's tokens...
+    let intruder = Keypair::new();
+    env.svm.airdrop(&intruder.pubkey(), SOL).unwrap();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &mint)
+        .owner(&intruder.pubkey())
+        .send()
+        .unwrap();
+    let ix = env.subscribe_ix(
+        &intruder.pubkey(),
+        &intruder.pubkey(),
+        &mint,
+        &owner_ata,
+        &ata(&treasury, &mint),
+        1,
+    );
+    assert!(env.send(ix, &[&intruder]).is_err());
+    // ...nor write its own payment into the owner's subscription.
+    let ix = env.subscribe_ix_at(
+        &sub_pda(&owner.pubkey()),
+        &intruder.pubkey(),
+        &intruder.pubkey(),
+        &mint,
+        &ata(&intruder.pubkey(), &mint),
+        &ata(&treasury, &mint),
+        1,
+    );
+    assert!(env
+        .send(ix, &[&intruder])
+        .unwrap_err()
+        .contains("ConstraintSeeds"));
+    assert!(env.subscription().is_none());
+
+    env.set_subscription(&mint, false).unwrap();
+    assert!(env
+        .subscribe(&mint, 1)
+        .unwrap_err()
+        .contains("SubscriptionDisabled"));
+    assert!(env.subscription().is_none());
+    assert_eq!(env.token_balance(&ata(&treasury, &mint)), 0);
+}
+
+#[test]
+fn one_subscription_waives_fees_on_every_plan_of_the_owner() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let sub = env.sub_setup();
+    let usdc = env.token_setup(1_000_000);
+    env.update_policy(
+        sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Cloak),
+        None,
+    )
+    .unwrap();
+    env.deposit_sol(4 * SOL);
+    env.subscribe(&sub, 1).unwrap();
+
+    // A plan created after subscribing is covered too.
+    let c = Keypair::new();
+    env.plan = 9;
+    env.create_vault(vec![rule(
+        &c.pubkey(),
+        Rail::Zcash,
+        10 * DAY,
+        None,
+        AmountMode::Percent,
+        10_000,
+    )])
+    .unwrap();
+    env.deposit_sol(2 * SOL);
+
+    // Silence outlasts the subscription; it covered both last check-ins.
+    env.advance(40 * DAY);
+    let treasury = env.treasury.pubkey();
+    let t0 = env.lamports(&treasury);
+
+    let gross = env.withdrawable();
+    env.execute_sol(0, &c.pubkey()).unwrap();
+    assert_eq!(env.lamports(&c.pubkey()), gross);
+
+    env.plan = 0;
+    let gross = env.withdrawable();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), gross);
+    env.execute_token(0, &a.pubkey(), &usdc).unwrap();
+    assert_eq!(env.token_balance(&ata(&a.pubkey(), &usdc)), 1_000_000);
+
+    assert_eq!(env.lamports(&treasury), t0);
+    assert_eq!(env.token_balance(&ata(&treasury, &usdc)), 0);
+}
+
+#[test]
+fn another_owners_plan_is_not_covered_and_cannot_borrow_the_subscription() {
+    let (b, d) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let sub = env.sub_setup();
+    env.subscribe(&sub, 1).unwrap();
+    let subscriber = env.owner.pubkey();
+
+    let other = Keypair::new();
+    env.svm.airdrop(&other.pubkey(), 100 * SOL).unwrap();
+    env.switch_owner(&other);
+    env.create_vault(all_to(&d.pubkey())).unwrap();
+    env.deposit_sol(2 * SOL);
+    env.advance(10 * DAY + 1);
+    let gross = env.withdrawable();
+
+    // The subscriber's PDA does not match this vault's owner.
+    env.sub_override = Some(sub_pda(&subscriber));
+    assert!(env
+        .execute_sol(0, &d.pubkey())
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+
+    // With its own (never created) PDA, the normal fee applies.
+    env.sub_override = None;
+    let treasury = env.treasury.pubkey();
+    let t0 = env.lamports(&treasury);
+    env.execute_sol(0, &d.pubkey()).unwrap();
+    assert_eq!(env.lamports(&d.pubkey()), gross - fee(gross, FEE_PUBLIC));
+    assert_eq!(env.lamports(&treasury) - t0, fee(gross, FEE_PUBLIC));
+}
+
+#[test]
+fn payouts_reject_a_substituted_subscription_account() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let sub = env.sub_setup();
+    let usdc = env.token_setup(1_000_000);
+    env.update_policy(
+        sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Solana),
+        None,
+    )
+    .unwrap();
+    env.deposit_sol(2 * SOL);
+    env.subscribe(&sub, 1).unwrap();
+    env.advance(10 * DAY + 1);
+
+    // An executor cannot drop the waiver by passing an empty account or
+    // another program account in place of the owner's subscription.
+    env.sub_override = Some(Keypair::new().pubkey());
+    assert!(env
+        .execute_sol(1, &b.pubkey())
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    assert!(env
+        .execute_token(0, &a.pubkey(), &usdc)
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    for fake in [env.vault_addr(), sub_config_pda(), config_pda()] {
+        env.sub_override = Some(fake);
+        assert!(env.execute_sol(1, &b.pubkey()).is_err());
+        assert!(env.execute_token(0, &a.pubkey(), &usdc).is_err());
+    }
+    env.sub_override = None;
+    let gross = env.withdrawable();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), gross);
+}
+
+#[test]
+fn an_uncreated_subscription_pays_the_normal_fee() {
+    let b = Keypair::new();
+    let mut env = ready(all_to(&b.pubkey()));
+    env.deposit_sol(2 * SOL);
+    // Lamports sent to the PDA do not create a subscription.
+    let owner = env.owner.insecure_clone();
+    let ix = anchor_lang::solana_program::system_instruction::transfer(
+        &owner.pubkey(),
+        &sub_pda(&owner.pubkey()),
+        SOL,
+    );
+    env.send(ix, &[&owner]).unwrap();
+    assert!(env.svm.get_account(&sub_pda(&owner.pubkey())).is_some());
+
+    env.advance(10 * DAY + 1);
+    let treasury = env.treasury.pubkey();
+    let t0 = env.lamports(&treasury);
+    let gross = env.withdrawable();
+    env.execute_sol(0, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), gross - fee(gross, FEE_PUBLIC));
+    assert_eq!(env.lamports(&treasury) - t0, fee(gross, FEE_PUBLIC));
+
+    // Subscribing later still works on the pre-funded PDA.
+    let sub = env.sub_setup();
+    env.subscribe(&sub, 1).unwrap();
+    assert_eq!(env.paid_until(), env.now() + SUB_PERIOD);
+}
+
+#[test]
+fn lapsed_subscription_before_the_last_check_in_pays_the_normal_fee() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(all_to(&b.pubkey()));
+    let sub = env.sub_setup();
+    let usdc = env.token_setup(1_000_000);
+    env.update_policy(
+        sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Solana),
+        None,
+    )
+    .unwrap();
+    env.deposit_sol(4 * SOL);
+    env.subscribe(&sub, 1).unwrap();
+    env.advance(SUB_PERIOD + 1);
+    let owner = env.owner.insecure_clone();
+    env.pulse(&owner).unwrap();
+    assert!(env.paid_until() < env.vault().last_pulse);
+
+    env.advance(10 * DAY + 1);
+    let treasury = env.treasury.pubkey();
+    let t0 = env.lamports(&treasury);
+    let gross = env.withdrawable();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), gross - fee(gross, FEE_PUBLIC));
+    assert_eq!(env.lamports(&treasury) - t0, fee(gross, FEE_PUBLIC));
+
+    env.execute_token(0, &a.pubkey(), &usdc).unwrap();
+    assert_eq!(
+        env.token_balance(&ata(&a.pubkey(), &usdc)),
+        1_000_000 - fee(1_000_000, FEE_PUBLIC)
+    );
+    assert_eq!(
+        env.token_balance(&ata(&treasury, &usdc)),
+        fee(1_000_000, FEE_PUBLIC)
+    );
+}
+
+#[test]
+fn vesting_fee_is_waived_only_while_the_subscription_is_active() {
+    let b = Keypair::new();
+    let mut env = Env::new();
+    env.init_config();
+    let sub = env.sub_setup();
+    let usdc = env.token_setup(0);
+    let now = env.now();
+    env.create_vesting(
+        now,
+        false,
+        vec![
+            schedule(&b.pubkey(), None, 10 * SOL, 0, 100 * DAY),
+            schedule(&b.pubkey(), Some(usdc), 1_000_000, 0, 100 * DAY),
+        ],
+    )
+    .unwrap();
+    env.deposit_sol(10 * SOL);
+    let admin = env.admin.insecure_clone();
+    let vault = env.vault_addr();
+    CreateAssociatedTokenAccountIdempotent::new(&mut env.svm, &admin, &usdc)
+        .owner(&vault)
+        .send()
+        .unwrap();
+    MintTo::new(&mut env.svm, &admin, &usdc, &ata(&vault, &usdc), 1_000_000)
+        .send()
+        .unwrap();
+    env.subscribe(&sub, 1).unwrap();
+    let treasury = env.treasury.pubkey();
+    let t0 = env.lamports(&treasury);
+
+    // Day 20, covered: 20% vested, no fee.
+    env.advance(20 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    assert_eq!(env.lamports(&b.pubkey()), 2 * SOL);
+    env.release_token(1, &b.pubkey(), &usdc).unwrap();
+    assert_eq!(env.token_balance(&ata(&b.pubkey(), &usdc)), 200_000);
+    assert_eq!(env.lamports(&treasury), t0);
+    assert_eq!(env.token_balance(&ata(&treasury, &usdc)), 0);
+
+    // A substituted subscription account is rejected here too.
+    env.sub_override = Some(Keypair::new().pubkey());
+    env.advance(DAY);
+    assert!(env
+        .release(0, &b.pubkey())
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    assert!(env
+        .release_token(1, &b.pubkey(), &usdc)
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    env.sub_override = None;
+
+    // Day 50, lapsed: the next 30% pays the fee.
+    env.advance(29 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    let part = 3 * SOL;
+    assert_eq!(
+        env.lamports(&b.pubkey()),
+        2 * SOL + part - fee(part, FEE_PUBLIC)
+    );
+    assert_eq!(env.lamports(&treasury) - t0, fee(part, FEE_PUBLIC));
+    env.release_token(1, &b.pubkey(), &usdc).unwrap();
+    assert_eq!(
+        env.token_balance(&ata(&b.pubkey(), &usdc)),
+        200_000 + 300_000 - fee(300_000, FEE_PUBLIC)
+    );
+    assert_eq!(
+        env.token_balance(&ata(&treasury, &usdc)),
+        fee(300_000, FEE_PUBLIC)
+    );
+}
+
+#[test]
+fn a_new_or_lapsed_subscription_commits_to_the_minimum_term() {
+    let mut env = Env::new();
+    env.init_config();
+    let mint = env.sub_setup();
+    env.set_subscription_min(&mint, true, 12).unwrap();
+    assert_eq!(env.sub_config().min_periods, 12);
+
+    assert!(env
+        .subscribe(&mint, 11)
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    let t0 = env.now();
+    env.subscribe(&mint, 12).unwrap();
+    assert_eq!(env.paid_until(), t0 + 12 * SUB_PERIOD);
+
+    // While active, any extension is fine.
+    env.subscribe(&mint, 1).unwrap();
+    assert_eq!(env.paid_until(), t0 + 13 * SUB_PERIOD);
+    env.subscribe(&mint, 36).unwrap();
+    assert_eq!(env.paid_until(), t0 + 49 * SUB_PERIOD);
+
+    // After a lapse the minimum applies again.
+    env.advance(49 * SUB_PERIOD + DAY);
+    assert!(env
+        .subscribe(&mint, 1)
+        .unwrap_err()
+        .contains("InvalidSubscription"));
+    env.subscribe(&mint, 12).unwrap();
+    assert_eq!(env.paid_until(), env.now() + 12 * SUB_PERIOD);
+
+    let admin = env.admin.insecure_clone();
+    for min in [0, deadman::constants::MAX_SUB_PERIODS + 1] {
+        let ix = env.set_subscription_ix(&admin.pubkey(), SUB_PRICE, SUB_PERIOD, &mint, true, min);
+        assert!(env
+            .send(ix, &[&admin])
+            .unwrap_err()
+            .contains("InvalidSubscription"));
+    }
 }

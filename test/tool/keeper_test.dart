@@ -1,5 +1,11 @@
+import 'dart:io';
+
+import 'package:deadman/core/config.dart';
+import 'package:deadman/solana/codec.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/solana/deadman_client.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:solana/solana.dart' show Ed25519HDKeyPair;
 
 import '../../tool/keeper.dart';
 import '../solana/helpers.dart';
@@ -343,4 +349,221 @@ void main() {
       expect(defaultUsdcLamportsPerUnit * 1000000, 6000000);
     });
   });
+
+  group('subscription waiver', () {
+    const fees = FeeSchedule(
+      treasury: '7ZQi6r2ZbKGCDFqKpvVjwMBVHzH2bqoqXuRnDKxDtjXY',
+      feeBpsPublic: 200,
+      feeBpsPrivate: 500,
+    );
+    const now = 1790500000;
+    const lastPulse = 1790000000;
+    late FakeRpc rpc;
+    late Keeper keeper;
+
+    setUp(() async {
+      rpc = await FakeRpc.start();
+      final sol = rpc.client();
+      keeper = Keeper(
+        sol,
+        DeadmanClient.withKora(client: sol),
+        await Ed25519HDKeyPair.random(),
+        prices: {mint: 1000000},
+      );
+      rpc.accounts
+        ..[mint] = FakeAccount(tokenProgramId, mintBytes(6))
+        ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000)
+        ..[fees.treasury] = const FakeAccount(
+          systemProgramId,
+          [],
+          lamports: 5000000,
+        );
+    });
+
+    tearDown(() => rpc.close());
+
+    final owner = key(30);
+    AccountSubscription paid(int until) =>
+        AccountSubscription(owner: owner, paidUntil: until);
+
+    VaultState plan({String? ruleMint, int planId = 0}) {
+      return decodeVault(
+        vaultBytes(
+          owner: owner,
+          planId: planId,
+          guard: key(31),
+          lastPulse: lastPulse,
+          rules: [
+            RuleState(
+              beneficiary: heir,
+              rail: Rail.solana,
+              afterSecs: 90000,
+              mode: AmountMode.fixed,
+              amount: 1000000,
+              mint: ruleMint,
+              executedAt: 0,
+              paid: 0,
+            ),
+          ],
+        ),
+        address: vaultPda(owner, planId).address,
+        lamports: 1000000000,
+        rentExemptMinimum: 2000000,
+      );
+    }
+
+    void holdTokens(VaultState v, {bool heirAta = true}) {
+      rpc.accounts[ataAddress(v.address, mint)] = FakeAccount(
+        tokenProgramId,
+        [...tokenAccountBytes(mint: mint, owner: v.address, amount: 5000000)]
+          ..[108] = 1,
+      );
+      rpc.accounts[ataAddress(fees.treasury, mint)] = FakeAccount(
+        tokenProgramId,
+        tokenAccountBytes(mint: mint, owner: fees.treasury, amount: 0)
+          ..[108] = 1,
+      );
+      if (heirAta) {
+        rpc.accounts[ataAddress(heir, mint)] = FakeAccount(
+          tokenProgramId,
+          tokenAccountBytes(mint: mint, owner: heir, amount: 0)..[108] = 1,
+        );
+      }
+    }
+
+    test("every plan of a subscribed owner executes fee-free", () async {
+      for (final id in [0, 9]) {
+        final d = await keeper.decide(
+          plan(planId: id),
+          0,
+          fees,
+          now,
+          sub: paid(lastPulse),
+        );
+        expect(d.action, KeeperAction.execute);
+        expect(d.reason, 'pays 1000000 lamports, fee 0');
+      }
+    });
+
+    test('no subscription, a lapsed one or another owner\'s pays the '
+        'fee', () async {
+      for (final sub in [
+        null,
+        paid(lastPulse - 1),
+        AccountSubscription(owner: key(32), paidUntil: now + 86400),
+      ]) {
+        final d = await keeper.decide(plan(), 0, fees, now, sub: sub);
+        expect(d.reason, 'pays 980000 lamports, fee 20000');
+      }
+    });
+
+    test('a covered token tier executes when its ATAs exist', () async {
+      final v = plan(ruleMint: mint);
+      holdTokens(v);
+      final d = await keeper.decide(v, 0, fees, now, sub: paid(now + 86400));
+      expect(d.action, KeeperAction.execute);
+      expect(d.reason, 'pays 1000000, fee 0');
+      expect(d.createAtasFor, isEmpty);
+    });
+
+    test('a covered token tier never pays ATA rent', () async {
+      final v = plan(ruleMint: mint);
+      holdTokens(v, heirAta: false);
+      final d = await keeper.decide(v, 0, fees, now, sub: paid(now));
+      expect(d.action, KeeperAction.wait, reason: d.reason);
+      expect(d.createAtasFor, isEmpty);
+
+      // The same tier without the waiver: its fee is worth the rent.
+      final charged = await keeper.decide(v, 0, fees, now);
+      expect(charged.action, KeeperAction.execute);
+      expect(charged.createAtasFor, [heir]);
+    });
+  });
+
+  group('sweep', () {
+    test("reads every owner's subscription once, in one batch, and charges "
+        'no fee on any plan of a subscribed owner', () async {
+      final rpc = await FakeRpc.start();
+      addTearDown(rpc.close);
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final lastPulse = now - 100 * 86400;
+      final subscribed = key(40);
+      final other = key(41);
+      rpc.accounts
+        ..[configPda().address] = FakeAccount(
+          AppConfig.programId,
+          configBytes(admin: key(42), treasury: treasury),
+        )
+        ..[treasury] = const FakeAccount(systemProgramId, [], lamports: 5000000)
+        ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000)
+        ..[subPda(subscribed).address] = FakeAccount(
+          AppConfig.programId,
+          subscriptionBytes(owner: subscribed, paidUntil: lastPulse),
+        );
+      for (final (owner, planId) in [
+        (subscribed, 0),
+        (subscribed, 1),
+        (other, 0),
+      ]) {
+        rpc.accounts[vaultPda(owner, planId).address] = FakeAccount(
+          AppConfig.programId,
+          vaultBytes(
+            owner: owner,
+            planId: planId,
+            guard: key(43),
+            lastPulse: lastPulse,
+            lockedUntil: 0,
+            guardianReadyAt: 0,
+            rules: [
+              RuleState(
+                beneficiary: heir,
+                rail: Rail.solana,
+                afterSecs: 90000,
+                mode: AmountMode.fixed,
+                amount: 1000000,
+                executedAt: 0,
+                paid: 0,
+              ),
+            ],
+          ),
+          lamports: 1000000000,
+        );
+      }
+      final sol = rpc.client();
+      final keeper = Keeper(
+        sol,
+        DeadmanClient.withKora(client: sol),
+        await Ed25519HDKeyPair.random(),
+        dryRun: true,
+      );
+      final out = _Out();
+      await IOOverrides.runZoned(keeper.sweep, stdout: () => out);
+
+      final subReads = [
+        for (final keys in rpc.multiReads)
+          if (keys.contains(subPda(subscribed).address)) keys,
+      ];
+      expect(subReads, [
+        unorderedEquals([subPda(subscribed).address, subPda(other).address]),
+      ]);
+      String line(String owner, int planId) => out.lines.singleWhere(
+        (l) => l.contains(vaultPda(owner, planId).address),
+      );
+      expect(line(subscribed, 0), endsWith('pays 1000000 lamports, fee 0'));
+      expect(line(subscribed, 1), endsWith('pays 1000000 lamports, fee 0'));
+      expect(line(other, 0), endsWith('pays 980000 lamports, fee 20000'));
+      expect(rpc.sent, isEmpty);
+    });
+  });
+}
+
+/// Captures what the keeper prints.
+class _Out implements Stdout {
+  final lines = <String>[];
+
+  @override
+  void writeln([Object? object = '']) => lines.add('$object');
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

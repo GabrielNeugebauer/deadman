@@ -8,9 +8,16 @@
 // stays claimable, so the keeper executes it (same policy) once it can pay,
 // and never skips it again. At most one action per vault per sweep.
 //
-// Vesting plans: releases what has vested on each schedule, at most once per
-// --vest-interval per schedule (and always once it is fully vested), under
-// the same payability rules. Inheritance-only actions never touch them.
+// Plans of a subscribed owner (fee waived, `feeWaivedFor`; one batched read
+// of the owners' subscriptions per sweep) carry a 0 fee, so the keeper pays
+// no ATA rent for them; it still executes SOL tiers and token tiers whose
+// ATAs exist.
+//
+// Vesting plans: releases what has vested on each schedule under the same
+// payability rules. Installment plans release each installment as soon as it
+// unlocks; continuous (legacy) plans at most once per --vest-interval per
+// schedule (and always once fully vested). Inheritance-only actions never
+// touch them.
 //
 // dart run tool/keeper.dart --keypair <path> [--cluster devnet|mainnet-beta]
 //   [--rpc <url>] [--every 60] [--dry-run]
@@ -221,17 +228,20 @@ Decision decideToken(
 }
 
 /// Whether to release a vesting schedule now: never with nothing new
-/// vested, at most once per [interval] (unix seconds since [lastRelease]),
-/// except once [fullyVested] so the last part never waits.
+/// vested; right away for [installments] (each unlock is already a whole
+/// installment); otherwise (continuous vesting) at most once per [interval]
+/// (unix seconds since [lastRelease]), except once [fullyVested] so the
+/// last part never waits.
 bool vestingReleaseDue({
   required int claimable,
   required bool fullyVested,
   required int now,
   required int interval,
   int? lastRelease,
+  bool installments = false,
 }) {
   if (claimable <= 0) return false;
-  if (fullyVested || lastRelease == null) return true;
+  if (installments || fullyVested || lastRelease == null) return true;
   return now - lastRelease >= interval;
 }
 
@@ -282,7 +292,8 @@ class Keeper {
   final bool dryRun;
   final Map<String, double> prices;
 
-  /// Seconds between releases of one vesting schedule.
+  /// Seconds between releases of one continuously vesting schedule
+  /// (installment schedules release at each unlock).
   final int vestInterval;
 
   /// Priority fee (micro-lamports per compute unit) on execute and release
@@ -324,19 +335,23 @@ class Keeper {
   }
 
   /// For a vesting plan pass [asTier] (see [vestingAsTier]); it is never
-  /// skippable and reserves nothing.
+  /// skippable and reserves nothing. [sub] is the owner's subscription
+  /// (null = none).
   Future<Decision> decide(
     VaultState v,
     int i,
     FeeSchedule fees,
     int now, {
     RuleSpec? asTier,
+    AccountSubscription? sub,
   }) async {
     final rule = asTier ?? v.rules[i];
     // False for an already-skipped tier: it waits until it can pay.
     final canSkip = asTier == null && v.canSkip(i, now);
     final otherReserved = asTier == null ? reservedFor(v, i) : 0;
-    final bps = fees.bpsFor(rule.rail);
+    // 0 while the owner's subscription waives the fee: the keeper then
+    // pays no ATA rent for it, but still executes payable tiers.
+    final bps = payoutFeeBps(fees, v, sub, rule.rail, now);
     final mint = rule.mint;
     if (mint == null) {
       final [ben, tre] = await _accounts([rule.beneficiary, fees.treasury]);
@@ -419,10 +434,12 @@ class Keeper {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final vaults = await client.fetchAllVaults();
     final fees = await client.fetchFees();
+    final subs = await client.fetchSubscriptions(vaults.map((v) => v.owner));
     var acted = 0;
     for (final v in vaults) {
+      final sub = subs[v.owner];
       if (v.isVesting) {
-        if (await _sweepVesting(v, fees, now)) acted++;
+        if (await _sweepVesting(v, fees, now, sub)) acted++;
         continue;
       }
       // Index order respects the program's per-asset ordering; skipped
@@ -432,7 +449,7 @@ class Keeper {
         final rule = v.rules[i];
         final tag = '${v.address} rule $i -> ${rule.beneficiary}';
         try {
-          final d = await decide(v, i, fees, now);
+          final d = await decide(v, i, fees, now, sub: sub);
           if (d.action == KeeperAction.wait || dryRun) {
             stdout.writeln('${dryRun ? 'DRY ' : ''}$tag: $d');
             if (d.action == KeeperAction.wait) continue;
@@ -465,7 +482,12 @@ class Keeper {
 
 extension on Keeper {
   /// Releases the first schedule of [v] that is due; true if it acted.
-  Future<bool> _sweepVesting(VaultState v, FeeSchedule fees, int now) async {
+  Future<bool> _sweepVesting(
+    VaultState v,
+    FeeSchedule fees,
+    int now,
+    AccountSubscription? sub,
+  ) async {
     for (var i = 0; i < v.rules.length; i++) {
       final rule = v.rules[i];
       if (rule.executed) continue;
@@ -477,6 +499,7 @@ extension on Keeper {
         now: now,
         interval: vestInterval,
         lastRelease: _lastRelease[slot],
+        installments: v.vestPeriodSecs > 0,
       )) {
         continue;
       }
@@ -488,6 +511,7 @@ extension on Keeper {
           fees,
           now,
           asTier: vestingAsTier(rule, claimable),
+          sub: sub,
         );
         if (d.action != KeeperAction.execute || dryRun) {
           stdout.writeln('${dryRun ? 'DRY ' : ''}$tag: $d');
@@ -509,7 +533,7 @@ const _usage =
     'usage: --keypair <path> [--cluster devnet|mainnet-beta] [--rpc <url>] '
     '[--every <seconds>] [--dry-run] '
     '[--price <mint>=<lamports per base unit>]... '
-    '[--vest-interval <seconds, default 86400>] '
+    '[--vest-interval <seconds, default 86400; continuous vesting only>] '
     '[--usdc-price-lamports <per USDC base unit, default 6 = 0.006 SOL/USDC>] '
     '[--cu-price <micro-lamports per compute unit, default 0>]';
 

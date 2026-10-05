@@ -1,3 +1,5 @@
+import 'package:intl/intl.dart';
+
 const lamportsPerSol = 1000000000;
 
 String sol(int lamports, {int digits = 3}) =>
@@ -23,3 +25,17 @@ String span(int secs) {
 }
 
 String ago(int unixSecs, int now) => '${span(now - unixSecs)} ago';
+
+/// "Oct 4, 2027" for unix seconds [secs], local time.
+String dateText(int secs) =>
+    DateFormat.yMMMd().format(DateTime.fromMillisecondsSinceEpoch(secs * 1000));
+
+/// "Oct 4, 2027, 14:05" for unix seconds [secs], local time.
+String dateTimeText(int secs) => DateFormat.yMMMd().add_Hm().format(
+  DateTime.fromMillisecondsSinceEpoch(secs * 1000),
+);
+
+/// When an installment unlocks: the date, with the time when installments
+/// come more often than daily.
+String installmentDate(int secs, int periodSecs) =>
+    periodSecs > 0 && periodSecs < 86400 ? dateTimeText(secs) : dateText(secs);

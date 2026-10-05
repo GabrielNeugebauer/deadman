@@ -46,7 +46,7 @@ pub enum DeadmanError {
     SkipTooEarly,
     #[msg("This instruction does not apply to this kind of plan")]
     WrongPlanKind,
-    #[msg("Vesting schedules need a total, a cliff no longer than the duration, and a duration up to 20 years")]
+    #[msg("Vesting schedules need a total, a cliff no longer than the duration, a duration up to 20 years, and an installment period of 0 or 60s up to the shortest duration")]
     InvalidVesting,
     #[msg("This vesting plan cannot be revoked")]
     NotRevocable,
@@ -60,4 +60,8 @@ pub enum DeadmanError {
     MathOverflow,
     #[msg("Not a plan account in an older layout")]
     NotLegacyVault,
+    #[msg("Subscriptions are disabled")]
+    SubscriptionDisabled,
+    #[msg("Invalid subscription parameters or accounts")]
+    InvalidSubscription,
 }

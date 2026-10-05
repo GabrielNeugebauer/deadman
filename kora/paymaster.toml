@@ -68,7 +68,7 @@ disallowed_accounts = []
 # tier and the gateway routes by what Kora funds. This file is the PLAN tier
 # (Kora pays a new vault's rent, 7.35M lamports, plus <= 2 ATAs and the fee:
 # 3.00 USDC covers it up to SOL ~= $260; the vault rent comes back to Kora on
-# close_vault). scripts/kora_start.sh renders the ACCOUNT (1.00 USDC, <= 2
+# close_vault). scripts/kora_start.sh renders the ACCOUNT (0.50 USDC, <= 2
 # ATAs) and BASIC (0.02 USDC, fee only, no account funding) tiers from it.
 # strict = false: with the Mock oracle, 3 USDC is "worth" 300_000 lamports, so
 # strict mode would reject every Kora-funded create. Mainnet: see docs/KORA.md.

@@ -6,6 +6,7 @@ import 'package:deadman/ui/screens/vesting_editor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
 
@@ -18,9 +19,9 @@ class _Created {
 }
 
 class _FakeActions extends VaultActions {
-  _FakeActions(super.ref);
+  _FakeActions(super.ref, this.created);
 
-  final created = <_Created>[];
+  final List<_Created> created;
 
   @override
   Future<List<VaultState>> createVesting({
@@ -37,25 +38,24 @@ class _FakeActions extends VaultActions {
   }
 }
 
-/// Sent plans; the actions object is only created when the editor saves.
-class _Sent {
-  final made = <_FakeActions>[];
-  List<_Created> get created => [for (final a in made) ...a.created];
-}
-
-Future<_Sent> _pump(WidgetTester tester) async {
-  tester.view.physicalSize = const Size(1200, 6000);
+Future<List<_Created>> _pump(
+  WidgetTester tester, {
+  FakeApi? api,
+  Size size = const Size(1200, 6000),
+  double textScale = 1,
+}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  final sent = _Sent();
+  SharedPreferences.setMockInitialValues({'owner': addr(1)});
+  final prefs = await SharedPreferences.getInstance();
+  final created = <_Created>[];
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
-        actionsProvider.overrideWith((ref) {
-          final a = _FakeActions(ref);
-          sent.made.add(a);
-          return a;
-        }),
+        prefsProvider.overrideWithValue(prefs),
+        actionsProvider.overrideWith((ref) => _FakeActions(ref, created)),
+        apiProvider.overrideWithValue(api ?? FakeApi(const [])),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
@@ -64,9 +64,14 @@ Future<_Sent> _pump(WidgetTester tester) async {
           ),
         ),
         walletBalanceProvider.overrideWith((ref) async => 5000000000),
-        walletUsdcProvider.overrideWith((ref) async => 2000000000),
+        walletTokenProvider.overrideWith((ref, mint) async => 2000000000),
       ],
       child: MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
         home: Builder(
           builder: (context) => Scaffold(
             body: TextButton(
@@ -85,32 +90,74 @@ Future<_Sent> _pump(WidgetTester tester) async {
   );
   await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
-  return sent;
+  return created;
 }
 
 Finder _field(String label) => find.widgetWithText(TextField, label);
 
+final _list = find
+    .byWidgetPredicate(
+      (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+    )
+    .first;
+
+Future<void> _tap(WidgetTester tester, String text) async {
+  for (var i = 0; i < 50 && find.text(text).evaluate().isEmpty; i++) {
+    await tester.drag(_list, const Offset(0, -200));
+    await tester.pump();
+  }
+  await tester.ensureVisible(find.text(text).first);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(text).first);
+  await tester.pumpAndSettle();
+}
+
+/// Fills the schedule editor that opens on create.
+Future<void> _schedule(
+  WidgetTester tester, {
+  required String total,
+  int who = 30,
+  bool sol = false,
+}) async {
+  await _tap(tester, 'Add a schedule');
+  expect(find.text('New schedule'), findsOneWidget);
+  await tester.enterText(
+    _field('Their wallet address or claim code'),
+    addr(who),
+  );
+  if (sol) await _tap(tester, 'SOL');
+  await tester.enterText(find.byKey(const ValueKey('vest-total')), total);
+  await tester.pump(const Duration(milliseconds: 500));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   const usdc = AppConfig.usdcMint;
+  final heldUsdc = FakeApi(const [])..tokens['${addr(30)}:$usdc'] = 1;
 
   testWidgets('USDC totals in USDC; deposit defaults to the total', (
     tester,
   ) async {
-    final actions = await _pump(tester);
-    await tester.enterText(_field('Beneficiary wallet'), addr(30));
-    await tester.enterText(_field('Total'), '1500.5');
-    await tester.pump();
+    final created = await _pump(tester, api: heldUsdc);
+    await _schedule(tester, total: '1500.5');
+    expect(
+      find.textContaining('1500.5 USDC to ${addr(30).substring(0, 4)}'),
+      findsOneWidget,
+    );
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
 
     expect(
-      tester.widget<TextField>(_field('USDC deposit')).controller!.text,
+      tester.widget<TextField>(_field('Put in this plan')).controller!.text,
       '1500.5',
     );
-    expect(find.textContaining('Schedules need 1500.5 USDC'), findsOneWidget);
+    expect(find.text('Your schedules add up to 1500.5 USDC.'), findsOneWidget);
 
-    await tester.tap(find.text('Create vesting plan'));
-    await tester.pumpAndSettle();
+    await _tap(tester, 'Next: review');
+    expect(find.textContaining('receives 1500.5 USDC gradually'), findsOne);
+    await _tap(tester, 'Create vesting plan');
 
-    final c = actions.created.single;
+    final c = created.single;
     expect(c.revocable, isTrue);
     expect(c.schedules.single.total, 1500500000);
     expect(c.schedules.single.mint, usdc);
@@ -119,66 +166,84 @@ void main() {
     expect(c.lamports, 0);
   });
 
-  testWidgets('invalid beneficiary is reported and nothing is sent', (
+  testWidgets('an invalid beneficiary keeps the schedule editor open', (
     tester,
   ) async {
-    final actions = await _pump(tester);
-    await tester.enterText(_field('Total'), '10');
-    await tester.tap(find.text('Create vesting plan'));
-    await tester.pump();
-    expect(find.text('Check each beneficiary address'), findsOneWidget);
-    expect(actions.created, isEmpty);
+    await _pump(tester);
+    await _tap(tester, 'Add a schedule');
+    await tester.enterText(find.byKey(const ValueKey('vest-total')), '10');
+    await _tap(tester, 'Done');
+    expect(
+      find.text("This isn't a valid Solana address or claim code."),
+      findsOneWidget,
+    );
+    expect(find.text('New schedule'), findsOneWidget);
   });
 
-  testWidgets('an underfunded plan warns and asks before creating', (
+  testWidgets('an underfunded plan warns; a typed deposit is kept', (
     tester,
   ) async {
-    final actions = await _pump(tester);
-    await tester.enterText(_field('Beneficiary wallet'), addr(30));
-    await tester.enterText(_field('Total'), '1000');
+    final created = await _pump(tester, api: heldUsdc);
+    await _schedule(tester, total: '1000');
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
+    await tester.enterText(_field('Put in this plan'), '400');
     await tester.pump();
-    await tester.enterText(_field('USDC deposit'), '400');
-    await tester.pump();
-    expect(find.textContaining('Underfunded by 600 USDC'), findsOneWidget);
+    expect(find.text('Not fully funded'), findsOneWidget);
+    expect(find.textContaining('600 USDC short'), findsOneWidget);
 
-    await tester.tap(find.text('Create vesting plan'));
+    await _tap(tester, 'Back');
+    await tester.tap(find.textContaining('· 1000 USDC'));
     await tester.pumpAndSettle();
-    expect(find.text('Plan is underfunded'), findsOneWidget);
-    await tester.tap(find.text('Go back'));
-    await tester.pumpAndSettle();
-    expect(actions.created, isEmpty);
-
-    // Editing a total no longer overwrites a deposit the user typed.
-    await tester.enterText(_field('Total'), '2000');
+    await tester.enterText(find.byKey(const ValueKey('vest-total')), '2000');
     await tester.pump();
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
     expect(
-      tester.widget<TextField>(_field('USDC deposit')).controller!.text,
+      tester.widget<TextField>(_field('Put in this plan')).controller!.text,
       '400',
     );
+
+    await _tap(tester, 'Put in 2000 USDC');
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create vesting plan');
+    expect(created.single.tokens, {usdc: 2000000000});
   });
 
-  testWidgets('SOL schedule with demo timings and a cliff', (tester) async {
-    final actions = await _pump(tester);
-    await tester.tap(find.text('Demo timings'));
-    await tester.pump();
-    await tester.enterText(_field('Beneficiary wallet'), addr(30));
-    await tester.tap(find.text('SOL').first);
-    await tester.pump();
-    await tester.enterText(_field('Total'), '0.5');
-    await tester.tap(find.text('10 minutes'));
-    await tester.pump();
-    await tester.tap(find.text('2 minutes'));
-    await tester.pump();
-    await tester.tap(find.text('Revocable'));
-    await tester.pump();
+  testWidgets('SOL schedule with demo timings, a cliff, and the irrevocable '
+      'checkbox', (tester) async {
+    final created = await _pump(tester);
+    await _tap(tester, 'Advanced');
+    await _tap(tester, 'Demo timings');
+    await _tap(tester, "No, it's locked in");
+    await _tap(tester, 'Add a schedule');
+    await tester.enterText(
+      _field('Their wallet address or claim code'),
+      addr(30),
+    );
+    await _tap(tester, 'SOL');
+    await tester.enterText(find.byKey(const ValueKey('vest-total')), '0.5');
+    await _tap(tester, '10 minutes');
+    await _tap(tester, '2 minutes');
+    expect(find.textContaining('unlocks at once'), findsOneWidget);
+    await _tap(tester, 'Done');
 
-    await tester.tap(find.text('Create vesting plan'));
-    await tester.pumpAndSettle();
-    expect(find.text('Irrevocable plan'), findsOneWidget);
-    await tester.tap(find.text('Create plan'));
-    await tester.pumpAndSettle();
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create vesting plan');
+    expect(created, isEmpty);
+    expect(
+      find.text('Tick the box to create a plan you can never stop.'),
+      findsOneWidget,
+    );
+    await _tap(
+      tester,
+      'I understand I can never stop these schedules or withdraw what they '
+      'owe.',
+    );
+    await _tap(tester, 'Create vesting plan');
 
-    final c = actions.created.single;
+    final c = created.single;
     expect(c.revocable, isFalse);
     expect(c.schedules.single.mint, isNull);
     expect(c.schedules.single.total, 500000000);
@@ -186,5 +251,55 @@ void main() {
     expect(c.schedules.single.cliffSecs, 120);
     expect(c.lamports, 500000000);
     expect(c.tokens, isEmpty);
+  });
+
+  testWidgets('a USDC total to a wallet new to USDC that is too small needs '
+      'the checkbox', (tester) async {
+    final created = await _pump(tester);
+    await _schedule(tester, total: '0.3');
+    expect(find.text('Too small to arrive'), findsWidgets);
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create vesting plan');
+    expect(created, isEmpty);
+    await _tap(
+      tester,
+      'Create it anyway. I understand the schedules marked with a red sign '
+      'may never arrive.',
+    );
+    await _tap(tester, 'Create vesting plan');
+    expect(created, hasLength(1));
+  });
+
+  testWidgets('no overflow at 200% text on a phone', (tester) async {
+    await _pump(
+      tester,
+      api: heldUsdc,
+      size: const Size(400, 860),
+      textScale: 2,
+    );
+    expect(tester.takeException(), isNull);
+    await _tap(tester, 'Add a schedule');
+    await tester.enterText(
+      _field('Their wallet address or claim code'),
+      addr(30),
+    );
+    final total = find.byKey(const ValueKey('vest-total'));
+    while (total.evaluate().isEmpty) {
+      await tester.drag(_list, const Offset(0, -200));
+      await tester.pump();
+    }
+    await tester.ensureVisible(total);
+    await tester.enterText(total, '100');
+    await tester.pumpAndSettle();
+    await _tap(tester, '3 months');
+    expect(tester.takeException(), isNull);
+    await _tap(tester, 'Done');
+    expect(tester.takeException(), isNull);
+    await _tap(tester, 'Next: fund the plan');
+    expect(tester.takeException(), isNull);
+    await _tap(tester, 'Next: review');
+    expect(tester.takeException(), isNull);
   });
 }

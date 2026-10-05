@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Start the Deadman Kora stack in the background:
-# - sponsor:   Kora on :8090 (free), public gateway :8080 (guard pulse/lockdown)
+# - sponsor:   Kora on :8090 (free), public gateway :8080 (guard pulse/lockdown,
+#   and a beneficiary's own SOL claim)
 # - paymaster: three Kora nodes, one fixed USDC price each, behind the
 #   public gateway :8081 (owner transactions whose last instruction pays
 #   USDC; the gateway picks the node by what Kora funds):
 #     :8091 plan    3.00 USDC  Kora funds a new vault's rent (+ <= 2 ATAs)
-#     :8092 account 1.00 USDC  Kora funds <= 2 token accounts
+#     :8092 account 0.50 USDC  Kora funds <= 2 token accounts
 #     :8093 basic   0.02 USDC  network fee only
 # Both Kora nodes need an API key that only the gateway (tool/kora_gateway.dart,
 # one process serving both ports) holds.
@@ -104,7 +105,7 @@ if [[ "$CLUSTER" == "mainnet-beta" ]]; then
   PM_BASIC_PORT=8091
 else
   render_tier plan    8091 3000000 11500000 true
-  render_tier account 8092 1000000 4150000  true
+  render_tier account 8092 500000  4150000  true
   render_tier basic   8093 20000   60000    false
   PM_CONFIG="$KDIR/paymaster-plan.run.toml"
   PM_ACCOUNT_PORT=8092
@@ -182,6 +183,7 @@ start_gateway() {
   # kora_stop.sh can stop both with one signal.
   RPC_URL="$RPC_URL" GATEWAY_PORT=8080 KORA_UPSTREAM=http://127.0.0.1:8090 \
     GATEWAY_STATE="$STATE/gateway-usage.json" \
+    GATEWAY_CLAIMS_STATE="$STATE/gateway-claims.json" \
     PAYMASTER_PORT=8081 PAYMASTER_UPSTREAM=http://127.0.0.1:8091 \
     PAYMASTER_ACCOUNT_UPSTREAM="http://127.0.0.1:$PM_ACCOUNT_PORT" \
     PAYMASTER_BASIC_UPSTREAM="http://127.0.0.1:$PM_BASIC_PORT" \

@@ -22,9 +22,10 @@ RuleState rule({
   int reserved = 0,
   int durationSecs = 0,
   int released = 0,
+  Rail rail = Rail.solana,
 }) => RuleState(
   beneficiary: addr(seed),
-  rail: Rail.solana,
+  rail: rail,
   afterSecs: afterSecs,
   mint: mint,
   mode: mode,
@@ -193,6 +194,79 @@ class FakeApi implements DeadmanApi {
     Map<String, int> tokenDeposits = const {},
   }) async {
     createdDeposits.add(tokenDeposits);
+    return Uint8List(0);
+  }
+
+  /// Each [buildCreateVesting] call.
+  final createdVestings =
+      <
+        ({
+          int planId,
+          int startAt,
+          bool revocable,
+          List<VestingSpec> schedules,
+          int periodSecs,
+          int depositLamports,
+          Map<String, int> tokenDeposits,
+        })
+      >[];
+
+  @override
+  Future<Uint8List> buildCreateVesting({
+    required String owner,
+    required int planId,
+    required String label,
+    required String guard,
+    required int lockSecs,
+    required int startAt,
+    required bool revocable,
+    required List<VestingSpec> schedules,
+    int periodSecs = 0,
+    int depositLamports = 0,
+    Map<String, int> tokenDeposits = const {},
+  }) async {
+    if (fail != null) throw fail!;
+    createdVestings.add((
+      planId: planId,
+      startAt: startAt,
+      revocable: revocable,
+      schedules: schedules,
+      periodSecs: periodSecs,
+      depositLamports: depositLamports,
+      tokenDeposits: tokenDeposits,
+    ));
+    return Uint8List(0);
+  }
+
+  /// What [fetchSubscriptionTerms] returns (null = not offered).
+  SubscriptionTerms? subscriptionTerms;
+
+  /// What [fetchSubscription] returns for any owner (null = never
+  /// subscribed).
+  AccountSubscription? subscription;
+
+  /// (owner, periods) of each [buildSubscribe] call.
+  final subscribed = <(String, int)>[];
+
+  @override
+  Future<SubscriptionTerms?> fetchSubscriptionTerms() async {
+    if (fail != null) throw fail!;
+    return subscriptionTerms;
+  }
+
+  @override
+  Future<AccountSubscription?> fetchSubscription(String owner) async {
+    if (fail != null) throw fail!;
+    return subscription;
+  }
+
+  @override
+  Future<Uint8List> buildSubscribe({
+    required String owner,
+    required int periods,
+  }) async {
+    if (fail != null) throw fail!;
+    subscribed.add((owner, periods));
     return Uint8List(0);
   }
 

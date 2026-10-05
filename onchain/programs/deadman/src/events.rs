@@ -71,3 +71,10 @@ pub struct LegacyVaultRecovered {
     pub data_len: u32,
     pub lamports: u64,
 }
+
+#[event]
+pub struct AccountSubscribed {
+    pub owner: Pubkey,
+    pub paid_until: i64,
+    pub amount: u64,
+}

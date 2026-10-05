@@ -8,6 +8,7 @@ import '../rails/cloak_route.dart';
 import '../rails/rails.dart';
 import '../rails/zcash_route.dart';
 import '../solana/deadman_api.dart';
+import '../solana/deadman_client.dart' show DeadmanException;
 import '../wallet/web_wallet_bridge.dart';
 import 'assets.dart';
 import 'lockdown_retry.dart';
@@ -97,6 +98,11 @@ class VaultActions {
     ref.invalidate(walletTokenProvider);
     ref.invalidate(planTokenBalancesProvider);
     ref.invalidate(watchedTokenBalancesProvider);
+    ref.invalidate(claimQuoteProvider);
+    ref.invalidate(planTokenProvider);
+    ref.invalidate(accountSubscriptionProvider);
+    ref.invalidate(watchedSubscriptionsProvider);
+    ref.invalidate(ownerPlanHoldingsProvider);
   }
 
   Future<bool> _biometric(String reason) => ref.read(biometricProvider)(reason);
@@ -140,6 +146,7 @@ class VaultActions {
 
   /// Creates a vesting plan with the next free id, funded in the same
   /// transaction. Uses this device's guard key so panic lockdown covers it.
+  /// Schedules unlock in installments every [periodSecs] (0 = continuously).
   /// Returns the active inheritance plans guarded by another device.
   Future<List<VaultState>> createVesting({
     required String label,
@@ -147,6 +154,7 @@ class VaultActions {
     required bool revocable,
     required List<VestingSpec> schedules,
     required int lockSecs,
+    int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
   }) => _decoy(() async {
@@ -164,6 +172,7 @@ class VaultActions {
         startAt: startAt,
         revocable: revocable,
         schedules: schedules,
+        periodSecs: periodSecs,
         depositLamports: depositLamports,
         tokenDeposits: tokenDeposits,
       ),
@@ -180,16 +189,48 @@ class VaultActions {
   );
 
   /// Releases what has vested on schedule [index], signed by the connected
-  /// wallet (anyone may; the destination is fixed on-chain).
-  Future<void> releaseVested(VaultState vault, int index) async =>
-      _signAndSend([
-        await _api.buildReleaseVested(
-          executor: _owner,
-          vaultOwner: vault.owner,
-          planId: vault.planId,
-          index: index,
-        ),
-      ]);
+  /// wallet (anyone may; the destination is fixed on-chain). Returns a note
+  /// when a beneficiary's claim was not paid as quoted (see [claim]).
+  Future<String?> releaseVested(VaultState vault, int index) =>
+      claim(vault, index);
+
+  /// Executes a due rule, or releases what has vested, from the connected
+  /// wallet. Anyone may; the payout destination is fixed on-chain. When the
+  /// wallet is the beneficiary it needs no SOL ([DeadmanApi.buildClaim]):
+  /// if the free sponsor refuses the signed claim, the wallet is asked once
+  /// more to pay the fee itself. Returns a note saying so, or null.
+  Future<String?> claim(VaultState vault, int index) async {
+    final owner = _owner;
+    Future<ClaimTx> build({bool sponsored = true}) => _api.buildClaim(
+      claimer: owner,
+      vaultOwner: vault.owner,
+      planId: vault.planId,
+      index: index,
+      sponsored: sponsored,
+    );
+    final first = await build();
+    final wallet = ref.read(walletProvider);
+    final signed = await wallet.signTransactions([first.transaction]);
+    try {
+      await _api.sendSigned(signed);
+      return first.note;
+    } on DeadmanException catch (e) {
+      if (first.payer != ClaimPayer.sponsor || !sponsorRefused(e)) rethrow;
+      final again = await build(sponsored: false);
+      await _api.sendSigned(await wallet.signTransactions([again.transaction]));
+      return 'The free claim service turned this claim down '
+          '(${e.message.replaceFirst('Fee sponsor error: ', '')}), so your '
+          'wallet paid the network fee.';
+    } finally {
+      _refresh();
+    }
+  }
+
+  /// The sponsor itself refused or failed to send (not a program error,
+  /// which the wallet would hit too, nor a lost confirmation).
+  static bool sponsorRefused(DeadmanException e) =>
+      e.code == null &&
+      const {'KoraError', 'KoraUnauthorized', 'NoFunds'}.contains(e.name);
 
   /// Checks in, with the guard key, on exactly the active plans it can
   /// pulse. The report names plans that need a wallet check-in or are
@@ -292,6 +333,15 @@ class VaultActions {
     ]),
   );
 
+  /// Prepays [periods] of the account-wide monthly plan, which waives the
+  /// release fee on all of the owner's plans while paid. The price comes
+  /// from the wallet's subscription token.
+  Future<void> subscribe(int periods) => _decoy(
+    () async => _signAndSend([
+      await _api.buildSubscribe(owner: _owner, periods: periods),
+    ]),
+  );
+
   /// Closes plans left in an older layout and returns all their SOL.
   Future<void> recoverLegacyPlans(List<int> planIds) => _decoy(
     () async => _signAndSend([
@@ -383,16 +433,9 @@ class VaultActions {
     ref.invalidate(guardAddressProvider);
   }
 
-  /// Executes a due rule from the connected wallet. Anyone may execute;
-  /// the payout destination is fixed on-chain.
-  Future<void> executeRule(VaultState vault, int index) async => _signAndSend([
-    await _api.buildExecuteRule(
-      executor: _owner,
-      vaultOwner: vault.owner,
-      planId: vault.planId,
-      index: index,
-    ),
-  ]);
+  /// Executes a due rule from the connected wallet (see [claim]).
+  Future<String?> executeRule(VaultState vault, int index) =>
+      claim(vault, index);
 
   /// Creates or updates this device's receiving profile for a private rail.
   /// Behind the duress decoy and a biometric check, asked again (with its

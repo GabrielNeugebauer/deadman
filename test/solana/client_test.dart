@@ -396,38 +396,37 @@ void main() {
           ataAddress(vault, mint),
           owner,
         ]);
-        expect(ixs[i + 1].data.toList(), [
-          12,
-          ...le(8, amount),
-          decimals,
-        ]);
+        expect(ixs[i + 1].data.toList(), [12, ...le(8, amount), decimals]);
       }
     });
 
-    test('tokenDeposits: a Token-2022 mint is refused before signing', () async {
-      rpc.accounts[usdc] = FakeAccount(token2022ProgramId, mintBytes(6));
-      await expectLater(
-        client.buildCreateVault(
-          owner: owner,
-          planId: 0,
-          label: 'Kids',
-          guard: guard,
-          intervalSecs: 86400,
-          lockSecs: 3600,
-          skipGraceSecs: grace,
-          rules: [rule(to: alice, mint: usdc)],
-          tokenDeposits: {usdc: 1},
-        ),
-        throwsA(
-          isA<DeadmanException>().having(
-            (e) => e.message,
-            'message',
-            contains('Token-2022'),
+    test(
+      'tokenDeposits: a Token-2022 mint is refused before signing',
+      () async {
+        rpc.accounts[usdc] = FakeAccount(token2022ProgramId, mintBytes(6));
+        await expectLater(
+          client.buildCreateVault(
+            owner: owner,
+            planId: 0,
+            label: 'Kids',
+            guard: guard,
+            intervalSecs: 86400,
+            lockSecs: 3600,
+            skipGraceSecs: grace,
+            rules: [rule(to: alice, mint: usdc)],
+            tokenDeposits: {usdc: 1},
           ),
-        ),
-      );
-      expect(rpc.calls, isNot(contains('getLatestBlockhash')));
-    });
+          throwsA(
+            isA<DeadmanException>().having(
+              (e) => e.message,
+              'message',
+              contains('Token-2022'),
+            ),
+          ),
+        );
+        expect(rpc.calls, isNot(contains('getLatestBlockhash')));
+      },
+    );
 
     test('rejects labels over 32 bytes before building', () async {
       await expectLater(
@@ -657,8 +656,9 @@ void main() {
     );
     final exec = msg.instructions[2];
     expect(exec.data.toList(), [...Disc.executeTokenRule, 1]);
-    expect(exec.accounts, hasLength(9));
+    expect(exec.accounts, hasLength(10));
     expect(exec.accounts[6].pubKey.toBase58(), ataAddress(bob, usdc));
+    expect(exec.accounts[9].pubKey.toBase58(), subPda(owner).address);
     expect(
       exec.accounts.map((a) => a.pubKey.toBase58()),
       isNot(anyOf(contains(ataProgramId), contains(systemProgramId))),
@@ -741,6 +741,7 @@ void main() {
       configPda().address,
       alice,
       treasury,
+      subPda(owner).address,
     ]);
   });
 
@@ -1023,7 +1024,10 @@ void main() {
       await c.skipRuleWithKey(keeper, vaultOwner: owner, planId: 0, index: 1);
       final tx = SignedTx.fromBytes(rpc.sent.single);
       expect(tx.compiledMessage.accountKeys.first.toBase58(), keeper.address);
-      final ix = instructions(rpc.sent.single).single;
+      final ixs = instructions(rpc.sent.single);
+      // The plan never held USDC: the keeper creates its empty account first.
+      expect(ixs.first.programId.toBase58(), ataProgramId);
+      final ix = ixs.last;
       expect(ix.data.toList(), [...Disc.skipRule, 1]);
       expect(
         ix.accounts[2].pubKey.toBase58(),
@@ -1639,7 +1643,14 @@ void main() {
       );
       final ix = instructions(tx).single;
       expect(ix.data.toList(), [...Disc.releaseVestedSol, 0]);
-      expect(addrs(ix), [executor, v, configPda().address, alice, treasury]);
+      expect(addrs(ix), [
+        executor,
+        v,
+        configPda().address,
+        alice,
+        treasury,
+        subPda(owner).address,
+      ]);
     });
 
     test(
@@ -1678,6 +1689,7 @@ void main() {
           ataAddress(bob, usdc),
           ataAddress(treasury, usdc),
           tokenProgramId,
+          subPda(owner).address,
         ]);
       },
     );
@@ -2256,6 +2268,702 @@ void main() {
       d.feeToken = AppConfig.usdcMint;
       expect(d.feeToken, AppConfig.usdcMint);
       expect(d.paysFeesInToken, isFalse);
+    });
+  });
+
+  group('beneficiary claims with zero SOL', () {
+    late FakeKora sponsorNode;
+    late FakeKora payNode;
+    late DeadmanClient c;
+    late Ed25519HDKeyPair heir;
+    late String solVault;
+    late String usdcVault;
+
+    // Plan 3 pays half its 2 SOL to the heir, plan 4 half its 1 USDC.
+    const withdrawable = 2000000000;
+    const solGross = withdrawable ~/ 2;
+    const solNet = solGross - solGross * 200 ~/ 10000;
+    const usdcGross = 500000;
+    const usdcNet = usdcGross - usdcGross * 200 ~/ 10000;
+
+    String addPayoutPlan(int planId, RuleState r, {int lamports = 0}) {
+      final address = vaultPda(owner, planId).address;
+      rpc.accounts[address] = FakeAccount(
+        AppConfig.programId,
+        vaultBytes(owner: owner, planId: planId, guard: guard, rules: [r]),
+        lamports: rpc.rentExempt + lamports,
+      );
+      return address;
+    }
+
+    setUp(() async {
+      sponsorNode = FakeKora(signer: key(60), paymentAddress: key(60));
+      payNode = FakeKora(signer: key(70), paymentAddress: key(70))
+        ..feeInToken = 20000;
+      c = DeadmanClient.withKora(
+        client: rpc.client(),
+        sponsor: sponsorNode.client(),
+        paymaster: payNode.client(),
+        paymasterSigner: key(70),
+        paymasterToken: usdc,
+        clock: () => now,
+      );
+      heir = await Ed25519HDKeyPair.random();
+      // An existing treasury takes the protocol fee.
+      rpc.accounts[treasury] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      solVault = addPayoutPlan(
+        3,
+        rule(to: heir.address),
+        lamports: withdrawable,
+      );
+      usdcVault = addPayoutPlan(4, rule(to: heir.address, mint: usdc));
+      addTokens(usdcVault, usdc, 2 * usdcGross);
+    });
+
+    Future<ClaimTx> claim(int planId, {String? by, bool sponsored = true}) =>
+        c.buildClaim(
+          claimer: by ?? heir.address,
+          vaultOwner: owner,
+          planId: planId,
+          index: 0,
+          sponsored: sponsored,
+        );
+
+    Future<ClaimQuote> quote(int planId, {String? by}) => c.quoteClaim(
+      claimer: by ?? heir.address,
+      vaultOwner: owner,
+      planId: planId,
+      index: 0,
+    );
+
+    test('SOL: the sponsor pays the fee, the heir signs second, no Kora '
+        'account in the claim; sent through the sponsor', () async {
+      expect(await c.balance(heir.address), 0);
+      final built = await claim(3);
+      expect(built.payer, ClaimPayer.sponsor);
+      expect(built.note, isNull);
+      final msg = SignedTx.fromBytes(built.transaction).compiledMessage;
+      expect(msg.requiredSignatureCount, 2);
+      expect(msg.accountKeys[0].toBase58(), sponsorNode.signer);
+      expect(msg.accountKeys[1].toBase58(), heir.address);
+      expect(msg.recentBlockhash, sponsorNode.blockhash);
+      final ix = instructions(built.transaction).single;
+      expect(ix.data.toList(), [...Disc.executeSolRule, 0]);
+      expect(addrs(ix), [
+        heir.address,
+        solVault,
+        configPda().address,
+        heir.address,
+        treasury,
+        subPda(owner).address,
+      ]);
+      expect(addrs(ix), isNot(contains(sponsorNode.signer)));
+
+      final signed = await partiallySign(built.transaction, heir);
+      final sigs = await c.sendSigned([signed]);
+      expect(sigs.single, startsWith('kora'));
+      final sent = sponsorNode.paramsOf('signAndSendTransaction').single;
+      expect(sent['signer_key'], sponsorNode.signer);
+      expect(base64Decode(sent['transaction'] as String), signed);
+      expect(rpc.calls, isNot(contains('sendTransaction')));
+      expect(payNode.calls, isEmpty);
+    });
+
+    test('SOL vesting: release_vested_sol through the sponsor', () async {
+      addVesting(5, [
+        schedule(to: heir.address),
+      ], lamports: rpc.rentExempt + withdrawable);
+      final built = await claim(5);
+      expect(built.payer, ClaimPayer.sponsor);
+      final ix = instructions(built.transaction).single;
+      expect(ix.data.toList(), [...Disc.releaseVestedSol, 0]);
+      expect(
+        SignedTx.fromBytes(built.transaction).compiledMessage.accountKeys.first
+            .toBase58(),
+        sponsorNode.signer,
+      );
+    });
+
+    test('SOL: sponsor unreachable -> wallet-paid, said so; refused with '
+        'no SOL in the wallet', () async {
+      final down = DeadmanClient.withKora(
+        client: rpc.client(),
+        sponsor: KoraClient(
+          Uri.parse('https://kora.test'),
+          httpClient: MockClient((_) async => http.Response('gone', 404)),
+        ),
+        clock: () => now,
+      );
+      Future<ClaimTx> build() => down.buildClaim(
+        claimer: heir.address,
+        vaultOwner: owner,
+        planId: 3,
+        index: 0,
+      );
+      await expectLater(
+        build(),
+        throwsA(
+          isA<DeadmanException>()
+              .having((e) => e.name, 'name', 'SponsorUnavailable')
+              .having((e) => e.message, 'message', contains('no SOL')),
+        ),
+      );
+
+      rpc.accounts[heir.address] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      final built = await build();
+      expect(built.payer, ClaimPayer.wallet);
+      expect(built.note, contains('your wallet paid the network fee'));
+      final msg = SignedTx.fromBytes(built.transaction).compiledMessage;
+      expect(msg.requiredSignatureCount, 1);
+      expect(msg.accountKeys.first.toBase58(), heir.address);
+      expect(msg.recentBlockhash, rpc.blockhash);
+    });
+
+    test(
+      'SOL: sponsored false (the sponsor refused) builds wallet-paid',
+      () async {
+        rpc.accounts[heir.address] = FakeAccount(
+          systemProgramId,
+          const [],
+          lamports: rpc.rentExempt,
+        );
+        final built = await claim(3, sponsored: false);
+        expect(built.payer, ClaimPayer.wallet);
+        expect(
+          SignedTx.fromBytes(built.transaction)
+              .compiledMessage
+              .accountKeys
+              .first
+              .toBase58(),
+          heir.address,
+        );
+        expect(sponsorNode.calls, isEmpty);
+      },
+    );
+
+    test('SOL: a payout too small to open the account is explained before '
+        'signing', () async {
+      addPayoutPlan(6, rule(to: heir.address), lamports: 1000000);
+      final q = await quote(6);
+      expect(q.net, 490000);
+      expect(q.problem, contains('too small to open your account'));
+      await expectLater(
+        claim(6),
+        throwsA(
+          isA<DeadmanException>()
+              .having((e) => e.name, 'name', 'PayoutBelowRent')
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(contains('0.002 SOL'), contains('Add 0.00151 SOL')),
+              ),
+        ),
+      );
+      expect(sponsorNode.calls, isEmpty);
+
+      // An account that already exists can take any payout.
+      rpc.accounts[heir.address] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      expect((await quote(6)).problem, isNull);
+      expect((await claim(6)).payer, ClaimPayer.sponsor);
+    });
+
+    test('SOL: the protocol fee stays with the heir when the treasury '
+        'cannot hold it', () async {
+      addPayoutPlan(6, rule(to: heir.address), lamports: 1000000);
+      expect((await quote(6)).net, 490000);
+      rpc.accounts.remove(treasury);
+      expect((await quote(6)).net, 500000);
+      expect((await quote(3)).net, solNet, reason: 'a fee above rent fits');
+    });
+
+    test('USDC: the paymaster pays fee and both ATAs, the fee comes last '
+        'from the payout, even with SOL fees selected', () async {
+      expect(c.feeToken, isNull);
+      final built = await claim(4);
+      expect(built.payer, ClaimPayer.payout);
+      final msg = SignedTx.fromBytes(built.transaction).compiledMessage;
+      expect(msg.requiredSignatureCount, 2);
+      expect(msg.accountKeys[0].toBase58(), payNode.signer);
+      expect(msg.accountKeys[1].toBase58(), heir.address);
+      expect(msg.recentBlockhash, payNode.blockhash);
+
+      final ixs = instructions(built.transaction);
+      expect(ixs, hasLength(4));
+      expect(addrs(ixs[0]).take(3), [
+        payNode.signer,
+        ataAddress(treasury, usdc),
+        treasury,
+      ]);
+      expect(addrs(ixs[1]).take(3), [
+        payNode.signer,
+        ataAddress(heir.address, usdc),
+        heir.address,
+      ]);
+      expect(ixs[2].data.toList(), [...Disc.executeTokenRule, 0]);
+      expect(addrs(ixs[2]).first, heir.address);
+      final pay = ixs[3];
+      expect(pay.programId.toBase58(), tokenProgramId);
+      expect(addrs(pay), [
+        ataAddress(heir.address, usdc),
+        usdc,
+        ataAddress(payNode.signer, usdc),
+        heir.address,
+      ]);
+      expect(pay.data.toList(), [12, ...le(8, 20000), 6]);
+
+      final est = payNode.paramsOf('estimateTransactionFee').single;
+      expect(est['fee_token'], usdc);
+      expect(
+        Message.decompile(
+          SignedTx.decode(est['transaction'] as String).compiledMessage,
+        ).instructions,
+        hasLength(3),
+        reason: 'estimated without the payment',
+      );
+
+      final signed = await partiallySign(built.transaction, heir);
+      expect((await c.sendSigned([signed])).single, startsWith('kora'));
+      expect(
+        payNode.paramsOf('signAndSendTransaction').single['signer_key'],
+        payNode.signer,
+      );
+      expect(sponsorNode.calls, isEmpty);
+    });
+
+    test('USDC: an existing heir ATA is not recreated on Kora', () async {
+      addTokens(heir.address, usdc, 0);
+      final ixs = instructions((await claim(4)).transaction);
+      expect(ixs, hasLength(3));
+      expect(addrs(ixs[0])[2], treasury);
+    });
+
+    test('USDC: refuses a prize smaller than the claim fee', () async {
+      payNode.feeInToken = usdcNet + 1;
+      await expectLater(
+        claim(4),
+        throwsA(
+          isA<DeadmanException>()
+              .having((e) => e.name, 'name', 'PrizeBelowFee')
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(
+                  contains('smaller than the claim fee'),
+                  contains('pays 0.49 '),
+                  contains('costs 0.490001 '),
+                  contains('Add about'),
+                ),
+              ),
+        ),
+      );
+      expect((await quote(4)).problem, contains('smaller than the claim fee'));
+      expect(payNode.paramsOf('signAndSendTransaction'), isEmpty);
+
+      // USDC the heir already holds makes up the difference.
+      addTokens(heir.address, usdc, 1);
+      expect((await claim(4)).payer, ClaimPayer.payout);
+    });
+
+    test(
+      'USDC: a prize below the claim fee is paid by a wallet with SOL',
+      () async {
+        payNode.feeInToken = usdcNet + 1;
+        rpc.accounts[heir.address] = FakeAccount(
+          systemProgramId,
+          const [],
+          lamports: 100000000,
+        );
+        final built = await claim(4);
+        expect(built.payer, ClaimPayer.wallet);
+        expect(built.note, contains('smaller than the free-claim fee'));
+        expect(
+          SignedTx.fromBytes(built.transaction)
+              .compiledMessage
+              .accountKeys
+              .first
+              .toBase58(),
+          heir.address,
+        );
+        expect((await quote(4)).payer, ClaimPayer.wallet);
+        expect(payNode.paramsOf('signAndSendTransaction'), isEmpty);
+      },
+    );
+
+    test(
+      'quotes: free SOL, USDC fee from the prize, a keeper pays its own',
+      () async {
+        final sol = await quote(3);
+        expect(sol.free, isTrue);
+        expect(sol.payer, ClaimPayer.sponsor);
+        expect(sol.mint, isNull);
+        expect(sol.net, solNet);
+        expect(sol.feeAmount, 0);
+        expect(sol.problem, isNull);
+
+        final token = await quote(4);
+        expect(token.free, isFalse);
+        expect(token.payer, ClaimPayer.payout);
+        expect(token.mint, usdc);
+        expect(token.feeToken, usdc);
+        expect(token.feeAmount, 20000);
+        expect(token.net, usdcNet);
+        expect(token.problem, isNull);
+
+        final keeper = await quote(3, by: executor);
+        expect(keeper.payer, ClaimPayer.wallet);
+        expect(payNode.paramsOf('estimateTransactionFee'), hasLength(1));
+      },
+    );
+
+    test('a keeper claiming for the heir pays its own fee, no Kora', () async {
+      for (final planId in [3, 4]) {
+        final built = await claim(planId, by: executor);
+        expect(built.payer, ClaimPayer.wallet);
+        final msg = SignedTx.fromBytes(built.transaction).compiledMessage;
+        expect(msg.requiredSignatureCount, 1);
+        expect(msg.accountKeys.first.toBase58(), executor);
+      }
+      expect(sponsorNode.calls, isEmpty);
+      expect(payNode.calls, isEmpty);
+    });
+
+    test('without a paymaster a USDC claim is wallet-paid as before', () async {
+      final d = DeadmanClient.withKora(
+        client: rpc.client(),
+        sponsor: sponsorNode.client(),
+        paymasterToken: usdc,
+        clock: () => now,
+      );
+      final built = await d.buildClaim(
+        claimer: heir.address,
+        vaultOwner: owner,
+        planId: 4,
+        index: 0,
+      );
+      expect(built.payer, ClaimPayer.wallet);
+      final ixs = instructions(built.transaction);
+      expect(addrs(ixs[0]).first, heir.address, reason: 'the heir pays rent');
+      expect(sponsorNode.calls, isEmpty);
+    });
+
+    test('another token than the paymaster takes is wallet-paid', () async {
+      final bonk = key(9);
+      rpc.accounts[bonk] = FakeAccount(tokenProgramId, mintBytes(5));
+      addPayoutPlan(7, rule(to: heir.address, mint: bonk));
+      addTokens(vaultPda(owner, 7).address, bonk, 1000);
+      expect((await quote(7)).payer, ClaimPayer.wallet);
+      expect((await claim(7)).payer, ClaimPayer.wallet);
+      expect(payNode.calls, isEmpty);
+    });
+  });
+
+  group('account subscription', () {
+    const price = 5000000;
+    const lastPulse = 1790000000;
+    final subAddr = subPda(owner).address;
+
+    Matcher throwsSub(String name, Pattern words, {int? code}) => throwsA(
+      isA<DeadmanException>()
+          .having((e) => e.name, 'name', name)
+          .having((e) => e.code, 'code', code ?? anything)
+          .having((e) => e.message, 'message', contains(words)),
+    );
+
+    void subscribed(String of, int paidUntil) =>
+        rpc.accounts[subPda(of).address] = FakeAccount(
+          AppConfig.programId,
+          subscriptionBytes(owner: of, paidUntil: paidUntil),
+        );
+
+    void terms({bool enabled = true}) =>
+        rpc.accounts[subConfigPda().address] = FakeAccount(
+          AppConfig.programId,
+          subConfigBytes(mint: usdc, pricePerPeriod: price, enabled: enabled),
+        );
+
+    Future<Uint8List> subscribe(int periods, {DeadmanClient? via}) =>
+        (via ?? client).buildSubscribe(owner: owner, periods: periods);
+
+    setUp(() {
+      terms();
+      addTokens(treasury, usdc, 0);
+      addTokens(owner, usdc, 200 * 1000000);
+    });
+
+    test('fetchSubscriptionTerms: the config, or null when absent or '
+        'disabled', () async {
+      final t = await client.fetchSubscriptionTerms();
+      expect(t!.pricePerPeriod, price);
+      expect(t.periodSecs, 30 * 86400);
+      expect(t.mint, usdc);
+      expect(t.minPeriods, 12);
+      terms(enabled: false);
+      expect(await client.fetchSubscriptionTerms(), isNull);
+      rpc.accounts.remove(subConfigPda().address);
+      expect(await client.fetchSubscriptionTerms(), isNull);
+      rpc.accounts[subConfigPda().address] = FakeAccount(
+        systemProgramId,
+        subConfigBytes(mint: usdc),
+      );
+      expect(
+        await client.fetchSubscriptionTerms(),
+        isNull,
+        reason: 'not owned by the program',
+      );
+    });
+
+    test('fetchSubscription reads the owner PDA; null when never created or '
+        'not a Subscription of that owner', () async {
+      expect(await client.fetchSubscription(owner), isNull);
+      subscribed(owner, now + 5);
+      final s = await client.fetchSubscription(owner);
+      expect(s!.owner, owner);
+      expect(s.paidUntil, now + 5);
+      expect(s.active(now), isTrue);
+      // SOL sent to the address does not create the account.
+      rpc.accounts[subAddr] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: 1000000,
+      );
+      expect(await client.fetchSubscription(owner), isNull);
+      rpc.accounts[subAddr] = FakeAccount(
+        AppConfig.programId,
+        subscriptionBytes(owner: alice, paidUntil: now + 5),
+      );
+      expect(await client.fetchSubscription(owner), isNull);
+    });
+
+    test('fetchSubscriptions batches many owners', () async {
+      subscribed(owner, now + 5);
+      subscribed(alice, now - 5);
+      final owners = [
+        owner,
+        alice,
+        guard,
+        owner,
+        for (var i = 0; i < 110; i++) key(200 + i),
+      ];
+      rpc.calls.clear();
+      final subs = await client.fetchSubscriptions(owners);
+      expect(subs, hasLength(owners.toSet().length));
+      expect(owners.toSet().length, greaterThan(100));
+      expect(rpc.calls, ['getMultipleAccounts', 'getMultipleAccounts']);
+      expect(subs[owner]!.paidUntil, now + 5);
+      expect(subs[alice]!.paidUntil, now - 5);
+      expect(subs[guard], isNull);
+      expect(subs.containsKey(guard), isTrue);
+    });
+
+    test('a new subscription buys 12 months at once; the owner pays the '
+        'account rent and needs no plan', () async {
+      await expectLater(
+        subscribe(11),
+        throwsSub(
+          'InvalidSubscription',
+          'A new monthly plan needs at least 12 months',
+          code: 6030,
+        ),
+      );
+      final tx = await subscribe(12);
+      final msg = SignedTx.fromBytes(tx).compiledMessage;
+      expect(msg.requiredSignatureCount, 1);
+      expect(msg.accountKeys.first.toBase58(), owner);
+      final ix = instructions(tx).single;
+      expect(ix.programId.toBase58(), AppConfig.programId);
+      expect(ix.data.toList(), [...Disc.subscribe, 12, 0]);
+      expect(addrs(ix), [
+        owner,
+        owner,
+        subAddr,
+        configPda().address,
+        subConfigPda().address,
+        usdc,
+        ataAddress(owner, usdc),
+        ataAddress(treasury, usdc),
+        tokenProgramId,
+        systemProgramId,
+      ]);
+    });
+
+    test('an active subscription extends by any number; a lapsed one '
+        'restarts at 12', () async {
+      subscribed(owner, now);
+      expect(await subscribe(1), isNotEmpty);
+      await expectLater(
+        subscribe(37),
+        throwsSub('InvalidSubscription', 'Extend by 1 to 36 months'),
+      );
+      await expectLater(
+        subscribe(0),
+        throwsSub('InvalidSubscription', 'Extend by 1 to 36 months'),
+      );
+      subscribed(owner, now - 1);
+      await expectLater(
+        subscribe(1),
+        throwsSub(
+          'InvalidSubscription',
+          'A lapsed monthly plan needs at least 12 months',
+        ),
+      );
+      expect(await subscribe(36), isNotEmpty);
+    });
+
+    test('refuses before signing: disabled, unfunded, no treasury '
+        'account', () async {
+      addTokens(owner, usdc, 12 * price - 1);
+      await expectLater(
+        subscribe(12),
+        throwsSub('NoSubscriptionFunds', '12 months cost 60 token'),
+      );
+      addTokens(owner, usdc, 12 * price);
+      rpc.accounts.remove(ataAddress(treasury, usdc));
+      await expectLater(
+        subscribe(12),
+        throwsSub('SubscriptionDisabled', 'not set up', code: 6029),
+      );
+      terms(enabled: false);
+      await expectLater(
+        subscribe(12),
+        throwsSub('SubscriptionDisabled', 'not available', code: 6029),
+      );
+      expect(rpc.sent, isEmpty);
+    });
+
+    test('USDC network fees: Kora funds a new subscription account only, '
+        'the subscription counts against the fee', () async {
+      final node = FakeKora(signer: key(70), paymentAddress: key(70));
+      final c = DeadmanClient.withKora(
+        client: rpc.client(),
+        paymaster: node.client(),
+        paymasterSigner: key(70),
+        clock: () => now,
+      )..feeToken = usdc;
+      final fee = node.feeInToken!;
+      addTokens(owner, usdc, 12 * price + fee - 1);
+      await expectLater(subscribe(12, via: c), throwsNamed('NoFeeToken'));
+      addTokens(owner, usdc, 12 * price + fee);
+      final tx = await subscribe(12, via: c);
+      final msg = SignedTx.fromBytes(tx).compiledMessage;
+      expect(msg.requiredSignatureCount, 2);
+      expect(msg.accountKeys[0].toBase58(), node.signer);
+      expect(msg.accountKeys[1].toBase58(), owner);
+      final ixs = instructions(tx);
+      expect(ixs, hasLength(2));
+      expect(ixs[0].data.toList().sublist(0, 8), Disc.subscribe);
+      expect(
+        [
+          for (final (i, a) in addrs(ixs[0]).indexed)
+            if (a == node.signer) i,
+        ],
+        [1],
+        reason: 'Kora is only the payer',
+      );
+      expect(addrs(ixs[1]), [
+        ataAddress(owner, usdc),
+        usdc,
+        ataAddress(node.paymentAddress, usdc),
+        owner,
+      ]);
+
+      // Once the account exists there is no rent: the owner is the payer.
+      subscribed(owner, now + 86400);
+      final ext = instructions(await subscribe(1, via: c));
+      expect(addrs(ext[0]).sublist(0, 2), [owner, owner]);
+      expect(addrs(ext[0]), isNot(contains(node.signer)));
+    });
+
+    test("payouts name the owner's subscription PDA", () async {
+      rpc.accounts[treasury] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      rpc.accounts[vaultPda(owner, 6).address] = FakeAccount(
+        AppConfig.programId,
+        vaultBytes(
+          owner: owner,
+          planId: 6,
+          guard: guard,
+          lastPulse: lastPulse,
+          rules: [rule(to: alice, afterSecs: 90000)],
+        ),
+        lamports: rpc.rentExempt + 2000000000,
+      );
+      final ix = instructions(
+        await client.buildExecuteRule(
+          executor: alice,
+          vaultOwner: owner,
+          planId: 6,
+          index: 0,
+        ),
+      ).single;
+      expect(addrs(ix).last, subAddr);
+      expect(ix.accounts.last.isWriteable, isFalse);
+      expect(ix.accounts.last.isSigner, isFalse);
+    });
+
+    test('one subscription makes every plan of the owner, also a later '
+        'one, quote fee-free', () async {
+      rpc.accounts[treasury] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      rpc.accounts[alice] = FakeAccount(
+        systemProgramId,
+        const [],
+        lamports: rpc.rentExempt,
+      );
+      void plan(String of, int planId) =>
+          rpc.accounts[vaultPda(of, planId).address] = FakeAccount(
+            AppConfig.programId,
+            vaultBytes(
+              owner: of,
+              planId: planId,
+              guard: guard,
+              lastPulse: lastPulse,
+              rules: [rule(to: alice, afterSecs: 90000)],
+            ),
+            lamports: rpc.rentExempt + 2000000000,
+          );
+      Future<int> net(String of, int planId) async => (await client.quoteClaim(
+        claimer: alice,
+        vaultOwner: of,
+        planId: planId,
+        index: 0,
+      )).net;
+      plan(owner, 6);
+      expect(await net(owner, 6), 980000000, reason: 'no subscription');
+      for (final (paid, expected) in [
+        (lastPulse, 1000000000),
+        (lastPulse - 1, 980000000),
+      ]) {
+        subscribed(owner, paid);
+        plan(owner, 6);
+        plan(owner, 7);
+        expect(await net(owner, 6), expected, reason: 'paid until $paid');
+        expect(await net(owner, 7), expected, reason: 'paid until $paid');
+      }
+      subscribed(owner, now + 86400);
+      plan(guard, 6);
+      expect(
+        await net(guard, 6),
+        980000000,
+        reason: "another owner's plan is not covered",
+      );
     });
   });
 }

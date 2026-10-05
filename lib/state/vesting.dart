@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:solana/solana.dart';
 
@@ -34,6 +35,130 @@ List<(int, String)> durationChoices({required bool demo}) => [
   (24 * monthSecs, '24 months'),
   (48 * monthSecs, '48 months'),
 ];
+
+/// Shortest installment interval the program accepts
+/// (`MIN_VEST_PERIOD_SECS`).
+const minVestPeriodSecs = 60;
+
+const weekSecs = 7 * 86400;
+const quarterSecs = 3 * monthSecs;
+
+/// "Release every" choices of a vesting plan: (seconds, label). 0 releases
+/// continuously (every second); demo timings add a one-minute interval.
+List<(int, String)> periodChoices({required bool demo}) => [
+  if (demo) (60, 'Minute'),
+  (monthSecs, 'Month'),
+  (weekSecs, 'Week'),
+  (quarterSecs, 'Quarter'),
+  (86400, 'Day'),
+  (0, 'Continuously'),
+];
+
+int defaultPeriodSecs({required bool demo}) => demo ? 60 : monthSecs;
+
+/// "month", "week", "quarter", "day", "minute", or "30 days".
+String vestPeriodWord(int secs) {
+  String n(int count, String unit) => count == 1 ? unit : '$count ${unit}s';
+  return switch (secs) {
+    monthSecs => 'month',
+    quarterSecs => 'quarter',
+    weekSecs => 'week',
+    _ when secs >= 86400 && secs % 86400 == 0 => n(secs ~/ 86400, 'day'),
+    _ when secs >= 3600 && secs % 3600 == 0 => n(secs ~/ 3600, 'hour'),
+    _ when secs >= 60 && secs % 60 == 0 => n(secs ~/ 60, 'minute'),
+    _ => n(secs, 'second'),
+  };
+}
+
+/// Mirrors the program's `vested` for one schedule [elapsed] seconds into
+/// it (already stopped at revocation): nothing before the cliff, all of
+/// [total] from [durationSecs], else what whole periods of [periodSecs]
+/// unlocked (0 = continuously).
+int vestedAfter({
+  required int total,
+  required int cliffSecs,
+  required int durationSecs,
+  required int periodSecs,
+  required int elapsed,
+}) {
+  if (elapsed < cliffSecs || elapsed <= 0) return 0;
+  if (elapsed >= durationSecs) return total;
+  final unlocked = periodSecs <= 0
+      ? elapsed
+      : elapsed ~/ periodSecs * periodSecs;
+  return (BigInt.from(total) *
+          BigInt.from(unlocked) ~/
+          BigInt.from(durationSecs))
+      .toInt();
+}
+
+/// How a schedule pays out in installments.
+class Installments {
+  const Installments({
+    required this.periodSecs,
+    required this.count,
+    required this.amount,
+    required this.firstAt,
+    required this.firstCount,
+    required this.firstAmount,
+    required this.lastSmaller,
+  });
+
+  final int periodSecs;
+  final int count;
+
+  /// One installment: floor(total × period / duration).
+  final int amount;
+
+  /// When the first installment unlocks (unix seconds): the first period
+  /// boundary at or past the cliff.
+  final int firstAt;
+
+  /// Installments that unlock together at [firstAt] (more than one after a
+  /// cliff).
+  final int firstCount;
+  final int firstAmount;
+
+  /// The duration is not a whole number of periods: the last one is a
+  /// partial installment.
+  final bool lastSmaller;
+}
+
+/// The installments of a schedule starting at [startAt]; null when it
+/// vests continuously ([periodSecs] 0) or the period does not fit.
+Installments? installmentsOf({
+  required int total,
+  required int cliffSecs,
+  required int durationSecs,
+  required int periodSecs,
+  required int startAt,
+}) {
+  if (periodSecs <= 0 || durationSecs <= 0 || periodSecs > durationSecs) {
+    return null;
+  }
+  final count = (durationSecs + periodSecs - 1) ~/ periodSecs;
+  final k = math.max(1, (cliffSecs + periodSecs - 1) ~/ periodSecs);
+  final firstOffset = math.min(k * periodSecs, durationSecs);
+  return Installments(
+    periodSecs: periodSecs,
+    count: count,
+    amount:
+        (BigInt.from(total) *
+                BigInt.from(periodSecs) ~/
+                BigInt.from(durationSecs))
+            .toInt(),
+    firstAt: startAt + firstOffset,
+    firstCount: math.min(k, count),
+    firstAmount: vestedAfter(
+      total: total,
+      cliffSecs: cliffSecs,
+      durationSecs: durationSecs,
+      periodSecs: periodSecs,
+      elapsed: firstOffset,
+    ),
+    lastSmaller: durationSecs % periodSecs != 0,
+  );
+}
 
 bool isAddress(String s) {
   try {
@@ -147,6 +272,11 @@ class ScheduleProgress {
     required this.cliffAt,
     required this.endAt,
     required this.revokedAt,
+    this.periodSecs = 0,
+    this.installmentCount,
+    this.installmentsUnlocked,
+    this.nextInstallmentAt,
+    this.nextInstallmentAmount = 0,
   });
 
   final int total;
@@ -164,6 +294,20 @@ class ScheduleProgress {
   final int endAt;
   final int revokedAt;
 
+  /// Installment interval; 0 = vests continuously.
+  final int periodSecs;
+
+  /// Installments in all and unlocked so far; null when continuous.
+  final int? installmentCount;
+  final int? installmentsUnlocked;
+
+  /// When the next installment unlocks and what it adds; null when
+  /// continuous, fully vested or revoked.
+  final int? nextInstallmentAt;
+  final int nextInstallmentAmount;
+
+  bool get installments => periodSecs > 0;
+
   bool get revoked => revokedAt != 0;
   bool get fullyVested => vested >= cap;
   bool get settled => released >= cap;
@@ -177,6 +321,7 @@ class ScheduleProgress {
 
 ScheduleProgress scheduleProgress(VaultState v, int index, int now) {
   final r = v.rules[index];
+  final next = v.nextInstallmentAt(index, now);
   return ScheduleProgress(
     total: r.amount,
     cap: v.vestingCap(index),
@@ -187,6 +332,13 @@ ScheduleProgress scheduleProgress(VaultState v, int index, int now) {
     cliffAt: v.startAt + r.afterSecs,
     endAt: v.startAt + r.durationSecs,
     revokedAt: v.revokedAt,
+    periodSecs: v.vestPeriodSecs,
+    installmentCount: v.installmentCount(index),
+    installmentsUnlocked: v.installmentsUnlocked(index, now),
+    nextInstallmentAt: next,
+    nextInstallmentAmount: next == null
+        ? 0
+        : v.vested(index, next) - v.vested(index, now),
   );
 }
 

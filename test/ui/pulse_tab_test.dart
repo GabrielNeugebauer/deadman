@@ -14,6 +14,8 @@ Future<void> _pump(
   WidgetTester tester,
   List<VaultState> plans, {
   Map<String, Map<String, int>> planTokens = const {},
+  SubscriptionTerms? terms,
+  AccountSubscription? sub,
 }) async {
   tester.view.physicalSize = const Size(1200, 6000);
   tester.view.devicePixelRatio = 1;
@@ -28,6 +30,8 @@ Future<void> _pump(
         guardAddressProvider.overrideWith((ref) async => addr(2)),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
         planTokenBalancesProvider.overrideWith((ref) async => planTokens),
+        subscriptionTermsProvider.overrideWith((ref) async => terms),
+        accountSubscriptionProvider.overrideWith((ref) async => sub),
         walletTokenProvider.overrideWith((ref, mint) async => 7000000),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
@@ -116,7 +120,10 @@ void main() {
       lastPulse: now,
       ownerLastSeen: now,
       withdrawableLamports: 1000000000,
-      rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+      rules: [
+        rule(seed: 11),
+        rule(seed: 12, mint: usdc),
+      ],
     );
     await _pump(
       tester,
@@ -147,7 +154,10 @@ void main() {
       lastPulse: now,
       ownerLastSeen: now,
       withdrawableLamports: 1000000000,
-      rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+      rules: [
+        rule(seed: 11),
+        rule(seed: 12, mint: usdc),
+      ],
     );
     await _pump(
       tester,
@@ -158,5 +168,70 @@ void main() {
     );
     expect(find.textContaining('in this plan'), findsNothing);
     await _unmount(tester);
+  });
+
+  group('monthly plan', () {
+    const terms = SubscriptionTerms(
+      pricePerPeriod: 10000000,
+      periodSecs: 30 * 86400,
+      mint: AppConfig.usdcMint,
+      minPeriods: 12,
+    );
+
+    testWidgets('each plan card shows the release fee; one account card '
+        'offers the subscription', (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final kids = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
+      await _pump(tester, [kids, vesting], terms: terms);
+      await tester.pump();
+      expect(find.text('Release fee: 2% (5% private rails)'), findsNWidgets(2));
+      expect(find.text('Switch to monthly'), findsNothing);
+      expect(find.text('Not subscribed'), findsOneWidget);
+      expect(find.text('Subscribe'), findsOneWidget);
+      expect(find.text('Extend'), findsNothing);
+      await _unmount(tester);
+    });
+
+    testWidgets('the account subscription covers every plan', (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final kids = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
+      final until = now + 86400 * 400;
+      await _pump(
+        tester,
+        [kids, vesting],
+        terms: terms,
+        sub: AccountSubscription(owner: addr(1), paidUntil: until),
+      );
+      await tester.pump();
+      expect(find.text('0% release fee · monthly plan'), findsNWidgets(2));
+      expect(
+        find.textContaining('Monthly plan · covers all your plans'),
+        findsOneWidget,
+      );
+      expect(find.text('Extend'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('not offered: no fee row on the cards', (tester) async {
+      await _pump(tester, [vesting]);
+      expect(find.textContaining('Release fee'), findsNothing);
+      expect(find.text('Subscribe'), findsNothing);
+      expect(find.textContaining('Monthly plan'), findsNothing);
+      await _unmount(tester);
+    });
+
+    testWidgets('the intro mentions the monthly plan when offered', (
+      tester,
+    ) async {
+      await _pump(tester, const [], terms: terms);
+      expect(
+        find.textContaining(
+          'Or pay a flat 10 USDC a month for all your plans instead (12 months '
+          'minimum).',
+        ),
+        findsOneWidget,
+      );
+      await _unmount(tester);
+    });
   });
 }
