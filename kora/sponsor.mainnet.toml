@@ -53,7 +53,7 @@ allow_durable_transactions = false
 
 # Checked against every instruction, including CPIs found by simulation.
 # Kora cannot filter by instruction discriminator; the gateway does (pulse,
-# lockdown, SOL claims). This list is the second line: create_vault and token
+# lockdown, SOL claims). This list is the second line: create_plan and token
 # claims fail here (System / Token CPI).
 allowed_programs = [
     "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman

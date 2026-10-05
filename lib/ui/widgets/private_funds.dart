@@ -15,9 +15,45 @@ import '../screens/shielded_inbox_screen.dart';
 import '../web/web_ui.dart';
 import 'brand/brand.dart';
 import 'feedback.dart';
+import 'pack_icons.dart';
 
-TextStyle _small({Color color = DM.sub}) =>
-    DMType.outfit(size: 13, color: color, height: 1.4);
+/// Fine print under a button, a tier or a card: ash. A [problem] (why
+/// an action cannot go through, or what to do first) reads in bone with an
+/// info mark, never in a status color: amber and red mean plan states.
+class FinePrint extends StatelessWidget {
+  const FinePrint(this.text, {super.key, this.problem = false});
+
+  final String text;
+  final bool problem;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = Text(
+      text,
+      style: DMType.outfit(
+        size: 13,
+        color: problem ? DM.bone : DM.ash,
+        height: 1.4,
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: DMSpace.sm),
+      child: problem
+          ? Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 1),
+                  child: Icon(Icons.info_outline, size: 16, color: DM.bone),
+                ),
+                const SizedBox(width: DMSpace.sm),
+                Expanded(child: body),
+              ],
+            )
+          : body,
+    );
+  }
+}
 
 /// Outlined rail tag: "Solana", "Cloak", "Zcash" with the rail's icon.
 class RailTag extends StatelessWidget {
@@ -94,7 +130,8 @@ class RoutePreviewDialog extends StatelessWidget {
                   ? 'Quote valid for ${span(left)}'
                   : 'Quote expired; route again',
               style: DMType.data(
-                color: left > 60 ? DM.sub : DM.attention,
+                // The clock running out is the one status here.
+                color: left > 60 ? DM.dust : DM.missed,
                 size: 12.5,
               ),
             ),
@@ -185,7 +222,7 @@ class _PrivateFundsSectionState extends ConsumerState<PrivateFundsSection> {
                             dimension: 16,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Icon(p.rail.icon, size: 18),
+                        : RailIcon(p.rail),
                     label: Text(
                       live
                           ? 'Route privately via ${p.rail.label}'
@@ -194,24 +231,17 @@ class _PrivateFundsSectionState extends ConsumerState<PrivateFundsSection> {
                   ),
                 ],
                 if (!live)
-                  Padding(
-                    padding: const EdgeInsets.only(top: DMSpace.sm),
-                    child: Text(
-                      web
-                          ? 'Private routing runs in the Deadman Android app. '
-                                'Your claim keys move there with your recovery phrase.'
-                          : 'Cloak and NEAR Intents run on Solana mainnet only. '
-                                'This build is on ${AppConfig.cluster}.',
-                      style: _small(),
-                    ),
+                  FinePrint(
+                    web
+                        ? 'Private routing runs in the Deadman Android app. '
+                              'Your claim keys move there with your recovery phrase.'
+                        : 'Cloak and NEAR Intents run on Solana mainnet only. '
+                              'This build is on ${AppConfig.cluster}.',
                   ),
                 if (live && p.destination.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: DMSpace.sm),
-                    child: Text(
-                      'Set a destination first: Security → Receive privately.',
-                      style: _small(color: DM.attention),
-                    ),
+                  const FinePrint(
+                    'Set a destination first: Security → Receive privately.',
+                    problem: true,
                   ),
               ],
             ),
@@ -249,16 +279,17 @@ class PrivateTransfersCard extends ConsumerWidget {
   }
 }
 
-/// Chip for a transfer's phase; an interrupted Cloak route can resume, so
-/// it reads as attention rather than failure.
-(DMStatus, String) _phaseChip(PrivateTransfer t) {
+/// Sticker for a transfer's phase. Outcomes, not plan states, so the
+/// stickers carry no figure. An interrupted Cloak route can resume, so it
+/// reads amber rather than failed.
+(DMStatus, String) _phaseSticker(PrivateTransfer t) {
   if (t.status == interruptedStatus) {
-    return (DMStatus.attention, 'Interrupted');
+    return (DMStatus.missed, 'Interrupted');
   }
   return switch (t.phase) {
-    TransferPhase.done => (DMStatus.onTrack, 'Done'),
+    TransferPhase.done => (DMStatus.alive, 'Done'),
     TransferPhase.pending => (DMStatus.released, 'Pending'),
-    TransferPhase.refunded => (DMStatus.attention, 'Refunded'),
+    TransferPhase.refunded => (DMStatus.missed, 'Refunded'),
     TransferPhase.failed => (DMStatus.due, 'Failed'),
   };
 }
@@ -287,7 +318,7 @@ class _TransferTileState extends ConsumerState<_TransferTile> {
     final pending = t.phase == TransferPhase.pending;
     final live = pending ? ref.watch(transferStatusProvider(t.id)) : null;
     final shown = t.withStatus(live?.value ?? t.status);
-    final (status, chip) = _phaseChip(shown);
+    final (status, word) = _phaseSticker(shown);
     final amount = amountText(t.amount, t.mint);
     final Widget? trailing = resumableCloak(t)
         ? TextButton(
@@ -318,7 +349,7 @@ class _TransferTileState extends ConsumerState<_TransferTile> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          IconTile(icon: t.rail.icon),
+          RailTile(t.rail),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
@@ -338,10 +369,15 @@ class _TransferTileState extends ConsumerState<_TransferTile> {
                   runSpacing: DMSpace.xxs,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    StatusChip(status, label: chip, dense: true),
+                    StatusSticker(
+                      status,
+                      label: word,
+                      dense: true,
+                      showSprite: false,
+                    ),
                     Text(
                       ago(t.createdAt, nowSecs()),
-                      style: DMType.data(color: DM.mist, size: 12),
+                      style: DMType.data(color: DM.ash, size: 12),
                     ),
                   ],
                 ),
@@ -349,7 +385,7 @@ class _TransferTileState extends ConsumerState<_TransferTile> {
                 Text(
                   '${transferStatusText(shown)}'
                   '${live?.hasError == true ? ' (status check failed; pull to refresh)' : ''}',
-                  style: _small(),
+                  style: DMType.outfit(size: 13, color: DM.ash, height: 1.4),
                 ),
               ],
             ),
@@ -381,11 +417,11 @@ class ShieldedInboxTile extends ConsumerWidget {
       child: DMCard(
         padding: EdgeInsets.zero,
         child: DMListRow(
-          leading: IconTile(icon: Rail.cloak.icon),
+          leading: const RailTile(Rail.cloak),
           title: 'Shielded inbox',
           subtitle: 'Payouts held privately at your Cloak address',
           monoSubtitle: false,
-          trailing: const Icon(Icons.chevron_right, color: DM.mist),
+          trailing: const DMIcon(DMIcons.chevronRight, color: DM.ash),
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => const ShieldedInboxScreen(),

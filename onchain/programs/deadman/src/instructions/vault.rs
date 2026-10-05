@@ -31,13 +31,11 @@ fn init_rent(vault: &Account<Vault>) -> Result<u64> {
     Ok(Rent::get()?.minimum_balance(vault.to_account_info().data_len()))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_create_vault(
+pub fn handle_create_plan(
     ctx: Context<CreateVault>,
     plan_id: u16,
     label: String,
     guard: Pubkey,
-    interval_secs: i64,
     lock_secs: i64,
     skip_grace_secs: i64,
     rules: Vec<RuleInput>,
@@ -58,14 +56,7 @@ pub fn handle_create_vault(
     vault.rent_paid = init_rent(vault)?;
     vault.set_label(label)?;
     let key = vault.key();
-    vault.apply_policy(
-        &key,
-        interval_secs,
-        lock_secs,
-        skip_grace_secs,
-        &rules,
-        None,
-    )?;
+    vault.apply_policy(&key, lock_secs, skip_grace_secs, &rules, None)?;
     vault.record_owner_pulse(now)?;
 
     emit!(VaultCreated {
@@ -92,11 +83,11 @@ pub struct OwnerAction<'info> {
 
 /// Installs new pending tiers; tiers that paid or were skipped stay as
 /// history so they can never pay twice. Blocked during lockdown so a
-/// coercer cannot redirect the payouts.
-pub fn handle_update_policy(
+/// coercer cannot redirect the payouts, and once every tier has released
+/// (`PlanCompleted`): a released plan is final.
+pub fn handle_update_plan(
     ctx: Context<OwnerAction>,
     label: String,
-    interval_secs: i64,
     lock_secs: i64,
     skip_grace_secs: i64,
     rules: Vec<RuleInput>,
@@ -106,16 +97,10 @@ pub fn handle_update_policy(
     let vault = &mut ctx.accounts.vault;
     vault.require_kind(PlanKind::Inheritance)?;
     vault.require_unlocked(now)?;
+    require!(!vault.is_completed(), DeadmanError::PlanCompleted);
     vault.set_label(label)?;
     let key = vault.key();
-    vault.apply_policy(
-        &key,
-        interval_secs,
-        lock_secs,
-        skip_grace_secs,
-        &rules,
-        guardian,
-    )?;
+    vault.apply_policy(&key, lock_secs, skip_grace_secs, &rules, guardian)?;
     vault.record_owner_pulse(now)?;
     emit!(PolicyUpdated {
         vault: vault.key(),
@@ -348,12 +333,14 @@ pub fn handle_create_vesting(
 
 /// Stops future vesting of a revocable plan. Already vested amounts stay
 /// claimable; the owner may then withdraw the rest. Blocked during
-/// lockdown so a coercer cannot force it.
+/// lockdown so a coercer cannot force it, and once every schedule has
+/// released in full (`PlanCompleted`).
 pub fn handle_revoke_vesting(ctx: Context<OwnerAction>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &mut ctx.accounts.vault;
     vault.require_kind(PlanKind::Vesting)?;
     vault.require_unlocked(now)?;
+    require!(!vault.is_completed(), DeadmanError::PlanCompleted);
     require!(vault.revocable, DeadmanError::NotRevocable);
     require!(vault.revoked_at == 0, DeadmanError::AlreadyRevoked);
     vault.revoked_at = now;

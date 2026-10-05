@@ -12,11 +12,9 @@ pub const MAX_FEE_BPS: u16 = 500;
 
 pub const SECS_PER_DAY: i64 = 86_400;
 
-/// One minute minimum so the switch can be demoed live.
-pub const MIN_INTERVAL_SECS: i64 = 60;
-pub const MAX_INTERVAL_SECS: i64 = 366 * SECS_PER_DAY;
-/// A rule may only fire at least this long after a missed check-in.
-pub const MIN_RULE_MARGIN_SECS: i64 = 60;
+/// Bounds on a tier's delay after the last check-in. One minute minimum so
+/// the switch can be demoed live.
+pub const MIN_RULE_DELAY_SECS: i64 = 60;
 pub const MAX_RULE_DELAY_SECS: i64 = 3 * 366 * SECS_PER_DAY;
 /// Bounds for the owner-chosen skip grace: a due tier that still cannot pay
 /// that long after it fell due may be skipped by anyone, so one broken

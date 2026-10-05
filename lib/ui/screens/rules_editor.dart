@@ -35,7 +35,8 @@ enum _Step {
 
 /// Creates the plan when [vault] is null. Otherwise edits it: payouts that
 /// already released are shown read-only and only the pending ones are
-/// sent; once every payout has released, saving starts a fresh set.
+/// sent. A fully released plan cannot be edited (the Plans screen offers
+/// no Edit for it).
 class RulesEditorPage extends ConsumerStatefulWidget {
   const RulesEditorPage({super.key, this.vault});
 
@@ -81,7 +82,6 @@ class _Model {
 class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   VaultState? get _vault => widget.vault;
   bool get _creating => _vault == null;
-  bool get _fresh => _vault?.completed ?? false;
   late final _split = _vault == null
       ? (history: const <RuleState>[], pending: const <RuleState>[])
       : splitRules(_vault!);
@@ -91,11 +91,10 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       : const [_Step.payouts, _Step.review];
 
   int _step = 0;
-  late int _interval = _vault?.intervalSecs ?? Cadence.week.interval;
-  bool get _demo => _interval == Cadence.demo.interval;
-  late int _lock = _vault?.lockSecs ?? Cadence.of(_interval).lock;
+  late bool _demo = _vault != null && _isDemo(_vault!);
+  late int _lock = _vault?.lockSecs ?? _defaultLock(demo: _demo);
   late bool _lockTouched =
-      _vault != null && _vault!.lockSecs != Cadence.of(_interval).lock;
+      _vault != null && _vault!.lockSecs != _defaultLock(demo: _demo);
   late int _grace = _vault?.skipGraceSecs ?? AppConfig.defaultSkipGraceSecs;
   late final _label = TextEditingController(text: _vault?.label ?? '');
   late final _guardian = TextEditingController(text: _vault?.guardian ?? '');
@@ -218,11 +217,12 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
         : null;
   }
 
+  /// A new payout's default wait: the next preset after the latest one.
   int _nextDelay() {
-    final chips = delayChoices(_interval);
-    if (_payouts.isEmpty) return chips.first;
+    if (_payouts.isEmpty) return defaultDelay(demo: _demo);
+    final chips = delayChoices(demo: _demo);
     final latest = _payouts.map((p) => p.afterSecs).reduce(math.max);
-    return chips.firstWhere((c) => c > latest, orElse: () => chips.last);
+    return chips.firstWhere((c) => c > latest, orElse: () => latest);
   }
 
   List<String?> _fundAssets(int stipend) =>
@@ -254,16 +254,15 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     _applyDefaults();
   });
 
-  void _setInterval(int secs) => setState(() {
-    final wasDemo = _demo;
-    _interval = secs;
-    if (_demo && _grace == AppConfig.defaultSkipGraceSecs) {
+  void _setDemo(bool on) => setState(() {
+    _demo = on;
+    if (on && _grace == AppConfig.defaultSkipGraceSecs) {
       _grace = 120;
-    } else if (wasDemo && !_demo && _grace < 86400) {
+    } else if (!on && _grace < 86400) {
       _grace = AppConfig.defaultSkipGraceSecs;
     }
-    if (!_lockTouched || (!_demo && _lock < 86400)) {
-      _lock = Cadence.of(secs).lock;
+    if (!_lockTouched || (!on && _lock < 86400)) {
+      _lock = _defaultLock(demo: on);
       _lockTouched = false;
     }
     _dirty = true;
@@ -306,11 +305,12 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
             for (final (j, p) in _payouts.indexed)
               if (j != index) (_number(j), p),
           ],
-          intervalSecs: _interval,
           demo: _demo,
           basis: _basisFor,
           defaultMint: _defaultMint(),
           defaultAfterSecs: _nextDelay(),
+          step: _step + 1,
+          steps: _steps.length,
         ),
       ),
     );
@@ -398,7 +398,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     final payoutIssues = [
       for (final (i, p) in _payouts.indexed)
         [
-          ?delayError(p.afterSecs, _interval),
+          ?delayError(p.afterSecs),
           ...payoutWarnings(
             payouts: _payouts,
             index: i,
@@ -511,7 +511,6 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           ? unguarded = await actions.createVault(
               label: label,
               rules: rules,
-              intervalSecs: _interval,
               lockSecs: _lock,
               skipGraceSecs: _grace,
               depositLamports: lamports,
@@ -520,7 +519,6 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           : await actions.updatePolicy(
               planId: _vault!.planId,
               label: label,
-              intervalSecs: _interval,
               lockSecs: _lock,
               skipGraceSecs: _grace,
               rules: rules,
@@ -562,11 +560,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     final m = _model();
     final step = _steps[_step];
     return StepScaffold(
-      title: _creating
-          ? 'New inheritance plan'
-          : _fresh
-          ? 'Start a new plan'
-          : 'Edit plan',
+      title: _creating ? 'New inheritance plan' : 'Edit plan',
       steps: [for (final s in _steps) s.label],
       step: _step,
       onStepTap: _goTo,
@@ -578,12 +572,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       primaryLabel: switch (step) {
         _Step.payouts => _creating ? 'Next: fund the plan' : 'Next: review',
         _Step.fund => 'Next: review',
-        _Step.review =>
-          _creating
-              ? 'Create plan'
-              : _fresh
-              ? 'Start new plan'
-              : 'Save changes',
+        _Step.review => _creating ? 'Create plan' : 'Save changes',
       },
       onPrimary: () => _next(m),
       children: switch (step) {
@@ -601,42 +590,35 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     final names = ref.read(contactNamesProvider);
     return [
       const StepLead('Who gets what if you stop checking in.'),
-      if (_fresh) ...[
-        const WarningTile(
-          severity: Severity.info,
-          body:
-              'Every payout of this plan has been sent. Saving starts a new '
-              'set of payouts on the same plan.',
-        ),
-        const SizedBox(height: DMSpace.lg),
-      ],
       SectionCard(
         title: 'Plan',
         children: [
-          TextField(
-            key: _labelKey,
-            controller: _label,
-            maxLength: Limits.maxLabelBytes,
-            onChanged: (_) => _changed(),
-            decoration: InputDecoration(
-              labelText: 'Plan name',
-              hintText: 'e.g. Family, Emergency fund',
-              errorText: _checkPayouts ? labelError(_label.text)?.body : null,
+          LabeledField(
+            label: 'Plan name',
+            child: TextField(
+              key: _labelKey,
+              controller: _label,
+              maxLength: Limits.maxLabelBytes,
+              onChanged: (_) => _changed(),
+              decoration: InputDecoration(
+                hintText: 'e.g. Family, Emergency fund',
+                counterStyle: DMType.mono(size: 12, color: DM.ash),
+                errorText: _checkPayouts ? labelError(_label.text)?.body : null,
+              ),
             ),
-          ),
-          _IntervalRow(
-            label: delayText(_interval),
-            onTap: _demo ? null : _pickInterval,
           ),
         ],
       ),
       const SizedBox(height: DMSpace.xxl),
       const SectionHeader(title: 'Payouts'),
       const SizedBox(height: DMSpace.sm),
-      const TimelineEntry(label: 'Last check-in', dot: DM.signal),
+      const TimelineEntry(
+        label: 'Last check-in',
+        marker: PixelArt(PixelSprites.heart, size: 11, color: DM.pulse),
+      ),
       for (final (i, r) in _history.indexed)
         TimelineEntry(
-          label: 'After ${delayText(r.afterSecs)} of silence',
+          label: payoutWhen(r.afterSecs),
           child: _HistoryPayoutCard(
             number: i + 1,
             rule: r,
@@ -645,8 +627,8 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
         ),
       for (final (i, p) in _payouts.indexed)
         TimelineEntry(
-          label: 'After ${delayText(p.afterSecs)} of silence',
-          dot: DM.tide,
+          label: payoutWhen(p.afterSecs),
+          dot: DM.pulse,
           child: _PayoutSummaryCard(
             number: _number(i),
             payout: p,
@@ -664,6 +646,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           children: [
             if (_payouts.isEmpty)
               EmptyStateCard(
+                icon: DMIcons.heartbeat,
                 title: 'Add your first payout',
                 body:
                     'Choose who receives money if you stop checking in, how '
@@ -715,62 +698,6 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     return '≈ ${moneyText(net, mint)}';
   }
 
-  Future<void> _pickInterval() async {
-    const options = [
-      (Cadence.week, 'Good if you use your phone daily.'),
-      (Cadence.month, 'A monthly check-in.'),
-      (Cadence.quarter, 'Least effort; payouts start later.'),
-    ];
-    final picked = await showModalBottomSheet<int>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            DMSpace.gutter,
-            0,
-            DMSpace.gutter,
-            DMSpace.xl,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'How often will you check in?',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 8),
-              RadioGroup<int>(
-                groupValue: _interval,
-                onChanged: (v) => Navigator.pop(context, v),
-                child: Column(
-                  children: [
-                    for (final (c, helper) in options)
-                      RadioListTile<int>(
-                        value: c.interval,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(c.label),
-                        subtitle: Text(helper),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                "A check-in is a fingerprint tap in Deadman. Missing one doesn't "
-                'send anything by itself: each payout waits for its own delay.',
-                style: _sub,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (picked != null && picked != _interval) _setInterval(picked);
-  }
-
   Widget _advancedCard() {
     List<Widget> chips(
       List<int> values,
@@ -785,7 +712,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           onSelected: (_) => onPick(s),
         ),
     ];
-    final helper = DMType.outfit(size: 13.5, color: DM.sub, height: 1.4);
+    final helper = DMType.outfit(size: 13.5, color: DM.dust, height: 1.4);
     final heading = DMType.outfit(size: 15, weight: FontWeight.w600);
     final graces = [for (final (s, _) in graceChoices(demo: _demo)) s];
     return DMCard(
@@ -868,30 +795,32 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             value: _demo,
-            onChanged: (on) => _setInterval(
-              on ? Cadence.demo.interval : Cadence.week.interval,
-            ),
+            onChanged: _setDemo,
             title: const Text('Demo timings'),
             subtitle: Text(
-              'Check-ins every 2 minutes and payouts within minutes, so you '
-              'can show it live.',
+              'Payouts within minutes of your last check-in, so you can show '
+              'it live.',
               style: helper,
             ),
           ),
           if (!_creating) ...[
             const SizedBox(height: DMSpace.md),
-            TextField(
-              key: _guardianKey,
-              controller: _guardian,
-              onChanged: (_) => _changed(),
-              style: DMType.mono(size: 14),
-              decoration: InputDecoration(
-                labelText: 'Guardian wallet (optional)',
-                helperText:
-                    'A person you trust who can freeze this plan and co-sign an '
-                    'early unlock. They can never move funds.',
-                helperMaxLines: 3,
-                errorText: _checkPayouts ? _guardianError() : null,
+            LabeledField(
+              label: 'Guardian wallet (optional)',
+              child: TextField(
+                key: _guardianKey,
+                controller: _guardian,
+                onChanged: (_) => _changed(),
+                style: DMType.mono(size: 14),
+                decoration: InputDecoration(
+                  hintText: 'Paste an address',
+                  hintStyle: DMType.mono(size: 14, color: DM.ash),
+                  helperText:
+                      'A person you trust who can freeze this plan and co-sign '
+                      'an early unlock. They can never move funds.',
+                  helperMaxLines: 3,
+                  errorText: _checkPayouts ? _guardianError() : null,
+                ),
               ),
             ),
           ],
@@ -1036,18 +965,10 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
         title: _label.text.trim().isEmpty ? 'Unnamed plan' : _label.text.trim(),
         onEdit: _busy ? null : () => _goTo(0),
         children: [
-          Text.rich(
-            TextSpan(
-              children: [
-                const TextSpan(text: 'You check in every '),
-                TextSpan(
-                  text: delayText(_interval),
-                  style: DMType.mono(size: 14.5, weight: FontWeight.w500),
-                ),
-                const TextSpan(text: '.'),
-              ],
-            ),
-            style: DMType.outfit(size: 15, color: DM.sub),
+          Text(
+            'Each payout is sent its own time after your last check-in. '
+            'Any check-in restarts every clock.',
+            style: DMType.outfit(size: 15, color: DM.dust, height: 1.45),
           ),
         ],
       ),
@@ -1060,7 +981,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       for (final (i, p) in _payouts.indexed)
         _ReviewPayout(
           number: _number(i),
-          when: payoutWhen(p.afterSecs, _interval),
+          when: payoutWhen(p.afterSecs),
           sentence: payoutSentence(
             p,
             net: (_balanceFor(p.mint) ?? 0) > 0
@@ -1186,41 +1107,16 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   }
 }
 
-final _sub = DMType.outfit(size: 15, color: DM.sub, height: 1.45);
-final _note = DMType.outfit(size: 13.5, color: DM.sub, height: 1.4);
-final _error = DMType.outfit(size: 14, color: DM.due, height: 1.4);
+final _sub = DMType.outfit(size: 15, color: DM.dust, height: 1.45);
+final _note = DMType.outfit(size: 13.5, color: DM.dust, height: 1.4);
+final _error = DMType.outfit(size: 14, color: DM.flatline, height: 1.4);
 
-class _IntervalRow extends StatelessWidget {
-  const _IntervalRow({required this.label, required this.onTap});
+/// Duress lock a new plan starts with.
+int _defaultLock({required bool demo}) => demo ? 300 : 3 * 86400;
 
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    borderRadius: BorderRadius.circular(DMRadius.tile),
-    onTap: onTap,
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 48),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'You check in every',
-              style: DMType.outfit(size: 15, color: DM.sub),
-            ),
-          ),
-          const SizedBox(width: DMSpace.md),
-          Text(label, style: DMType.mono(size: 15, weight: FontWeight.w600)),
-          if (onTap != null) ...[
-            const SizedBox(width: DMSpace.xxs),
-            const Icon(Icons.expand_more, color: DM.sub, size: 20),
-          ],
-        ],
-      ),
-    ),
-  );
-}
+/// A plan saved with demo timings: a minutes-long lock or payout wait.
+bool _isDemo(VaultState v) =>
+    v.lockSecs < 86400 || v.rules.any((r) => !r.settled && r.afterSecs < 3600);
 
 /// "Ana · 7Hq2…mX1c": the name in Outfit, the address in mono.
 InlineSpan _whoSpan(String name, String address) => TextSpan(
@@ -1232,7 +1128,7 @@ InlineSpan _whoSpan(String name, String address) => TextSpan(
       ),
     TextSpan(
       text: address,
-      style: DMType.mono(size: 13.5, color: name.isEmpty ? DM.bone : DM.sub),
+      style: DMType.mono(size: 13.5, color: name.isEmpty ? DM.bone : DM.dust),
     ),
   ],
 );
@@ -1279,7 +1175,7 @@ class _PayoutSummaryCard extends StatelessWidget {
                   ),
                 ),
                 RailChip(p.rail),
-                const Icon(Icons.chevron_right, color: DM.mist),
+                const DMIcon(DMIcons.chevronRight, color: DM.ash),
               ],
             ),
             const SizedBox(height: DMSpace.xs),
@@ -1343,20 +1239,20 @@ class _HistoryPayoutCard extends StatelessWidget {
                   style: DMType.outfit(
                     size: 15,
                     weight: FontWeight.w600,
-                    color: DM.sub,
+                    color: DM.dust,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '${payoutAmountLabel(PayoutDraft.fromRule(rule))} → $who',
-                  style: DMType.outfit(size: 14, color: DM.sub, height: 1.35),
+                  style: DMType.outfit(size: 14, color: DM.dust, height: 1.35),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   rule.executed
                       ? "Already paid. It won't pay again."
                       : 'Its money is set aside until $who claims it.',
-                  style: DMType.outfit(size: 13.5, color: DM.mist),
+                  style: DMType.outfit(size: 13.5, color: DM.ash),
                 ),
               ],
             ),
@@ -1399,7 +1295,7 @@ class _ReviewPayout extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
                   when,
-                  style: DMType.mono(size: 12.5, color: DM.sub, height: 1.4),
+                  style: DMType.mono(size: 12.5, color: DM.dust, height: 1.4),
                 ),
               ),
               const SizedBox(height: DMSpace.xxs),

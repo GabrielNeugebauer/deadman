@@ -154,7 +154,7 @@ class DeadmanException implements Exception {
   static const programErrors = <int, (String, String)>{
     6000: ('Unauthorized', 'Signer is not allowed to perform this action'),
     6001: ('FeeTooHigh', 'Fee exceeds the 5% cap'),
-    6002: ('InvalidDuration', 'Interval or lock duration out of range'),
+    6002: ('InvalidDuration', 'Lock or grace duration out of range'),
     6003: (
       'InvalidRules',
       'Rules must be 1-8, sorted by delay, with valid amounts and beneficiaries',
@@ -184,7 +184,8 @@ class DeadmanException implements Exception {
     6014: ('GuardianCooldown', 'Guardian lockdown is cooling down'),
     6015: (
       'PlanCompleted',
-      'Every tier of this plan has released; check-ins are closed',
+      'Every tier of this plan has released; it can no longer be checked in '
+          'on or changed',
     ),
     6016: ('LabelTooLong', 'Plan label is too long'),
     6017: (
@@ -228,7 +229,7 @@ class DeadmanException implements Exception {
 
   /// Clearer wording than the program's `msg` where the user must act.
   static const _userMessages = <int, String>{
-    6002: 'Check-in interval, lockdown length or grace period is out of range',
+    6002: 'Lockdown length or grace period is out of range',
     6017:
         'Open your wallet and check in: the device key can no longer keep '
         'this plan alive on its own',
@@ -717,7 +718,6 @@ class DeadmanClient implements DeadmanApi {
     required int planId,
     required String label,
     required String guard,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -735,7 +735,6 @@ class DeadmanClient implements DeadmanApi {
       owner: owner,
       vault: vault,
       guard: guard,
-      intervalSecs: intervalSecs,
       lockSecs: lockSecs,
       skipGraceSecs: skipGraceSecs,
       rules: rules,
@@ -749,11 +748,10 @@ class DeadmanClient implements DeadmanApi {
       for (final mint in deposits.keys) mint: await _mintDecimals(mint),
     };
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
-    final data = encodeCreateVault(
+    final data = encodeCreatePlan(
       planId: planId,
       label: label,
       guard: guard,
-      intervalSecs: intervalSecs,
       lockSecs: lockSecs,
       skipGraceSecs: skipGraceSecs,
       rules: rules,
@@ -938,7 +936,6 @@ class DeadmanClient implements DeadmanApi {
     required String owner,
     required int planId,
     required String label,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -949,20 +946,21 @@ class DeadmanClient implements DeadmanApi {
     if (current.isVesting) {
       throw DeadmanException.program(DeadmanException.wrongPlanKind);
     }
+    if (current.completed) {
+      throw DeadmanException.program(DeadmanException.planCompleted);
+    }
     _checkPolicy(
       owner: owner,
       vault: current.address,
       guard: current.guard,
-      intervalSecs: intervalSecs,
       lockSecs: lockSecs,
       skipGraceSecs: skipGraceSecs,
       rules: rules,
       historyCount: policyHistoryCount(current),
       guardian: guardian,
     );
-    final data = encodeUpdatePolicy(
+    final data = encodeUpdatePlan(
       label: label,
-      intervalSecs: intervalSecs,
       lockSecs: lockSecs,
       skipGraceSecs: skipGraceSecs,
       rules: rules,
@@ -1082,6 +1080,9 @@ class DeadmanClient implements DeadmanApi {
     }
     if (vault.revokedAt != 0) {
       throw DeadmanException.program(DeadmanException.alreadyRevoked);
+    }
+    if (vault.completed) {
+      throw DeadmanException.program(DeadmanException.planCompleted);
     }
     return _build(
       owner,
@@ -1410,9 +1411,33 @@ class DeadmanClient implements DeadmanApi {
       }
     }
     final rentPayer = vault.rentPayer.isEmpty ? owner : vault.rentPayer;
+    // close_vault leaves the vault's token accounts behind, so sweep every
+    // token first, in the same transaction, or it would be stranded.
+    final mints = {
+      AppConfig.usdcMint,
+      for (final r in vault.rules) ?r.mint,
+    }.toList();
+    final held = await tokenBalances([
+      for (final m in mints) (vault.address, m),
+    ]);
+    final sweep = {
+      for (final (i, m) in mints.indexed)
+        if (held[i] > 0) m: held[i],
+    };
     return _build(
       owner,
-      (_) => [closeVaultIx(owner: owner, planId: planId, rentPayer: rentPayer)],
+      (payer) => [
+        for (final MapEntry(key: mint, value: amount) in sweep.entries)
+          ...withdrawTokenIxs(
+            owner: owner,
+            planId: planId,
+            mint: mint,
+            amount: amount,
+            payer: payer,
+          ),
+        closeVaultIx(owner: owner, planId: planId, rentPayer: rentPayer),
+      ],
+      spend: {for (final e in sweep.entries) e.key: -e.value},
     );
   }
 
@@ -2382,7 +2407,6 @@ class DeadmanClient implements DeadmanApi {
     required String owner,
     required String vault,
     String? guard,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -2393,7 +2417,6 @@ class DeadmanClient implements DeadmanApi {
       owner: owner,
       vault: vault,
       guard: guard,
-      intervalSecs: intervalSecs,
       lockSecs: lockSecs,
       skipGraceSecs: skipGraceSecs,
       rules: rules,

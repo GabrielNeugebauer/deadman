@@ -1,28 +1,31 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
-import 'package:deadman/state/assets.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/format.dart';
+import 'package:deadman/ui/screens/plans_screen.dart';
 import 'package:deadman/ui/screens/pulse_tab.dart';
 import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
-import '../state/installment_fakes.dart';
+
+/// A phone's body area under the status bar, above the navigation bar.
+const _phone = Size(393, 760);
 
 Future<void> _pump(
   WidgetTester tester,
   List<VaultState> plans, {
-  Map<String, Map<String, int>> planTokens = const {},
   SubscriptionTerms? terms,
-  AccountSubscription? sub,
   bool duress = false,
   List<int> legacy = const [],
+  String guard = '',
+  Size size = _phone,
 }) async {
-  tester.view.physicalSize = const Size(1200, 6000);
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   SharedPreferences.setMockInitialValues({'owner': addr(1)});
@@ -33,17 +36,18 @@ Future<void> _pump(
         prefsProvider.overrideWithValue(prefs),
         vaultsProvider.overrideWith((ref) async => plans),
         legacyPlansProvider.overrideWith((ref) async => legacy),
-        guardAddressProvider.overrideWith((ref) async => addr(2)),
+        guardAddressProvider.overrideWith(
+          (ref) async => guard.isEmpty ? addr(2) : guard,
+        ),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
-        planTokenBalancesProvider.overrideWith((ref) async => planTokens),
+        planTokenBalancesProvider.overrideWith((ref) async => const {}),
         subscriptionTermsProvider.overrideWith((ref) async => terms),
-        accountSubscriptionProvider.overrideWith((ref) async => sub),
-        walletTokenProvider.overrideWith((ref, mint) async => 7000000),
+        accountSubscriptionProvider.overrideWith((ref) async => null),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
-            feeBpsPrivate: 500,
+            feeBpsPrivate: 300,
           ),
         ),
       ],
@@ -67,6 +71,12 @@ int _nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 Color? _countdownColor(WidgetTester tester) =>
     tester.widget<Text>(find.byKey(const Key('pulse-countdown'))).style?.color;
 
+String? _countdown(WidgetTester tester) =>
+    tester.widget<Text>(find.byKey(const Key('pulse-countdown'))).data;
+
+double _ringDiameter(WidgetTester tester) =>
+    tester.widget<RingScope>(find.byType(RingScope)).diameter;
+
 /// Disposes the tab so its 1 s ticker stops.
 Future<void> _unmount(WidgetTester tester) =>
     tester.pumpWidget(const SizedBox());
@@ -83,233 +93,99 @@ void main() {
     ],
   );
 
-  testWidgets('vesting plans are listed but not counted by the pulse', (
-    tester,
-  ) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final inheritance = vault(
-      planId: 0,
-      label: 'Kids',
-      guard: addr(2),
-      lastPulse: now,
-      ownerLastSeen: now,
-    );
-    await _pump(tester, [inheritance, vesting]);
-
-    expect(find.text('Check in'), findsOneWidget);
-    expect(find.text('PLAN'), findsOneWidget); // stat tiles: 1 plan
-    expect(find.text('Kids'), findsOneWidget);
-    expect(find.text('Vesting plans'), findsOneWidget);
-    expect(find.text('VESTING'), findsOneWidget);
-    expect(find.textContaining('250 USDC'), findsWidgets);
-    expect(find.textContaining('Committed: 1000 USDC'), findsOneWidget);
-    expect(find.textContaining(RegExp(r'^Release \d')), findsOneWidget);
-    expect(find.text('Revoke'), findsOneWidget);
-    await _unmount(tester);
-  });
-
-  testWidgets('installments: progress, next date, Release only when due', (
-    tester,
-  ) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    VaultState plan(int released) => withPeriod(
-      vestingVault(
-        planId: 1,
+  VaultState kids(int now, {required int silentFor, List<RuleState>? rules}) =>
+      vault(
+        planId: 0,
+        label: 'Kids',
         guard: addr(2),
-        startAt: now - 150,
-        withdrawableLamports: 2000000000,
-        schedules: [schedule(duration: 600, released: released)],
-      ),
-      60,
-    );
-    await _pump(tester, [plan(200000000)]);
-    expect(find.text('2 of 10 installments unlocked'), findsOneWidget);
-    expect(find.textContaining('Next installment: 0.100 SOL on '), findsOne);
-    expect(find.textContaining(RegExp(r'^Release \d')), findsNothing);
-    await _unmount(tester);
-
-    await _pump(tester, [plan(0)]);
-    expect(find.text('Release 0.200 SOL'), findsOneWidget);
-    await _unmount(tester);
-  });
-
-  testWidgets('a vesting-only owner has nothing to check in', (tester) async {
-    await _pump(tester, [vesting]);
-    expect(find.text('No plan to check in'), findsOneWidget);
-    expect(find.text('Off'), findsOneWidget);
-    expect(find.textContaining('Underfunded by 750 USDC'), findsOneWidget);
-    await _unmount(tester);
-  });
-
-  testWidgets('New plan offers inheritance or vesting', (tester) async {
-    await _pump(tester, [vesting]);
-    await tester.tap(find.text('New plan'));
-    await tester.pumpAndSettle();
-    expect(find.text('Inheritance'), findsOneWidget);
-    expect(find.text('Vesting'), findsOneWidget);
-    await tester.tap(find.text('Vesting'));
-    await tester.pumpAndSettle();
-    expect(find.text('New vesting plan'), findsOneWidget);
-    await _unmount(tester);
-  });
-
-  testWidgets('a plan without the asset of a pending tier warns and offers '
-      'a deposit of that asset', (tester) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final usdc = AppConfig.usdcMint;
-    final kids = vault(
-      planId: 0,
-      label: 'Kids',
-      guard: addr(2),
-      lastPulse: now,
-      ownerLastSeen: now,
-      withdrawableLamports: 1000000000,
-      rules: [
-        rule(seed: 11),
-        rule(seed: 12, mint: usdc),
-      ],
-    );
-    await _pump(
-      tester,
-      [kids],
-      planTokens: {
-        kids.address: {usdc: 0},
-      },
-    );
-
-    expect(find.text('NO USDC IN THIS PLAN'), findsOneWidget);
-    expect(find.text('NO SOL IN THIS PLAN'), findsNothing);
-    await tester.tap(find.text('Deposit USDC'));
-    await tester.pumpAndSettle();
-    expect(find.text('Deposit USDC'), findsWidgets);
-    expect(find.text('7 USDC in your wallet'), findsOneWidget);
-    expect(find.byType(SegmentedButton<AssetInfo>), findsNothing);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    await _unmount(tester);
-  });
-
-  testWidgets('a funded plan shows no funding warning', (tester) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final usdc = AppConfig.usdcMint;
-    final kids = vault(
-      planId: 0,
-      guard: addr(2),
-      lastPulse: now,
-      ownerLastSeen: now,
-      withdrawableLamports: 1000000000,
-      rules: [
-        rule(seed: 11),
-        rule(seed: 12, mint: usdc),
-      ],
-    );
-    await _pump(
-      tester,
-      [kids],
-      planTokens: {
-        kids.address: {usdc: 1},
-      },
-    );
-    expect(find.textContaining('IN THIS PLAN'), findsNothing);
-    await _unmount(tester);
-  });
+        lastPulse: now - silentFor,
+        ownerLastSeen: now,
+        rules: rules,
+      );
 
   group('pulse ring', () {
-    VaultState kids(
-      int now, {
-      required int silentFor,
-      List<RuleState>? rules,
-    }) => vault(
-      planId: 0,
-      label: 'Kids',
-      guard: addr(2),
-      lastPulse: now - silentFor,
-      ownerLastSeen: now,
-      rules: rules,
-    );
-
-    testWidgets('on track: signal ring, Check in, stat tiles, tier chip', (
+    testWidgets('alive: pulse ring, Check in, and nothing else', (
       tester,
     ) async {
       final now = _nowSecs();
-      await _pump(tester, [kids(now, silentFor: 0)]);
-      expect(find.text('ON TRACK'), findsOneWidget);
-      expect(find.text('until next check-in'), findsOneWidget);
-      expect(_countdownColor(tester), DM.signal);
+      await _pump(tester, [kids(now, silentFor: 0), vesting]);
+      expect(find.text('ALIVE'), findsOneWidget);
+      expect(find.text('until tier 1 releases'), findsOneWidget);
+      expect(find.text('Kids'), findsOneWidget); // plan under the countdown
+      expect(_countdownColor(tester), DM.pulse);
       expect(find.text('Check in'), findsOneWidget);
-      expect(find.byIcon(Icons.fingerprint), findsOneWidget);
-      for (final label in ['DAY STREAK', 'BEST', 'PLAN']) {
-        expect(find.text(label), findsOneWidget);
+      expect(_dmIcon(DMIcons.fingerprint), findsOneWidget);
+      // The streak and the plan list are gone from Pulse.
+      for (final gone in ['DAY STREAK', 'BEST', 'PLAN', 'Release plans']) {
+        expect(find.text(gone), findsNothing);
       }
-      expect(find.text('Release plans'), findsOneWidget);
-      expect(find.byKey(const Key('new-plan')), findsOneWidget);
-      // A calm plan carries no header chip, only its tier countdown.
-      expect(find.textContaining(RegExp(r'^IN \d+D')), findsOneWidget);
-      expect(find.text('After 10d 0h silent'), findsOneWidget);
-      expect(find.text('Solana'), findsOneWidget); // rail tag
-      expect(find.text('Deposit'), findsOneWidget);
-      expect(find.text('Withdraw'), findsOneWidget);
-      expect(find.text('Earn · mainnet'), findsOneWidget);
+      expect(find.byKey(const Key('new-plan')), findsNothing);
+      expect(find.text('Deposit'), findsNothing);
+      expect(find.byType(DMCard), findsNothing);
       await _unmount(tester);
     });
 
-    testWidgets('the last quarter of the window asks for a check-in soon', (
-      tester,
-    ) async {
-      final now = _nowSecs();
-      await _pump(tester, [kids(now, silentFor: 6 * 86400 + 43200)]);
-      expect(find.text('CHECK IN SOON'), findsOneWidget);
-      expect(_countdownColor(tester), DM.attention);
-      expect(find.text('Check in'), findsOneWidget);
-      await _unmount(tester);
-    });
-
-    testWidgets('past the check-in: attention ring counts to the tier', (
+    testWidgets('days of silence stay alive while the tier counts down', (
       tester,
     ) async {
       final now = _nowSecs();
       await _pump(tester, [kids(now, silentFor: 8 * 86400)]);
-      expect(find.text('CHECK-IN OVERDUE'), findsOneWidget);
+      expect(find.text('ALIVE'), findsOneWidget);
+      expect(find.text('MISSED'), findsNothing);
       expect(find.text('until tier 1 releases'), findsOneWidget);
-      expect(_countdownColor(tester), DM.attention);
-      expect(find.textContaining('TIER IN '), findsOneWidget);
+      expect(_countdown(tester), anyOf('2d 0h', '1d 23h'));
+      expect(_countdownColor(tester), DM.pulse);
+      expect(find.text('Check in'), findsOneWidget);
+      final ring = tester.widget<SegmentedRing>(find.byType(SegmentedRing));
+      expect(ring.status, DMStatus.alive);
+      expect(ring.progress, closeTo(0.2, 0.01)); // 2 of 10 days left
       await _unmount(tester);
     });
 
-    testWidgets('a due tier: dashed due ring and Check in to stop', (
+    testWidgets('the ring follows the earliest release across plans', (
       tester,
     ) async {
+      final now = _nowSecs();
+      final early = vault(
+        planId: 1,
+        label: 'Savings',
+        guard: addr(2),
+        lastPulse: now,
+        ownerLastSeen: now,
+        rules: [rule(afterSecs: 3 * 86400)],
+      );
+      await _pump(tester, [kids(now, silentFor: 0), early]);
+      expect(find.text('Savings'), findsOneWidget);
+      expect(find.text('until tier 1 releases'), findsOneWidget);
+      expect(_countdown(tester), anyOf('3d 0h', '2d 23h'));
+      final ring = tester.widget<SegmentedRing>(find.byType(SegmentedRing));
+      expect(ring.progress, closeTo(1, 0.01));
+      await _unmount(tester);
+    });
+
+    testWidgets('a due tier: flatline ring, releasing-to address, and '
+        'Check in to stop', (tester) async {
       final now = _nowSecs();
       await _pump(tester, [kids(now, silentFor: 11 * 86400)]);
       expect(find.text('TIER DUE'), findsOneWidget);
+      expect(find.text('past due, releasing to'), findsOneWidget);
+      expect(find.text(short(addr(10))), findsOneWidget);
+      expect(_countdownColor(tester), DM.flatline);
+      expect(find.text('Check in to stop'), findsOneWidget);
+      // The ring blinks once a second instead of counting.
+      final ring = tester.widget<SegmentedRing>(find.byType(SegmentedRing));
+      expect(ring.status, DMStatus.due);
+      expect(ring.phase, closeTo(now, 2));
+      // The plans button shows the tombstone while a tier is due.
       expect(
-        find.text('past due, releasing to ${short(addr(10))}'),
+        find.descendant(
+          of: find.byKey(const Key('open-plans')),
+          matching: find.byWidgetPredicate(
+            (w) => w is PixelArt && w.sprite == PixelSprites.tombstone,
+          ),
+        ),
         findsOneWidget,
       );
-      expect(_countdownColor(tester), DM.due);
-      expect(find.text('Check in to stop'), findsOneWidget);
-      // Plan header and the tier itself.
-      expect(find.text('DUE NOW'), findsNWidgets(2));
-      await _unmount(tester);
-    });
-
-    testWidgets('released tiers stay as history with a grey chip', (
-      tester,
-    ) async {
-      final now = _nowSecs();
-      await _pump(tester, [
-        kids(
-          now,
-          silentFor: 0,
-          rules: [
-            rule(executedAt: now - 7200),
-            rule(seed: 11),
-          ],
-        ),
-      ]);
-      expect(find.text('1/2 RELEASED'), findsOneWidget);
-      expect(find.text('RELEASED'), findsOneWidget);
-      expect(find.textContaining('Released 2h 0m ago'), findsOneWidget);
       await _unmount(tester);
     });
 
@@ -321,163 +197,217 @@ void main() {
       expect(find.text('ALL RELEASED'), findsOneWidget);
       expect(find.text('Done'), findsOneWidget);
       expect(find.text('All plans released'), findsOneWidget);
-      expect(find.text('Start again'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('a vesting-only owner has nothing to check in', (tester) async {
+      await _pump(tester, [vesting]);
+      expect(find.text('NOT ARMED'), findsOneWidget);
+      expect(find.text('Off'), findsOneWidget);
+      expect(find.text('No plan to check in'), findsOneWidget);
+      expect(find.text('Build a release plan'), findsOneWidget);
       await _unmount(tester);
     });
   });
 
-  testWidgets('older-version plans are listed under the page title', (
-    tester,
-  ) async {
-    final now = _nowSecs();
-    await _pump(
+  group('layout', () {
+    testWidgets('the ring fills the width of a phone, with Check in under '
+        'it and nothing below', (tester) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)]);
+      expect(_ringDiameter(tester), _phone.width - 2 * DMSpace.gutter);
+      final ring = tester.getRect(find.byType(SegmentedRing));
+      final button = tester.getRect(find.byKey(const Key('check-in')));
+      expect(button.top, greaterThanOrEqualTo(ring.bottom));
+      expect(button.bottom, lessThanOrEqualTo(_phone.height));
+      expect(_phone.height - button.bottom, lessThan(40));
+      await _unmount(tester);
+    });
+
+    testWidgets('on a short, wide window the ring sizes from the height', (
       tester,
-      [vault(guard: addr(2), lastPulse: now, ownerLastSeen: now)],
-      legacy: const [7],
-    );
-    final card = find.text('1 plan from an older version');
-    expect(card, findsOneWidget);
-    expect(
-      tester.getTopLeft(card).dy,
-      greaterThan(tester.getBottomLeft(find.text('Pulse').first).dy),
-    );
-    expect(find.text('Recover SOL'), findsOneWidget);
-    await _unmount(tester);
-
-    await _pump(tester, const [], legacy: const [7, 8]);
-    expect(
-      tester.getTopLeft(find.text('2 plans from an older version')).dy,
-      greaterThan(tester.getBottomLeft(find.text('Arm your switch')).dy),
-    );
-    await _unmount(tester);
-  });
-
-  testWidgets('no plans: the arm-switch intro lists rails with their fee', (
-    tester,
-  ) async {
-    await _pump(tester, const []);
-    expect(find.text('Arm your switch'), findsOneWidget);
-    for (final rail in ['Solana', 'Cloak', 'Zcash']) {
-      expect(find.text(rail), findsOneWidget);
-    }
-    expect(find.text('2%'), findsOneWidget);
-    expect(find.text('5%'), findsNWidgets(2));
-    expect(find.text('Build release plan'), findsOneWidget);
-    expect(
-      find.text(
-        'No subscription. Deadman only charges when a tier releases funds.',
-      ),
-      findsOneWidget,
-    );
-    await _unmount(tester);
-  });
-
-  testWidgets('Deposit asks for SOL or USDC and rejects zero', (tester) async {
-    final now = _nowSecs();
-    await _pump(tester, [
-      vault(guard: addr(2), lastPulse: now, ownerLastSeen: now),
-    ]);
-    await tester.tap(find.text('Deposit'));
-    await tester.pumpAndSettle();
-    expect(find.byType(SegmentedButton<AssetInfo>), findsOneWidget);
-    await tester.enterText(find.byType(TextField), '0');
-    await tester.tap(find.text('Confirm'));
-    await tester.pump();
-    expect(find.text('Enter an amount in SOL'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    await _unmount(tester);
-  });
-
-  testWidgets('under duress the lock stays hidden', (tester) async {
-    final now = _nowSecs();
-    final plan = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
-    final locked = VaultState(
-      address: plan.address,
-      owner: plan.owner,
-      planId: plan.planId,
-      label: plan.label,
-      guard: plan.guard,
-      guardian: plan.guardian,
-      intervalSecs: plan.intervalSecs,
-      lockSecs: plan.lockSecs,
-      skipGraceSecs: plan.skipGraceSecs,
-      lastPulse: plan.lastPulse,
-      ownerLastSeen: plan.ownerLastSeen,
-      lockedUntil: now + 3600,
-      guardianReadyAt: 0,
-      totalPulses: 1,
-      streak: 1,
-      bestStreak: 1,
-      rules: plan.rules,
-      lamports: 0,
-      withdrawableLamports: 0,
-    );
-    await _pump(tester, [locked]);
-    expect(find.text('LOCKED'), findsOneWidget);
-    expect(find.textContaining('Locked down for'), findsOneWidget);
-    await _unmount(tester);
-
-    await _pump(tester, [locked], duress: true);
-    expect(find.text('LOCKED'), findsNothing);
-    expect(find.textContaining('Locked down for'), findsNothing);
-    await _unmount(tester);
-  });
-
-  group('monthly plan', () {
-    const terms = SubscriptionTerms(
-      pricePerPeriod: 10000000,
-      periodSecs: 30 * 86400,
-      mint: AppConfig.usdcMint,
-      minPeriods: 12,
-    );
-
-    testWidgets('each plan card shows the release fee; one account card '
-        'offers the subscription', (tester) async {
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final kids = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
-      await _pump(tester, [kids, vesting], terms: terms);
-      await tester.pump();
-      expect(find.text('Release fee: 2% (5% private rails)'), findsNWidgets(2));
-      expect(find.text('Switch to monthly'), findsNothing);
-      expect(find.text('Not subscribed'), findsOneWidget);
-      expect(find.text('Subscribe'), findsOneWidget);
-      expect(find.text('Extend'), findsNothing);
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [
+        kids(now, silentFor: 0),
+      ], size: const Size(900, 600));
+      final d = _ringDiameter(tester);
+      expect(d, lessThan(600 - 56 - 64));
+      expect(d, greaterThan(300));
+      expect(tester.takeException(), isNull);
       await _unmount(tester);
     });
 
-    testWidgets('the account subscription covers every plan', (tester) async {
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final kids = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
-      final until = now + 86400 * 400;
-      await _pump(
-        tester,
-        [kids, vesting],
-        terms: terms,
-        sub: AccountSubscription(owner: addr(1), paidUntil: until),
-      );
-      await tester.pump();
-      expect(find.text('0% release fee · monthly plan'), findsNWidgets(2));
+    testWidgets('too short for the ring: the page scrolls instead of '
+        'overflowing', (tester) async {
+      final now = _nowSecs();
+      await _pump(tester, [
+        kids(now, silentFor: 0),
+      ], size: const Size(640, 320));
+      expect(tester.takeException(), isNull);
+      expect(_ringDiameter(tester), greaterThan(200));
+      await _unmount(tester);
+    });
+  });
+
+  group('app bar', () {
+    testWidgets('the plans button counts every plan and opens the Plans '
+        'screen; Back returns to Pulse', (tester) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0), vesting]);
+      expect(find.bySemanticsLabel('Release plans, 2'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('open-plans')));
+      await tester.pumpAndSettle();
+      expect(find.byType(PlansScreen), findsOneWidget);
+      expect(find.text('Release plans'), findsOneWidget);
+      expect(find.text('Vesting plans'), findsOneWidget);
+      expect(find.byKey(const Key('new-plan')), findsOneWidget);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byType(PlansScreen), findsNothing);
+      expect(find.text('Check in'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('the skull button explains the three moods', (tester) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)]);
+      await tester.tap(find.byKey(const Key('skull-button')));
+      await tester.pumpAndSettle();
+      expect(find.text('One skull, three moods'), findsOneWidget);
+      for (final mood in [
+        'Alive',
+        'Silent past a release tier',
+        'Plan fully released',
+      ]) {
+        expect(find.text(mood), findsOneWidget);
+      }
+      expect(find.text('Missed a check-in'), findsNothing);
       expect(
-        find.textContaining('Monthly plan · covers all your plans'),
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.byType(PixelSkull),
+        ),
+        findsNWidgets(3),
+      );
+      expect(find.text('CHECK IN, OR CHECK OUT.'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('lockdown shows a LOCKED sticker, hidden under duress', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      final plan = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
+      final locked = VaultState(
+        address: plan.address,
+        owner: plan.owner,
+        planId: plan.planId,
+        label: plan.label,
+        guard: plan.guard,
+        guardian: plan.guardian,
+        lockSecs: plan.lockSecs,
+        skipGraceSecs: plan.skipGraceSecs,
+        lastPulse: plan.lastPulse,
+        ownerLastSeen: plan.ownerLastSeen,
+        lockedUntil: now + 3600,
+        guardianReadyAt: 0,
+        totalPulses: 1,
+        streak: 1,
+        bestStreak: 1,
+        rules: plan.rules,
+        lamports: 0,
+        withdrawableLamports: 0,
+      );
+      await _pump(tester, [locked]);
+      expect(find.text('LOCKED'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, [locked], duress: true);
+      expect(find.text('LOCKED'), findsNothing);
+      await _unmount(tester);
+    });
+  });
+
+  testWidgets('a plan guarded by another device offers to move the guard', (
+    tester,
+  ) async {
+    final now = _nowSecs();
+    await _pump(tester, [kids(now, silentFor: 0)], guard: addr(7));
+    expect(
+      find.textContaining('1 plan is guarded by another device'),
+      findsOne,
+    );
+    expect(find.text('Move guard to this phone'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await _unmount(tester);
+  });
+
+  group('no plans', () {
+    testWidgets('the arm-switch intro lists rails with their fee', (
+      tester,
+    ) async {
+      await _pump(tester, const [], size: const Size(393, 2000));
+      expect(find.text('Arm your switch'), findsOneWidget);
+      for (final rail in ['Solana', 'Cloak', 'Zcash']) {
+        expect(find.text(rail), findsOneWidget);
+      }
+      expect(find.text('2%'), findsOneWidget);
+      expect(find.text('3%'), findsNWidgets(2));
+      expect(find.text('5%'), findsNothing);
+      expect(find.text('Build release plan'), findsOneWidget);
+      expect(
+        find.text(
+          'No subscription. Deadman only charges when a tier releases funds.',
+        ),
         findsOneWidget,
       );
-      expect(find.text('Extend'), findsOneWidget);
+      expect(find.text('CHECK IN, OR CHECK OUT.'), findsOneWidget);
       await _unmount(tester);
     });
 
-    testWidgets('not offered: no fee row on the cards', (tester) async {
-      await _pump(tester, [vesting]);
-      expect(find.textContaining('Release fee'), findsNothing);
-      expect(find.text('Subscribe'), findsNothing);
-      expect(find.textContaining('Monthly plan'), findsNothing);
+    testWidgets('older-version plans are listed under the title', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        const [],
+        legacy: const [7, 8],
+        size: const Size(393, 2000),
+      );
+      expect(
+        tester.getTopLeft(find.text('2 plans from an older version')).dy,
+        greaterThan(tester.getBottomLeft(find.text('Arm your switch')).dy),
+      );
+      expect(find.text('Recover SOL'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('with plans, older-version plans wait on the Plans screen', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)], legacy: const [7]);
+      expect(find.text('1 plan from an older version'), findsNothing);
       await _unmount(tester);
     });
 
     testWidgets('the intro mentions the monthly plan when offered', (
       tester,
     ) async {
-      await _pump(tester, const [], terms: terms);
+      await _pump(
+        tester,
+        const [],
+        size: const Size(393, 2000),
+        terms: const SubscriptionTerms(
+          pricePerPeriod: 10000000,
+          periodSecs: 30 * 86400,
+          mint: AppConfig.usdcMint,
+          minPeriods: 12,
+        ),
+      );
       expect(
         find.textContaining(
           'Or pay a flat 10 USDC a month for all your plans instead (12 months '
@@ -489,3 +419,6 @@ void main() {
     });
   });
 }
+
+Finder _dmIcon(DMIcons icon) =>
+    find.byWidgetPredicate((w) => w is DMIcon && w.icon == icon);

@@ -937,7 +937,7 @@ This recreates `_PlanCard` and `RailBadge`. At phone scale, a tier row does not 
     </p>
   </div>
   <p style="font-size:32px; line-height:1.4; color:#8A8F98">
-    2.5 SOL and 400 USDC protected · check in every 7d 0h
+    2.5 SOL and 400 USDC protected
   </p>
   <div style="display:flex; align-items:center; gap:20px">
     <x-icon

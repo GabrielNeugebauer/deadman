@@ -33,7 +33,6 @@ class _FakeActions extends VaultActions {
   Future<List<VaultState>> createVault({
     required String label,
     required List<RuleSpec> rules,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required int depositLamports,
@@ -47,7 +46,6 @@ class _FakeActions extends VaultActions {
   Future<void> updatePolicy({
     required int planId,
     required String label,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -81,7 +79,7 @@ Future<List<_Sent>> _pump(
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
-            feeBpsPrivate: 500,
+            feeBpsPrivate: 300,
           ),
         ),
       ],
@@ -113,7 +111,11 @@ Future<List<_Sent>> _pump(
   return sent;
 }
 
-Finder _field(String label) => find.widgetWithText(TextField, label);
+/// The input under the label [label] (labels sit above their fields).
+Finder _field(String label) => find.descendant(
+  of: find.widgetWithText(LabeledField, label),
+  matching: find.byType(TextField),
+);
 
 /// Lets the debounced beneficiary lookup run.
 Future<void> _settle(WidgetTester tester) async {
@@ -150,10 +152,10 @@ Future<void> _usdcPayout(
   int who = 12,
 }) async {
   expect(find.text('New payout'), findsOneWidget);
-  await tester.enterText(
-    _field('Their wallet address or claim code'),
-    addr(who),
-  );
+  await tester.enterText(_field('Wallet address or claim code'), addr(who));
+  // Close the keyboard: a focused field scrolls itself back into view.
+  FocusManager.instance.primaryFocus?.unfocus();
+  await tester.pump();
   final chip = find.widgetWithText(ChoiceChip, 'USDC');
   await _scrollTo(tester, chip);
   await tester.tap(chip);
@@ -183,7 +185,7 @@ void main() {
     expect(find.text('Did you mean 100%?'), findsWidgets);
 
     await _tap(tester, 'Done');
-    expect(find.text('After 10 days of silence'), findsOneWidget);
+    expect(find.text('Sent 30 days after your last check-in'), findsOneWidget);
     await _tap(tester, 'Next: fund the plan');
 
     await tester.enterText(_field('Put in this plan'), '1');
@@ -234,6 +236,59 @@ void main() {
     await tester.tap(find.text('Fixed amount'));
     await tester.pump();
     expect(tester.widget<TextField>(fixed).controller!.text, '5');
+  });
+
+  testWidgets('the payout editor follows the "New payout" mockup', (
+    tester,
+  ) async {
+    await _pump(tester, null, theme: buildTheme());
+    expect(find.text('New payout'), findsOneWidget);
+    expect(find.text('STEP 1/3'), findsOneWidget);
+    for (final title in ['Who gets it', 'What they get', 'When']) {
+      expect(find.text(title), findsOneWidget);
+    }
+    // The pixel heart leads "Who gets it"; coin and tombstone the others.
+    PixelSprite? figureOf(String title) => tester
+        .widget<PixelArt>(
+          find.descendant(
+            of: find.ancestor(of: find.text(title), matching: find.byType(Row)),
+            matching: find.byType(PixelArt),
+          ),
+        )
+        .sprite;
+    expect(figureOf('Who gets it'), PixelSprites.heart);
+    expect(figureOf('What they get'), EditorSprites.coin);
+    expect(figureOf('When'), PixelSprites.tombstone);
+
+    // Rails are radio cards with the fee schedule's rates.
+    expect(find.byType(SelectCard), findsNWidgets(3));
+    expect(find.text('2% fee'), findsOneWidget);
+    expect(find.text('3% fee'), findsNWidgets(2));
+    expect(find.textContaining('5% fee'), findsNothing);
+
+    await _usdcPayout(tester);
+    final preview = tester.widget<Text>(
+      find
+          .descendant(of: find.byType(LivePreview), matching: find.byType(Text))
+          .first,
+    );
+    final amount = (preview.textSpan! as TextSpan).children!
+        .cast<TextSpan>()
+        .firstWhere((t) => t.style?.fontFamily?.contains('JetBrains') ?? false);
+    expect(amount.text, '11.76 USDC');
+    expect(amount.style?.fontWeight, FontWeight.w700);
+    expect(
+      find.textContaining(
+        '30 days after your last check-in (after the 2% fee)',
+      ),
+      findsOneWidget,
+    );
+
+    await _tap(tester, 'Done');
+    expect(find.text('STEP 1/3'), findsOneWidget);
+    await _tap(tester, 'Next: fund the plan');
+    expect(find.text('STEP 2/3'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a share-only plan starts with an empty deposit; a fixed one '
@@ -321,29 +376,84 @@ void main() {
     await tester.tap(find.byTooltip('Cancel'));
     await tester.pumpAndSettle();
     expect(find.text('Add your first payout'), findsOneWidget);
+    // The empty state leads with the pack's heartbeat line.
+    expect(
+      find.descendant(
+        of: find.byType(EmptyStateCard),
+        matching: find.byWidgetPredicate(
+          (w) => w is DMIcon && w.icon == DMIcons.heartbeat,
+        ),
+      ),
+      findsOne,
+    );
     await _tap(tester, 'Next: fund the plan');
     expect(find.text('Add at least one payout.'), findsOneWidget);
   });
 
-  testWidgets('changing the interval flags a short delay, and Move fixes it', (
-    tester,
-  ) async {
-    await _pump(tester, null);
-    await _usdcPayout(tester);
+  testWidgets('each payout only asks how long after the last check-in; '
+      'Demo timings swap in minutes', (tester) async {
+    final sent = await _pump(tester, null);
+    expect(find.textContaining('check in every'), findsNothing);
+    expect(
+      find.text('Send after this long since your last check-in'),
+      findsOneWidget,
+    );
+    for (final chip in [
+      '1 day',
+      '3 days',
+      '7 days',
+      '14 days',
+      '30 days',
+      '90 days',
+      '180 days',
+      '1 year',
+      'Custom',
+    ]) {
+      expect(find.widgetWithText(ChoiceChip, chip), findsOneWidget);
+    }
+    expect(find.widgetWithText(ChoiceChip, '2 minutes'), findsNothing);
+    expect(find.textContaining('sent in order of their wait'), findsOneWidget);
+    await _usdcPayout(tester, share: '50');
+    await _tap(tester, '7 days');
     await _tap(tester, 'Done');
+    expect(find.text('Sent 7 days after your last check-in'), findsOneWidget);
+    expect(find.textContaining('You check in every'), findsNothing);
 
-    await _tap(tester, 'You check in every');
-    await _tap(tester, '30 days');
-    expect(find.textContaining('Must be longer than your check-in'), findsOne);
+    await _tap(tester, 'Advanced');
+    await _tap(tester, 'Demo timings');
+    await _tap(tester, "50% of what's left of your USDC");
+    for (final chip in ['1 minute', '2 minutes', '5 minutes', '10 minutes']) {
+      expect(find.widgetWithText(ChoiceChip, chip), findsOneWidget);
+    }
+    expect(find.widgetWithText(ChoiceChip, '1 year'), findsNothing);
+    await _tap(tester, '2 minutes');
+    await _tap(tester, 'Done');
+    expect(
+      find.text('Sent 2 minutes after your last check-in'),
+      findsOneWidget,
+    );
+
+    await _tap(tester, 'Add a payout');
+    await _usdcPayout(tester, who: 13);
+    await _tap(tester, 'Done');
+    expect(
+      find.text('Sent 5 minutes after your last check-in'),
+      findsOneWidget,
+    );
 
     await _tap(tester, 'Next: fund the plan');
-    expect(find.text('Fix the payouts marked in red.'), findsOneWidget);
-
-    await _tap(tester, 'Everything left of your USDC');
-    await _tap(tester, 'Move to 37 days');
-    await _tap(tester, 'Done');
-    expect(find.text('After 37 days of silence'), findsOneWidget);
-    expect(find.textContaining('Must be longer'), findsNothing);
+    await tester.enterText(_field('Put in this plan'), '10');
+    await tester.pumpAndSettle();
+    await _tap(tester, 'Next: review');
+    expect(
+      find.text(
+        'Each payout is sent its own time after your last check-in. Any '
+        'check-in restarts every clock.',
+      ),
+      findsOneWidget,
+    );
+    await _tap(tester, 'Create plan');
+    expect(sent.single.rules.map((r) => r.afterSecs), [120, 300]);
   });
 
   testWidgets('edit sends only the pending payouts; released ones are '
@@ -357,6 +467,7 @@ void main() {
     final sent = await _pump(tester, v);
 
     expect(find.text('Edit plan'), findsOneWidget);
+    expect(find.text('STEP 1/2'), findsOneWidget);
     expect(find.text('Payout 1 · Released'), findsOneWidget);
     expect(find.text("Already paid. It won't pay again."), findsOneWidget);
     expect(find.text('Payout 2'), findsOneWidget);
@@ -433,16 +544,6 @@ void main() {
     expect(sent.single.rules.single.amount, 10000);
   });
 
-  testWidgets('a fully released plan starts fresh with no history', (
-    tester,
-  ) async {
-    final v = vault(rules: [rule(seed: 11, executedAt: 900)]);
-    await _pump(tester, v);
-    expect(find.text('Start a new plan'), findsOneWidget);
-    expect(find.textContaining('Released'), findsNothing);
-    expect(find.text('Add your first payout'), findsOneWidget);
-  });
-
   testWidgets('editing a plan that holds none of a payout token needs the '
       'checkbox', (tester) async {
     final v = vault(rules: [rule(seed: 12, mint: usdc)]);
@@ -492,7 +593,7 @@ void main() {
       api: api,
     );
     await _tap(tester, 'Everything left of your SOL');
-    expect(find.text('No fee: monthly plan active'), findsNWidgets(3));
+    expect(find.text('No fee · monthly plan active'), findsNWidgets(3));
     expect(find.textContaining('(no fee)'), findsOneWidget);
   });
 
@@ -510,13 +611,14 @@ void main() {
     );
     await _tap(tester, 'Everything left of your SOL');
     expect(find.text('2% fee'), findsOneWidget);
-    expect(find.text('5% fee'), findsNWidgets(2));
+    expect(find.text('3% fee'), findsNWidgets(2));
+    expect(find.text('5% fee'), findsNothing);
   });
 
   testWidgets('a claim code picks its private rail', (tester) async {
     await _pump(tester, null);
     await tester.enterText(
-      _field('Their wallet address or claim code'),
+      _field('Wallet address or claim code'),
       'zcash:${addr(12)}',
     );
     await tester.pump();
@@ -599,7 +701,9 @@ void main() {
     );
     expect(share.style?.fontFamily, contains('JetBrains'));
     await _tap(tester, 'Done');
-    final when = tester.widget<Text>(find.text('After 10 days of silence'));
+    final when = tester.widget<Text>(
+      find.text('Sent 30 days after your last check-in'),
+    );
     expect(when.style?.fontFamily, contains('JetBrains'));
     await _tap(tester, 'Next: fund the plan');
     final deposit = tester.widget<TextField>(_field('Put in this plan'));
@@ -631,14 +735,16 @@ void main() {
       await tester.tap(find.bySemanticsLabel('Step 1 of 3, Payouts'));
       await tester.tap(find.bySemanticsLabel('Step 3 of 3, Review'));
       expect(taps, [0]);
-      // Done step shows a check, the current one its number in signal.
+      // The done step carries a check; the current one reads in bone.
       expect(find.byIcon(Icons.check), findsOneWidget);
-      final now = tester.widget<Text>(find.text('2'));
-      expect(now.style?.color, DM.signal);
+      final now = tester.widget<Text>(find.text('Fund'));
+      expect(now.style?.color, DM.bone);
+      expect(now.style?.fontWeight, FontWeight.w600);
+      expect(tester.widget<Text>(find.text('Review')).style?.color, DM.ash);
       handle.dispose();
     });
 
-    testWidgets('selected chips sit on deep with a signal label', (
+    testWidgets('selected chips sit on deep with a pulse label', (
       tester,
     ) async {
       await host(
@@ -656,7 +762,8 @@ void main() {
       final off = tester.widget<ChoiceChip>(
         find.widgetWithText(ChoiceChip, 'Off'),
       );
-      expect(on.labelStyle?.color, DM.signal);
+      expect(on.labelStyle?.color, DM.pulse);
+      expect(on.side?.color, DM.pulse);
       expect(off.labelStyle?.color, DM.bone);
       expect(on.showCheckmark, isFalse);
       expect(
@@ -665,9 +772,10 @@ void main() {
       );
     });
 
-    testWidgets('rail tiles: selection is deep + signal, never rail colors', (
+    testWidgets('rail tiles are radio cards: deep + pulse when selected', (
       tester,
     ) async {
+      final handle = tester.ensureSemantics();
       await host(
         tester,
         Column(
@@ -676,34 +784,93 @@ void main() {
               rail: Rail.cloak,
               selected: true,
               onTap: () {},
-              feeLine: '5% fee',
+              feeLine: '3% fee',
             ),
             RailOptionTile(
               rail: Rail.zcash,
               selected: false,
               onTap: () {},
-              feeLine: '5% fee',
+              feeLine: '3% fee',
               badge: 'mainnet only',
             ),
           ],
         ),
       );
+      final cards = tester
+          .widgetList<SelectCard>(find.byType(SelectCard))
+          .toList();
+      expect(cards.map((c) => c.selected), [true, false]);
+      expect(cards.map((c) => c.title), [
+        'Private (Cloak)',
+        'Private as Zcash',
+      ]);
       final materials = tester
           .widgetList<Material>(
             find.descendant(
-              of: find.byType(RailOptionTile),
+              of: find.byType(SelectCard),
               matching: find.byType(Material),
             ),
           )
           .map((m) => m.color)
           .toList();
-      expect(materials, containsAllInOrder([DM.deep, DM.graphite]));
-      final radio = tester.widget<Icon>(
-        find.byIcon(Icons.radio_button_checked),
+      expect(materials, containsAllInOrder([DM.deep, DM.grave]));
+      // The selected card's fee line is pulse, in mono.
+      final fee = tester.widget<Text>(find.text('3% fee').first);
+      expect(fee.style?.color, DM.pulse);
+      expect(fee.style?.fontFamily, contains('JetBrains'));
+      final tag = tester.widget<Text>(find.text('mainnet only'));
+      expect(tag.style?.fontFamily, contains('JetBrains'));
+      expect(
+        tester.getSemantics(find.byType(SelectCard).first),
+        isSemantics(
+          isInMutuallyExclusiveGroup: true,
+          hasCheckedState: true,
+          isChecked: true,
+          hasTapAction: true,
+        ),
       );
-      expect(radio.color, DM.signal);
-      expect(find.text('mainnet only'), findsOneWidget);
       _expectNoPurple(tester);
+      handle.dispose();
+    });
+
+    testWidgets('rail fee lines come from the fee schedule', (tester) async {
+      final fees = FeeSchedule(
+        treasury: addr(9),
+        feeBpsPublic: 200,
+        feeBpsPrivate: 300,
+      );
+      expect(railFeeLine(FeeInfo(fees: fees), Rail.solana), '2% fee');
+      expect(railFeeLine(FeeInfo(fees: fees), Rail.cloak), '3% fee');
+      expect(railFeeLine(FeeInfo(fees: fees), Rail.zcash), '3% fee');
+      expect(
+        railFeeLine(FeeInfo(fees: fees, waived: true), Rail.cloak),
+        'No fee · monthly plan active',
+      );
+    });
+
+    testWidgets('step sticker is a pixel word that reads "Step n of m"', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await host(tester, const StepSticker(step: 1, of: 3));
+      final word = tester.widget<Text>(find.text('STEP 1/3'));
+      expect(word.style?.fontFamily, contains('Silkscreen'));
+      expect(find.bySemanticsLabel('Step 1 of 3'), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('labeled fields read label and input as one node', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      await host(
+        tester,
+        const LabeledField(label: 'Plan name', child: TextField()),
+      );
+      final node = tester.getSemantics(find.byType(TextField));
+      expect(node.label, contains('Plan name'));
+      expect(node, isSemantics(isTextField: true));
+      handle.dispose();
     });
 
     testWidgets('rail chip is an outlined tag with the short name', (
@@ -714,7 +881,7 @@ void main() {
       expect(find.text('Cloak'), findsOneWidget);
     });
 
-    testWidgets('warnings: status on the icon and title only; fix is signal', (
+    testWidgets('warnings: status on the icon and title only; fix is pulse', (
       tester,
     ) async {
       var fixed = 0;
@@ -742,16 +909,16 @@ void main() {
       expect((box.decoration! as BoxDecoration).color, DM.raise);
       expect(
         tester.widget<Icon>(find.byIcon(Icons.error_outline)).color,
-        DM.due,
+        DM.flatline,
       );
       expect(
         tester.widget<Text>(find.text('Too small to arrive')).style?.color,
-        DM.due,
+        DM.flatline,
       );
       await tester.tap(find.text('Use 100%'));
       expect(fixed, 1);
-      expect(severityColor(Severity.warn), DM.attention);
-      expect(severityColor(Severity.info), DM.sub);
+      expect(severityColor(Severity.warn), DM.missed);
+      expect(severityColor(Severity.info), DM.dust);
     });
 
     testWidgets('cost rows can set amounts in mono', (tester) async {
@@ -781,7 +948,7 @@ void main() {
 
 /// Lockdown purple is reserved for duress; the editors never show it.
 void _expectNoPurple(WidgetTester tester) {
-  const banned = [DM.locked, Color(0xFF8B5CF6), Color(0xFFA78BFA)];
+  const banned = [Color(0xFFA493FF), Color(0xFF8B5CF6), Color(0xFFA78BFA)];
   final colors = <Color?>[
     for (final w in tester.allWidgets)
       ...switch (w) {

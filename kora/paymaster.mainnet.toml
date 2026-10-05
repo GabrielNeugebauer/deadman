@@ -77,7 +77,7 @@ type = "margin"
 margin = 0.15
 
 # The fee payer may only fund account creation (Anchor `init` CPI with
-# payer = Kora in create_vault / create_vesting). Everything else is denied.
+# payer = Kora in create_plan / create_vesting). Everything else is denied.
 [validation.fee_payer_policy.system]
 allow_transfer = false
 allow_assign = false

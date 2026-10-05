@@ -11,8 +11,8 @@ import 'deadman_api.dart';
 
 /// Anchor discriminators, copied from `onchain/target/idl/deadman.json`.
 abstract final class Disc {
-  static const createVault = [29, 237, 247, 208, 193, 82, 54, 135];
-  static const updatePolicy = [212, 245, 246, 7, 163, 151, 18, 57];
+  static const createPlan = [77, 43, 141, 254, 212, 118, 41, 186];
+  static const updatePlan = [119, 112, 58, 60, 76, 205, 1, 100];
   static const setGuard = [250, 44, 173, 235, 219, 76, 36, 198];
   static const pulse = [192, 224, 96, 191, 190, 177, 63, 34];
   static const lockdown = [21, 66, 102, 35, 233, 188, 139, 9];
@@ -47,9 +47,7 @@ abstract final class Limits {
   static const maxLabelBytes = 32;
   static const bpsDenominator = 10000;
   static const maxFeeBps = 500;
-  static const minIntervalSecs = 60;
-  static const maxIntervalSecs = 366 * 86400;
-  static const minRuleMarginSecs = 60;
+  static const minRuleDelaySecs = 60;
   static const maxRuleDelaySecs = 3 * 366 * 86400;
   static const minSkipGraceSecs = 60;
   static const maxSkipGraceSecs = 366 * 86400;
@@ -287,21 +285,19 @@ class BorshReader {
   }
 }
 
-Uint8List encodeCreateVault({
+Uint8List encodeCreatePlan({
   required int planId,
   required String label,
   required String guard,
-  required int intervalSecs,
   required int lockSecs,
   required int skipGraceSecs,
   required List<RuleSpec> rules,
 }) =>
     (BorshWriter()
-          ..bytes(Disc.createVault)
+          ..bytes(Disc.createPlan)
           ..u16(planId)
           ..string(label)
           ..pubkey(guard)
-          ..i64(intervalSecs)
           ..i64(lockSecs)
           ..i64(skipGraceSecs)
           ..ruleInputs(rules))
@@ -329,18 +325,16 @@ Uint8List encodeCreateVesting({
           ..i64(periodSecs))
         .toBytes();
 
-Uint8List encodeUpdatePolicy({
+Uint8List encodeUpdatePlan({
   required String label,
-  required int intervalSecs,
   required int lockSecs,
   required int skipGraceSecs,
   required List<RuleSpec> rules,
   String? guardian,
 }) =>
     (BorshWriter()
-          ..bytes(Disc.updatePolicy)
+          ..bytes(Disc.updatePlan)
           ..string(label)
-          ..i64(intervalSecs)
           ..i64(lockSecs)
           ..i64(skipGraceSecs)
           ..ruleInputs(rules)
@@ -448,12 +442,12 @@ int? subscribeError(
   return null;
 }
 
-/// Tiers `update_policy` keeps as history in front of the new rules: every
-/// paid or skipped one, or none once every tier has paid.
+/// Tiers `update_plan` keeps as history in front of the new rules: every
+/// paid or skipped one. A fully released plan cannot be updated at all.
 int policyHistoryCount(VaultState vault) =>
-    vault.completed ? 0 : vault.rules.where((r) => r.settled).length;
+    vault.rules.where((r) => r.settled).length;
 
-/// Mirrors `Vault::apply_policy` (and the guard checks of `create_vault`).
+/// Mirrors `Vault::apply_policy` (and the guard checks of `create_plan`).
 /// Returns the program error code the chain would raise, or null if valid.
 /// Pass [guard] only when known; the chain also checks it on update.
 /// [historyCount] is [policyHistoryCount] of the current vault on update
@@ -462,16 +456,13 @@ int? policyError({
   required String owner,
   required String vault,
   String? guard,
-  required int intervalSecs,
   required int lockSecs,
   required int skipGraceSecs,
   required List<RuleSpec> rules,
   int historyCount = 0,
   String? guardian,
 }) {
-  if (intervalSecs < Limits.minIntervalSecs ||
-      intervalSecs > Limits.maxIntervalSecs ||
-      lockSecs < Limits.minLockSecs ||
+  if (lockSecs < Limits.minLockSecs ||
       lockSecs > Limits.maxLockSecs ||
       skipGraceSecs < Limits.minSkipGraceSecs ||
       skipGraceSecs > Limits.maxSkipGraceSecs) {
@@ -480,7 +471,6 @@ int? policyError({
   if (rules.isEmpty || historyCount + rules.length > Limits.maxRules) {
     return 6003;
   }
-  final minDelay = intervalSecs + Limits.minRuleMarginSecs;
   for (var i = 0; i < rules.length; i++) {
     final r = rules[i];
     final amountOk = switch (r.mode) {
@@ -488,7 +478,7 @@ int? policyError({
       AmountMode.percent => r.amount >= 1 && r.amount <= Limits.bpsDenominator,
     };
     if (!amountOk ||
-        r.afterSecs < minDelay ||
+        r.afterSecs < Limits.minRuleDelaySecs ||
         r.afterSecs > Limits.maxRuleDelaySecs ||
         (i > 0 && rules[i - 1].afterSecs > r.afterSecs) ||
         r.beneficiary == defaultPubkey ||
@@ -576,7 +566,7 @@ VaultState decodeVault(
   final planId = r.u16();
   final guard = r.pubkey();
   final guardian = r.optionPubkey();
-  final intervalSecs = r.i64();
+  r.i64(); // _reserved_interval: legacy bytes, never read.
   final lockSecs = r.i64();
   final skipGraceSecs = r.i64();
   final lastPulse = r.i64();
@@ -625,7 +615,6 @@ VaultState decodeVault(
     label: label,
     guard: guard,
     guardian: guardian,
-    intervalSecs: intervalSecs,
     lockSecs: lockSecs,
     skipGraceSecs: skipGraceSecs,
     lastPulse: lastPulse,
@@ -811,7 +800,7 @@ Instruction skipRuleIx({
   ], encodeSkipRule(index));
 }
 
-/// `create_vault` or `create_vesting` (same accounts). [payer] funds the
+/// `create_plan` or `create_vesting` (same accounts). [payer] funds the
 /// vault rent and becomes its `rent_payer`: the owner, or a Kora paymaster.
 Instruction createVaultIx({
   required String owner,

@@ -91,7 +91,7 @@ class RecoveryPhrasePage extends ConsumerWidget {
 }
 
 /// Two columns read top to bottom (1–6, then 7–12), as on a paper backup
-/// card; index in mist mono, word in bone mono.
+/// card; index in ash mono, word in bone mono.
 class _WordGrid extends StatelessWidget {
   const _WordGrid({required this.words});
 
@@ -113,7 +113,7 @@ class _WordGrid extends StatelessWidget {
                     width: 28,
                     child: Text(
                       (i + 1).toString().padLeft(2, '0'),
-                      style: DMType.mono(size: 12, color: DM.mist),
+                      style: DMType.mono(size: 12, color: DM.ash),
                     ),
                   ),
                   Expanded(

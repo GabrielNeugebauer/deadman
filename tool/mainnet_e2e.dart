@@ -2,9 +2,9 @@
 // only after the program is deployed and its Config initialized on mainnet
 // (docs/MAINNET.md). It drives everything from throwaway keys in --workdir:
 //
-//  a. create an inheritance plan (60 s check-in interval) with a Zcash-rail
-//     SOL tier to claim key A and a Cloak-rail tier (SOL, or USDC with
-//     --cloak-usdc) to claim key B, and deposit;
+//  a. create an inheritance plan (tiers due 120 s after the last check-in)
+//     with a Zcash-rail SOL tier to claim key A and a Cloak-rail tier (SOL,
+//     or USDC with --cloak-usdc) to claim key B, and deposit;
 //  b. wait until the tiers are due and execute them, as the keeper would;
 //  c. route claim key A through ZcashRoute (1Click) to --zcash-u1 and track
 //     the swap to SUCCESS;
@@ -89,8 +89,7 @@ const _usdcDecimals = 6;
 /// Zcash 2 match SecureStore.claimAccounts).
 const _accounts = (cloak: 1, zcash: 2, guard: 3, heir: 4);
 
-/// Plan timings: the shortest the program allows.
-const _intervalSecs = 60;
+/// Plan timings: short, near the program minimums.
 const _tierAfterSecs = 120;
 const _vestSecs = 60;
 const _lockSecs = 3600;
@@ -340,7 +339,7 @@ class Plan {
           'to browsers); pass --cloak-rpc <Helius URL>',
         );
       }
-      // Net of the 5% private-rail fee, the deposit minus Cloak's minimum
+      // Net of the 3% private-rail fee, the deposit minus Cloak's minimum
       // and reserve must still cover the exit fee.
       if (cloakUsdc > 0 && cloakUsdc < 1600000) {
         throw const FormatException('--cloak-usdc must be at least 1.6');
@@ -741,13 +740,12 @@ class E2e {
         planId: id,
         label: 'E2E inheritance',
         guard: keys.guard.address,
-        intervalSecs: _intervalSecs,
         lockSecs: _lockSecs,
         skipGraceSecs: _skipGraceSecs,
         rules: _rules,
         depositLamports: plan.depositLamports,
       );
-      _tx('a', 'create_vault + deposit', await _sendWallet(tx));
+      _tx('a', 'create_plan + deposit', await _sendWallet(tx));
       vault = (await client.fetchVault(owner, id))!;
     }
     if (plan.cloakUsdc > 0 &&
@@ -1309,6 +1307,11 @@ class E2e {
   }
 }
 
+// Expected Config rates (bps) for the cost estimate; preflight prints the
+// live ones from the Config PDA.
+const _publicFeeBps = 200;
+const _privateFeeBps = 300;
+
 /// Funding the owner needs and what the run is expected to spend.
 class Costs {
   Costs(this.ownerSol, this.ownerUsdc, this.lines);
@@ -1341,11 +1344,11 @@ class Costs {
       ));
       lines.add(('guard funding', fmtSol(10000000), 'swept back'));
       if (plan.zcash) {
-        final fee = plan.zcashLamports * 500 ~/ 10000;
+        final fee = plan.zcashLamports * _privateFeeBps ~/ 10000;
         lines.add((
           'Zcash tier ${fmtSol(plan.zcashLamports)}',
           fmtSol(fee),
-          'protocol fee 5% to the treasury',
+          'protocol fee 3% to the treasury',
         ));
         lines.add((
           '1Click swap',
@@ -1354,12 +1357,13 @@ class Costs {
         ));
       }
       if (plan.cloakLamports > 0) {
-        final net = plan.cloakLamports - plan.cloakLamports * 500 ~/ 10000;
+        final net =
+            plan.cloakLamports - plan.cloakLamports * _privateFeeBps ~/ 10000;
         final shielded = net - 5000000;
         lines.add((
           'Cloak tier ${fmtSol(plan.cloakLamports)}',
           fmtSol(plan.cloakLamports - net),
-          'protocol fee 5% to the treasury',
+          'protocol fee 3% to the treasury',
         ));
         lines.add((
           'Cloak exit fee',
@@ -1368,14 +1372,14 @@ class Costs {
         ));
       }
       if (plan.cloakUsdc > 0) {
-        final net = plan.cloakUsdc - plan.cloakUsdc * 500 ~/ 10000;
+        final net = plan.cloakUsdc - plan.cloakUsdc * _privateFeeBps ~/ 10000;
         needUsdc += plan.cloakUsdc;
         needSol += 3 * ataRent + _cloakSplReserve;
         txs += 2;
         lines.add((
           'Cloak tier ${fmtUsdc(plan.cloakUsdc)}',
           fmtUsdc(plan.cloakUsdc - net),
-          'protocol fee 5% to the treasury',
+          'protocol fee 3% to the treasury',
         ));
         lines.add((
           'Cloak exit fee',
@@ -1400,7 +1404,7 @@ class Costs {
       txs += 3;
       lines.add((
         'vesting ${fmtUsdc(plan.vestUsdc)}',
-        fmtUsdc(plan.vestUsdc * 200 ~/ 10000),
+        fmtUsdc(plan.vestUsdc * _publicFeeBps ~/ 10000),
         'protocol fee 2% to the treasury',
       ));
       lines.add((
@@ -1456,8 +1460,8 @@ Future<void> _dryRun(
   void line(String s) => stdout.writeln('  ${++n}. $s');
   if (plan.inheritance) {
     line(
-      'create inheritance plan: check-in every ${_intervalSecs}s, tiers due '
-      '${_tierAfterSecs}s after creation; deposit ${fmtSol(plan.depositLamports)}'
+      'create inheritance plan: tiers due ${_tierAfterSecs}s after the last '
+      'check-in; deposit ${fmtSol(plan.depositLamports)}'
       '${plan.cloakUsdc > 0 ? ' + ${fmtUsdc(plan.cloakUsdc)}' : ''}',
     );
     if (plan.zcash) {
@@ -1571,7 +1575,9 @@ Future<void> _dryRun(
             ).estimate(
               claimKey: keys.claimZcash.address,
               inputMint: null,
-              amount: plan.zcashLamports - plan.zcashLamports * 500 ~/ 10000,
+              amount:
+                  plan.zcashLamports -
+                  plan.zcashLamports * _privateFeeBps ~/ 10000,
               destination: plan.zcashU1!,
             );
         check(

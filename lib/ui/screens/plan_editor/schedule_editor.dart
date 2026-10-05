@@ -67,6 +67,8 @@ class ScheduleEditorPage extends ConsumerStatefulWidget {
     required this.demo,
     required this.startAt,
     this.periodSecs = 0,
+    this.step = 1,
+    this.steps = 3,
   });
 
   final ScheduleDraft? initial;
@@ -79,6 +81,10 @@ class ScheduleEditorPage extends ConsumerStatefulWidget {
 
   /// When the plan starts (unix seconds), for the milestones.
   final int startAt;
+
+  /// Where the plan editor that opened this is: "STEP 1/3".
+  final int step;
+  final int steps;
 
   @override
   ConsumerState<ScheduleEditorPage> createState() => _ScheduleEditorState();
@@ -224,15 +230,15 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
         if (!didPop) _cancel();
       },
       child: Scaffold(
-        appBar: AppBar(
+        appBar: editorAppBar(
           leading: IconButton(
             tooltip: 'Cancel',
             icon: const Icon(Icons.close),
             onPressed: _cancel,
           ),
-          title: Text(
-            _init == null ? 'New schedule' : 'Schedule ${widget.number}',
-          ),
+          title: _init == null ? 'New schedule' : 'Schedule ${widget.number}',
+          step: widget.step,
+          steps: widget.steps,
           actions: [
             if (_init != null)
               TextButton(
@@ -245,7 +251,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
         body: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(
             DMSpace.gutter,
-            DMSpace.sm,
+            DMSpace.xxl,
             DMSpace.gutter,
             DMSpace.xxxl,
           ),
@@ -264,10 +270,9 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                     .where((w) => w.code == IssueCode.b1)
                     .firstOrNull,
               ),
-              const SizedBox(height: DMSpace.md),
-              SectionCard(
+              EditorSection(
                 key: _whatKey,
-                number: 2,
+                sprite: EditorSprites.coin,
                 title: 'How much',
                 children: [
                   const FieldLabel('Which money'),
@@ -280,21 +285,25 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                       _dirty = true;
                     }),
                   ),
-                  const SizedBox(height: DMSpace.lg),
-                  TextField(
-                    key: const ValueKey('vest-total'),
-                    controller: _total,
-                    focusNode: _totalFocus,
-                    onChanged: (_) => _changed(),
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    style: DMType.mono(size: 18, weight: FontWeight.w500),
-                    decoration: InputDecoration(
-                      labelText: 'Total',
-                      suffixText: unitLabel(_mint),
-                      suffixStyle: DMType.mono(size: 14, color: DM.sub),
-                      errorText: _showErrors ? _totalError : null,
+                  const SizedBox(height: DMSpace.xl),
+                  LabeledField(
+                    label: 'Total',
+                    child: TextField(
+                      key: const ValueKey('vest-total'),
+                      controller: _total,
+                      focusNode: _totalFocus,
+                      onChanged: (_) => _changed(),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      style: DMType.mono(size: 18, weight: FontWeight.w500),
+                      decoration: InputDecoration(
+                        hintText: '0',
+                        hintStyle: DMType.mono(size: 18, color: DM.ash),
+                        suffixText: unitLabel(_mint),
+                        suffixStyle: DMType.mono(size: 14, color: DM.dust),
+                        errorText: _showErrors ? _totalError : null,
+                      ),
                     ),
                   ),
                   for (final w in warnings)
@@ -307,9 +316,8 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                       ),
                 ],
               ),
-              const SizedBox(height: DMSpace.md),
-              SectionCard(
-                number: 3,
+              EditorSection(
+                sprite: EditorSprites.hourglass,
                 title: 'Timing',
                 children: [
                   const FieldLabel('Nothing unlocks for'),
@@ -361,18 +369,13 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                       'every" on the plan.',
                       style: DMType.outfit(
                         size: 13.5,
-                        color: DM.sub,
+                        color: DM.dust,
                         height: 1.4,
                       ),
                     ),
                   ],
-                ],
-              ),
-              const SizedBox(height: DMSpace.md),
-              SectionCard(
-                number: 4,
-                title: 'How it unlocks',
-                children: [
+                  const SizedBox(height: DMSpace.xxl),
+                  const FieldLabel('How it unlocks'),
                   SchedulePreview(
                     draft: d,
                     startAt: widget.startAt,
@@ -384,7 +387,6 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
           ),
         ),
         bottomNavigationBar: EditorBar(
-          color: DM.graphite,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -499,9 +501,11 @@ class _SchedulePreviewState extends State<SchedulePreview> {
       children: [
         TweenAnimationBuilder<double>(
           tween: Tween(end: milestones[selected].$2),
-          duration: const Duration(milliseconds: 400),
+          duration: MediaQuery.disableAnimationsOf(context)
+              ? Duration.zero
+              : const Duration(milliseconds: 400),
           builder: (context, f, _) => VestingBar(
-            color: DM.signal,
+            color: DM.pulse,
             progress: previewProgress(
               total: 1000,
               vested: (f * 1000).round(),
@@ -526,7 +530,7 @@ class _SchedulePreviewState extends State<SchedulePreview> {
               : 'Nothing can be claimed between installments. Deadman sends '
                     'each one within about a day of unlocking; ${s.who} can '
                     'also claim it as soon as it unlocks.',
-          style: DMType.outfit(size: 14, color: DM.sub, height: 1.45),
+          style: DMType.outfit(size: 14, color: DM.dust, height: 1.45),
         ),
       ],
     );
@@ -550,7 +554,7 @@ class _Milestone extends StatelessWidget {
   Widget build(BuildContext context) {
     // "Oct 4, 2026: first installment, 300 USDC" splits at the date.
     final cut = text.indexOf(': ');
-    final color = selected ? DM.bone : DM.sub;
+    final color = selected ? DM.bone : DM.dust;
     final body = DMType.outfit(
       size: 14.5,
       color: color,
@@ -571,8 +575,8 @@ class _Milestone extends StatelessWidget {
                 dimension: 8,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: selected ? DM.signal : Colors.transparent,
-                    border: Border.all(color: selected ? DM.signal : DM.mist),
+                    color: selected ? DM.pulse : Colors.transparent,
+                    border: Border.all(color: selected ? DM.pulse : DM.ash),
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),

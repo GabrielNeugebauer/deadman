@@ -3,6 +3,8 @@
 Status: spec, ready to implement · 2026-10-04 · replaces the single-page editors in
 `lib/ui/screens/rules_editor.dart` and `lib/ui/screens/vesting_editor.dart`.
 
+> **Superseded in part (2026-10-05):** the check-in interval is gone, in the app and on-chain (`create_plan` / `update_plan`). Each payout only has "Send after this long since your last check-in" (1 minute to 3 years; presets 1, 3, 7, 14, 30, 90, 180 days, 1 year; demo 1, 2, 5, 10 minutes). Ignore the interval row, `Cadence`, error D1 and every "interval + 60 s" rule below.
+
 ## 0. Why
 
 Owner report (2026-10-04): "the new plan screen is confuse, with so much unorganized settings... I set 1% USDC,
@@ -589,7 +591,7 @@ Functions (all amounts in base units):
   account's rent:
   `ceil(tokenAccountRentLamports / lamportsPerUnit / (feeBps/10000))`.
   - Returns `null` (never) when `feeBps == 0` (fee waived) or the price is unknown (non-USDC tokens).
-  - USDC at 2%: 16.994 USDC ("about 17 USDC"). At 5%: 6.80 USDC.
+  - USDC at 2%: 16.994 USDC ("about 17 USDC"). At 3%: 11.33 USDC.
 - `class DeliveryFacts { int? walletLamports; int? tokenUnits; }`: what the beneficiary holds. `null` means
   unknown.
   - `tokenUnits > 0` means the token account exists.

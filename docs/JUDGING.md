@@ -62,7 +62,7 @@ What does win in the security lane: [Unruggable](https://colosseum.com/projects/
 Reposition from "inheritance app" (graveyard) to **Deadman — the self-custody safety net for Seeker**, competing on mobile execution where SolGuard (web) didn't:
 
 - **One vault, three threats**: silence (inheritance), coercion (duress PIN → silent lockdown), loss (guardian recovery).
-- **Guard key** in the phone's secure storage + biometrics → 3-second daily "Pulse" with streak.
+- **Guard key** in the phone's secure storage + biometrics → 3-second daily "Pulse".
 - **Family Circle**: heirs/guardians see your liveness ("Mom checked in 2h ago") — a social loop that gives _them_ a reason to open the app.
 - **SKR**: Deadman Plus subscription paid in SKR (more heirs, guardian, shorter intervals).
 - Roadmap only: Cloak private payout to heirs, Zcash nLockTime-rollover switch, DAO signer recovery.

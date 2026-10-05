@@ -34,42 +34,37 @@ pub mod deadman {
         instructions::config::handle_set_config(ctx, treasury, fee_bps_public, fee_bps_private)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_vault(
+    pub fn create_plan(
         ctx: Context<CreateVault>,
         plan_id: u16,
         label: String,
         guard: Pubkey,
-        interval_secs: i64,
         lock_secs: i64,
         skip_grace_secs: i64,
         rules: Vec<RuleInput>,
     ) -> Result<()> {
-        instructions::vault::handle_create_vault(
+        instructions::vault::handle_create_plan(
             ctx,
             plan_id,
             label,
             guard,
-            interval_secs,
             lock_secs,
             skip_grace_secs,
             rules,
         )
     }
 
-    pub fn update_policy(
+    pub fn update_plan(
         ctx: Context<OwnerAction>,
         label: String,
-        interval_secs: i64,
         lock_secs: i64,
         skip_grace_secs: i64,
         rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
     ) -> Result<()> {
-        instructions::vault::handle_update_policy(
+        instructions::vault::handle_update_plan(
             ctx,
             label,
-            interval_secs,
             lock_secs,
             skip_grace_secs,
             rules,

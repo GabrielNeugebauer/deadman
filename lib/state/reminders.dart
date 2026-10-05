@@ -4,30 +4,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'lockdown_retry.dart';
+import 'reminder_schedule.dart';
 
 const _taskName = 'deadman.pulse-check';
 const _lockdownTask = 'deadman.lockdown-retry';
-const _dueKey = 'pulse_due_at';
-const _deadlineKey = 'deadline_at';
+const _releaseKey = 'release_at';
+const _delayKey = 'release_delay';
+
+/// "releaseAt:lead" of the last reminder shown, so each fires once.
+const _shownKey = 'reminder_shown';
 
 final _notifications = FlutterLocalNotificationsPlugin();
 
-/// Background reminder: Android may defer this under Doze, which is fine —
-/// the on-chain timer is the source of truth and the grace period absorbs it.
+/// Background reminder ahead of the next release (see [reminderLeads]).
+/// Android may defer it under Doze; the on-chain timer is the source of
+/// truth.
 @pragma('vm:entry-point')
 void reminderDispatcher() {
   Workmanager().executeTask((task, _) async {
     WidgetsFlutterBinding.ensureInitialized();
     if (task == _lockdownTask) return runPendingLockdownInBackground();
     final prefs = await SharedPreferences.getInstance();
-    final due = prefs.getInt(_dueKey);
-    final deadline = prefs.getInt(_deadlineKey);
-    if (due == null || deadline == null) return true;
+    final releaseAt = prefs.getInt(_releaseKey);
+    final delay = prefs.getInt(_delayKey);
+    if (releaseAt == null || delay == null) return true;
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    if (now >= due) {
-      await _init();
-      await notifyPulseDue(overdue: now >= deadline - 3600);
+    final lead = reminderLead(now: now, releaseAt: releaseAt, delaySecs: delay);
+    if (lead == null || prefs.getString(_shownKey) == '$releaseAt:$lead') {
+      return true;
     }
+    await _init();
+    await notifyRelease(releaseAt - now);
+    await prefs.setString(_shownKey, '$releaseAt:$lead');
     return true;
   });
 }
@@ -69,28 +77,35 @@ Future<void> scheduleLockdownRetry() => Workmanager().registerOneOffTask(
 Future<void> cancelLockdownRetry() =>
     Workmanager().cancelByUniqueName(_lockdownTask);
 
-/// Cached so the background isolate can decide without RPC calls.
+/// The next release across the owner's plans ([releaseAt], unix seconds)
+/// and its tier's wait after a check-in ([delaySecs]). Cached so the
+/// background isolate can decide without RPC calls.
 Future<void> scheduleFrom({
-  required int pulseDue,
-  required int deadline,
+  required int releaseAt,
+  required int delaySecs,
 }) async {
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setInt(_dueKey, pulseDue);
-  await prefs.setInt(_deadlineKey, deadline);
+  await prefs.setInt(_releaseKey, releaseAt);
+  await prefs.setInt(_delayKey, delaySecs);
 }
 
-Future<void> notifyPulseDue({bool overdue = false}) => _notifications.show(
-  id: 1,
-  title: overdue ? 'Deadman fires soon' : 'Time to pulse',
-  body: overdue
-      ? 'Your switch is in its grace period. Open Deadman and pulse now.'
-      : 'Tap to check in. Keep your streak alive.',
-  notificationDetails: const NotificationDetails(
-    android: AndroidNotificationDetails(
-      'pulse',
-      'Pulse reminders',
-      importance: Importance.high,
-      priority: Priority.high,
-    ),
+/// The reminder [remaining] seconds before the next release (0 or less:
+/// it is due).
+Future<void> notifyRelease(int remaining) {
+  final (title, body) = reminderText(remaining);
+  return _notifications.show(
+    id: 1,
+    title: title,
+    body: body,
+    notificationDetails: _details,
+  );
+}
+
+const _details = NotificationDetails(
+  android: AndroidNotificationDetails(
+    'pulse',
+    'Pulse reminders',
+    importance: Importance.high,
+    priority: Priority.high,
   ),
 );

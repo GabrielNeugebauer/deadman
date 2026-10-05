@@ -145,21 +145,19 @@ String percentText(double fraction) {
 
 /// Tiers that already released or were skipped stay on-chain as history (a
 /// skipped tier stays claimable); the editor only edits and resends the
-/// pending ones. Once every tier has released, the program discards the
-/// history and an edit starts a fresh plan.
+/// pending ones. A fully released plan is final: the program refuses any
+/// edit to it.
 ({List<RuleState> history, List<RuleState> pending}) splitRules(VaultState v) =>
-    v.completed
-    ? (history: const [], pending: const [])
-    : (
-        history: [
-          for (final r in v.rules)
-            if (r.settled) r,
-        ],
-        pending: [
-          for (final r in v.rules)
-            if (!r.settled) r,
-        ],
-      );
+    (
+      history: [
+        for (final r in v.rules)
+          if (r.settled) r,
+      ],
+      pending: [
+        for (final r in v.rules)
+          if (!r.settled) r,
+      ],
+    );
 
 /// Owner-chosen time a due tier gets to pay before the keeper skips it.
 List<(int, String)> graceChoices({required bool demo}) => [
@@ -187,7 +185,7 @@ List<VaultState> switchPlans(Iterable<VaultState> plans) => [
 /// their claim): what check-ins, the pulse ring and reminders follow.
 List<VaultState> activeSwitchPlans(Iterable<VaultState> plans) => [
   for (final v in plans)
-    if (!v.isVesting && v.nextRuleDue != null) v,
+    if (!v.isVesting && v.nextReleaseAt != null) v,
 ];
 
 /// Guard-key check-ins have stopped for this plan, or stop within

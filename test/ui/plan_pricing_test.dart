@@ -87,7 +87,7 @@ Future<_SubApi> _pump(
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
-            feeBpsPrivate: 500,
+            feeBpsPrivate: 300,
           ),
         ),
       ],
@@ -139,12 +139,12 @@ void main() {
       tester,
     ) async {
       await line(tester, vault());
-      expect(find.text('Release fee: 2% (5% private rails)'), findsOneWidget);
+      expect(find.text('Release fee: 2% (3% private rails)'), findsOneWidget);
       expect(find.byType(TextButton), findsNothing);
       final icon = tester.widget<Icon>(
         find.byIcon(Icons.receipt_long_outlined),
       );
-      expect(icon.color, DM.mist);
+      expect(icon.color, DM.ash);
     });
 
     testWidgets('covered by the account subscription: 0%', (tester) async {
@@ -154,7 +154,7 @@ void main() {
       final icon = tester.widget<Icon>(
         find.byIcon(Icons.receipt_long_outlined),
       );
-      expect(icon.color, DM.signal);
+      expect(icon.color, DM.pulse);
     });
 
     testWidgets('inheritance: a check-in after the end brings the fee back', (
@@ -162,7 +162,7 @@ void main() {
     ) async {
       final now = _now();
       await line(tester, vault(lastPulse: now - 10), sub: _sub(now - 100));
-      expect(find.text('Release fee: 2% (5% private rails)'), findsOneWidget);
+      expect(find.text('Release fee: 2% (3% private rails)'), findsOneWidget);
     });
 
     testWidgets('no longer offered: a covered plan still shows 0%', (
@@ -245,6 +245,28 @@ void main() {
       expect(api.subscribed, [(owner, 24)]);
       expect(api.sent, hasLength(1));
       expect(find.textContaining('Monthly plan paid until'), findsOneWidget);
+    });
+
+    testWidgets('private-rail tiers are compared at the 3% rate', (
+      tester,
+    ) async {
+      final now = _now();
+      final plans = [
+        vault(
+          rules: [
+            rule(mint: usdc, rail: Rail.cloak),
+            rule(seed: 11),
+          ],
+          lastPulse: now,
+        ),
+      ];
+      await _pump(tester, const MonthlyPlanCard(), plans: plans);
+      await _open(tester, 'Subscribe');
+      expect(
+        find.textContaining('At 2% / 3%, releasing your plan would cost'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('5%'), findsNothing);
     });
 
     testWidgets('no plans yet: no comparison', (tester) async {

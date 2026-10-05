@@ -189,8 +189,9 @@ pub struct Vault {
     pub guard: Pubkey,
     /// Trusted contact: may lock down (rate-limited) and co-sign early unlock.
     pub guardian: Option<Pubkey>,
-    /// Check-in cadence; drives reminders and the minimum rule delay.
-    pub interval_secs: i64,
+    /// Former check-in cadence slot, no longer used. Zero on new plans;
+    /// older accounts keep their stale bytes, which are never read.
+    pub _reserved_interval: [u8; 8],
     pub lock_secs: i64,
     /// Owner-chosen time a due tier gets to pay before anyone may skip it.
     pub skip_grace_secs: i64,
@@ -375,7 +376,9 @@ impl Vault {
         now < self.locked_until
     }
 
-    /// Every tier has released.
+    /// Every tier has released (vesting: every schedule released its cap).
+    /// A completed plan is final: no check-ins, edits or revocation; the
+    /// owner may still withdraw leftovers and close it.
     pub fn is_completed(&self) -> bool {
         self.rules.iter().all(|r| r.executed_at != 0)
     }
@@ -519,33 +522,28 @@ impl Vault {
 
     /// Validates and installs the policy. Caller enforces auth.
     ///
-    /// Tiers that already released stay in place as history (they can never
-    /// pay again) and `rules` becomes the new pending tiers after them. Once
-    /// every tier has released the plan starts over with only `rules`.
+    /// Tiers that already released or were skipped stay in place as history
+    /// (they can never pay again) and `rules` becomes the new pending tiers
+    /// after them. Callers reject fully released plans first.
     pub fn apply_policy(
         &mut self,
         vault: &Pubkey,
-        interval_secs: i64,
         lock_secs: i64,
         skip_grace_secs: i64,
         rules: &[RuleInput],
         guardian: Option<Pubkey>,
     ) -> Result<()> {
         require!(
-            (MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&interval_secs)
-                && (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs)
+            (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs)
                 && (MIN_SKIP_GRACE_SECS..=MAX_SKIP_GRACE_SECS).contains(&skip_grace_secs),
             DeadmanError::InvalidDuration
         );
-        let history: Vec<Rule> = if self.is_completed() {
-            Vec::new()
-        } else {
-            self.rules
-                .iter()
-                .filter(|r| r.executed_at != 0 || r.skipped_at != 0)
-                .copied()
-                .collect()
-        };
+        let history: Vec<Rule> = self
+            .rules
+            .iter()
+            .filter(|r| r.executed_at != 0 || r.skipped_at != 0)
+            .copied()
+            .collect();
         let total = history
             .len()
             .checked_add(rules.len())
@@ -554,9 +552,6 @@ impl Vault {
             !rules.is_empty() && total <= MAX_RULES,
             DeadmanError::InvalidRules
         );
-        let min_delay = interval_secs
-            .checked_add(MIN_RULE_MARGIN_SECS)
-            .ok_or(DeadmanError::MathOverflow)?;
         for (i, r) in rules.iter().enumerate() {
             let amount_ok = match r.mode {
                 AmountMode::Fixed => r.amount > 0,
@@ -564,7 +559,7 @@ impl Vault {
             };
             require!(
                 amount_ok
-                    && (min_delay..=MAX_RULE_DELAY_SECS).contains(&r.after_secs)
+                    && (MIN_RULE_DELAY_SECS..=MAX_RULE_DELAY_SECS).contains(&r.after_secs)
                     && (i == 0 || rules[i - 1].after_secs <= r.after_secs)
                     && r.beneficiary != Pubkey::default()
                     && r.beneficiary != self.owner
@@ -584,7 +579,6 @@ impl Vault {
             );
         }
 
-        self.interval_secs = interval_secs;
         self.lock_secs = lock_secs;
         self.skip_grace_secs = skip_grace_secs;
         self.guardian = guardian;

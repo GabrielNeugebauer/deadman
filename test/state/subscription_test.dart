@@ -12,7 +12,7 @@ const month = 30 * 86400;
 final fees = FeeSchedule(
   treasury: addr(9),
   feeBpsPublic: 200,
-  feeBpsPrivate: 500,
+  feeBpsPrivate: 300,
 );
 
 const terms = SubscriptionTerms(
@@ -116,14 +116,14 @@ void main() {
     });
 
     test('compounding percent tiers on mixed rails', () {
-      // 50% via Solana (2%), then 100% of the rest via Cloak (5%).
+      // 50% via Solana (2%), then 100% of the rest via Cloak (3%).
       final v = vault(
         rules: [
           rule(seed: 11, mint: usdc, amount: 5000, afterSecs: 10),
           rule(seed: 12, mint: usdc, afterSecs: 20, rail: Rail.cloak),
         ],
       );
-      expect(releaseFeeEstimate(v, fees, usdc, 1000), 10 + 25);
+      expect(releaseFeeEstimate(v, fees, usdc, 1000), 10 + 15);
     });
 
     test('fixed tiers are capped by the balance; paid tiers are skipped', () {
@@ -168,7 +168,7 @@ void main() {
         withdrawableLamports: 5000,
       );
       final held = {a.address: 1000, b.address: 1000};
-      expect(plansReleaseFeeEstimate([a, b, c], fees, usdc, held), 20 + 50);
+      expect(plansReleaseFeeEstimate([a, b, c], fees, usdc, held), 20 + 30);
       // a's SOL has no SOL tier; c owes 500 of its 5000 lamports.
       expect(plansReleaseFeeEstimate([a, b, c], fees, null), 10);
       expect(plansReleaseFeeEstimate(const [], fees, usdc), 0);
@@ -180,7 +180,7 @@ void main() {
           vault(),
           vault(planId: 1, rules: [rule(rail: Rail.zcash)]),
         ], fees),
-        '2% / 5%',
+        '2% / 3%',
       );
     });
   });
@@ -190,7 +190,7 @@ void main() {
       final v = vault(lastPulse: now - 100);
       expect(
         planFeeText(v, null, fees, now),
-        'Release fee: 2% (5% private rails)',
+        'Release fee: 2% (3% private rails)',
       );
       expect(
         planFeeText(v, sub(now + 1), fees, now),
@@ -204,7 +204,7 @@ void main() {
       // Ended before it.
       expect(
         planFeeText(v, sub(now - 150), fees, now),
-        'Release fee: 2% (5% private rails)',
+        'Release fee: 2% (3% private rails)',
       );
       expect(planFeeText(v, null, null, now), 'Release fee on payouts');
     });
@@ -217,7 +217,7 @@ void main() {
       );
       expect(
         planFeeText(v, sub(now - 1), fees, now),
-        'Release fee: 2% (5% private rails)',
+        'Release fee: 2% (3% private rails)',
       );
     });
 
@@ -225,14 +225,14 @@ void main() {
       final other = AccountSubscription(owner: addr(7), paidUntil: now + 1);
       expect(
         planFeeText(vault(), other, fees, now),
-        'Release fee: 2% (5% private rails)',
+        'Release fee: 2% (3% private rails)',
       );
     });
   });
 
   group('labels', () {
     test('release fee row', () {
-      expect(releaseFeeText(fees), 'Release fee: 2% (5% private rails)');
+      expect(releaseFeeText(fees), 'Release fee: 2% (3% private rails)');
     });
 
     test('pending rates', () {
@@ -247,7 +247,7 @@ void main() {
           ),
           fees,
         ),
-        '2% / 5%',
+        '2% / 3%',
       );
       expect(
         pendingFeeRates(
@@ -259,7 +259,7 @@ void main() {
           ),
           fees,
         ),
-        '5%',
+        '3%',
       );
     });
 

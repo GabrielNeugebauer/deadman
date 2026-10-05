@@ -4,7 +4,7 @@
 # pass (must be the program's upgrade authority).
 #
 #   KEYPAIR=/path/to/upgrade-authority.json scripts/devnet_setup.sh
-#   FEE_PUBLIC=200 FEE_PRIVATE=500 TREASURY=<addr> URL=<rpc> are optional.
+#   FEE_PUBLIC=200 FEE_PRIVATE=300 TREASURY=<addr> URL=<rpc> are optional.
 set -euo pipefail
 
 : "${KEYPAIR:?set KEYPAIR to your upgrade-authority keypair path}"
@@ -15,4 +15,4 @@ ADMIN=$(solana-keygen pubkey "$KEYPAIR")
 TREASURY="${TREASURY:-$ADMIN}"
 
 dart run tool/init_config.dart --keypair "$KEYPAIR" --treasury "$TREASURY" \
-  --fee-public "${FEE_PUBLIC:-200}" --fee-private "${FEE_PRIVATE:-500}" --rpc "$URL"
+  --fee-public "${FEE_PUBLIC:-200}" --fee-private "${FEE_PRIVATE:-300}" --rpc "$URL"

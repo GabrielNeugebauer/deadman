@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import 'brand/brand.dart';
 
-/// Shared frame of the PIN screens (lock, setup, duress): the lockup at
-/// the top, a heading block and the pad. Scrolls on short windows.
+/// Shared frame of the PIN screens (lock, setup, duress): the skull lockup
+/// at the top, the step sticker during setup, a heading block and the pad.
+/// Scrolls on short windows. The lock screen looks the same whichever PIN
+/// is entered; nothing here may hint at the duress path.
 class PinScaffold extends StatelessWidget {
   const PinScaffold({
     super.key,
@@ -89,7 +91,8 @@ class PinScaffold extends StatelessWidget {
   }
 }
 
-/// Setup progress: one short bar per step, signal up to the current one.
+/// Setup progress as the brand's step sticker ("STEP 1/3"), read out as
+/// "Step 1 of 3".
 class _Steps extends StatelessWidget {
   const _Steps({required this.step, required this.steps});
 
@@ -100,21 +103,8 @@ class _Steps extends StatelessWidget {
   Widget build(BuildContext context) => Semantics(
     label: 'Step $step of $steps',
     excludeSemantics: true,
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        for (var i = 1; i <= steps; i++)
-          Container(
-            key: ValueKey('pin-step-$i'),
-            width: 28,
-            height: 3,
-            margin: const EdgeInsets.symmetric(horizontal: 3),
-            decoration: BoxDecoration(
-              color: i <= step ? DM.signal : DM.track,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-      ],
+    child: Center(
+      child: Sticker('Step $step/$steps', key: const ValueKey('pin-step')),
     ),
   );
 }

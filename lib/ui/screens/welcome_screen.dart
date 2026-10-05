@@ -53,35 +53,49 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
   Widget _content(TextTheme t, bool web) => Padding(
     padding: const EdgeInsets.fromLTRB(
       DMSpace.gutter,
-      DMSpace.xxl,
+      DMSpace.lg,
       DMSpace.gutter,
       DMSpace.xxl,
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            const DeadmanLockup(height: 28),
-            const Spacer(),
-            if (web) const WebBadge(),
-          ],
+        // Keeps the hero in place whether or not the web tag shows.
+        SizedBox(
+          height: 32,
+          child: web
+              ? const Align(alignment: Alignment.centerRight, child: WebBadge())
+              : null,
         ),
-        const SizedBox(height: 56),
+        const Spacer(),
+        // The splash (brand book, page 6): skull over the pixel wordmark.
+        const Center(child: DeadmanLockup(height: 88, stacked: true)),
+        const SizedBox(height: DMSpace.xxl),
         Semantics(
           header: true,
+          label: 'Check in, or check out.',
+          excludeSemantics: true,
           child: Text(
-            'The safety net for your self-custody.',
-            style: t.displaySmall,
+            'CHECK IN, OR CHECK OUT.',
+            key: const ValueKey('welcome-tagline'),
+            textAlign: TextAlign.center,
+            style: DMType.tagline(size: 14),
           ),
         ),
-        const SizedBox(height: DMSpace.md),
+        const SizedBox(height: DMSpace.sm),
+        Text(
+          'A dead man\'s switch for your Solana wallet.',
+          textAlign: TextAlign.center,
+          style: t.bodyMedium?.copyWith(color: DM.ash),
+        ),
+        const Spacer(),
+        const SizedBox(height: DMSpace.xxxl),
         Text(
           'If you go silent, get coerced, or lose your phone, your crypto '
           'still ends up where you decided.',
-          style: t.bodyLarge?.copyWith(color: DM.sub),
+          style: t.bodyLarge,
         ),
-        const SizedBox(height: DMSpace.xxxl),
+        const SizedBox(height: DMSpace.lg),
         const DMListGroup(
           children: [
             DMListRow(
@@ -105,7 +119,6 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
             ),
           ],
         ),
-        const Spacer(),
         const SizedBox(height: DMSpace.xxl),
         FilledButton(
           onPressed: _busy ? null : _connect,
@@ -115,7 +128,7 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
                   dimension: 20,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: DM.sub,
+                    color: DM.ash,
                   ),
                 )
               : Text(

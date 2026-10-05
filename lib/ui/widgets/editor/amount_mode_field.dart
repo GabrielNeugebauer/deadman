@@ -5,7 +5,7 @@ import '../../../solana/deadman_api.dart';
 import '../../../state/assets.dart';
 import '../../../state/plan_draft.dart';
 import '../brand/brand.dart';
-import 'plan_steps.dart' show pickChip;
+import 'plan_steps.dart' show LabeledField, pickChip;
 
 final _numberChars = FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'));
 
@@ -98,7 +98,7 @@ class AmountModeField extends StatelessWidget {
                     ),
                     decoration: InputDecoration(
                       hintText: '100',
-                      hintStyle: big.copyWith(color: DM.mist),
+                      hintStyle: big.copyWith(color: DM.ash),
                       contentPadding: const EdgeInsets.symmetric(
                         horizontal: DMSpace.lg,
                         vertical: DMSpace.md,
@@ -108,7 +108,7 @@ class AmountModeField extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Text('%', style: big.copyWith(color: DM.sub)),
+              Text('%', style: big.copyWith(color: DM.dust)),
             ],
           ),
         ),
@@ -119,7 +119,7 @@ class AmountModeField extends StatelessWidget {
           style: DMType.outfit(
             size: 16,
             weight: FontWeight.w600,
-            color: words == null ? DM.due : DM.bone,
+            color: words == null ? DM.flatline : DM.bone,
           ),
         ),
         const SizedBox(height: DMSpace.md),
@@ -152,7 +152,7 @@ class AmountModeField extends StatelessWidget {
           'Shares are taken from what is left of this $asset when the payout '
           'runs, after earlier payouts.',
           textAlign: TextAlign.center,
-          style: DMType.outfit(size: 13.5, color: DM.sub, height: 1.4),
+          style: DMType.outfit(size: 13.5, color: DM.dust, height: 1.4),
         ),
       ],
     );
@@ -160,25 +160,28 @@ class AmountModeField extends StatelessWidget {
 
   Widget _fixed() {
     final known = knownAsset(mint) != null;
-    return TextField(
-      key: const ValueKey('fixed-field'),
-      controller: fixed,
-      focusNode: fixedFocus,
-      onChanged: (_) => onChanged(),
-      inputFormatters: [_numberChars],
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      style: DMType.mono(size: 18, weight: FontWeight.w500),
-      decoration: InputDecoration(
-        labelText: 'Amount',
-        suffixStyle: DMType.mono(size: 14, color: DM.sub),
-        hintText: known ? '0.00' : '0',
-        suffixText: unitLabel(mint),
-        helperText:
-            "If the plan holds less when this payout runs, they get what's "
-            "there.${known ? '' : ' Other tokens are entered in base units.'}",
-        helperMaxLines: 3,
-        errorText: fixedError,
-        errorMaxLines: 3,
+    return LabeledField(
+      label: 'Amount',
+      child: TextField(
+        key: const ValueKey('fixed-field'),
+        controller: fixed,
+        focusNode: fixedFocus,
+        onChanged: (_) => onChanged(),
+        inputFormatters: [_numberChars],
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        style: DMType.mono(size: 18, weight: FontWeight.w500),
+        decoration: InputDecoration(
+          suffixStyle: DMType.mono(size: 14, color: DM.dust),
+          hintText: known ? '0.00' : '0',
+          hintStyle: DMType.mono(size: 18, color: DM.ash),
+          suffixText: unitLabel(mint),
+          helperText:
+              "If the plan holds less when this payout runs, they get what's "
+              "there.${known ? '' : ' Other tokens are entered in base units.'}",
+          helperMaxLines: 3,
+          errorText: fixedError,
+          errorMaxLines: 3,
+        ),
       ),
     );
   }
