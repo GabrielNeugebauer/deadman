@@ -310,3 +310,86 @@ final myBeneficiaryKeysProvider = FutureProvider<Set<String>>((ref) async {
   final claims = await ref.watch(claimProfilesProvider.future);
   return {?owner, ...claims.map((c) => c.key.address)};
 });
+
+/// A rule or schedule of a plan, as claimed from the Family Circle.
+typedef ClaimTarget = ({String vaultOwner, int planId, int index});
+
+/// What claiming [ClaimTarget] costs the connected wallet; null while no
+/// wallet is connected or when it cannot be priced (the claim itself then
+/// reports why).
+final claimQuoteProvider = FutureProvider.autoDispose
+    .family<ClaimQuote?, ClaimTarget>((ref, target) async {
+      final owner = ref.watch(sessionProvider.select((s) => s.owner));
+      if (owner == null) return null;
+      try {
+        return await ref
+            .watch(apiProvider)
+            .quoteClaim(
+              claimer: owner,
+              vaultOwner: target.vaultOwner,
+              planId: target.planId,
+              index: target.index,
+            );
+      } on Object {
+        return null;
+      }
+    });
+
+/// The monthly-plan terms; null when not offered (no config on chain, or
+/// disabled).
+final subscriptionTermsProvider = FutureProvider<SubscriptionTerms?>(
+  (ref) => ref.watch(apiProvider).fetchSubscriptionTerms(),
+);
+
+/// The connected owner's account-wide monthly plan, which covers all of
+/// their plans; null when never subscribed (or no wallet is connected).
+final accountSubscriptionProvider = FutureProvider<AccountSubscription?>((
+  ref,
+) async {
+  final owner = ref.watch(sessionProvider.select((s) => s.owner));
+  if (owner == null) return null;
+  return ref.watch(apiProvider).fetchSubscription(owner);
+});
+
+/// The subscriptions of [owners], in one batched read where the API allows.
+Future<Map<String, AccountSubscription?>> fetchSubscriptionsOf(
+  DeadmanApi api,
+  Iterable<String> owners,
+) async {
+  final distinct = owners.toSet().toList();
+  if (distinct.isEmpty) return const {};
+  if (api is DeadmanClient) return api.fetchSubscriptions(distinct);
+  final got = await Future.wait(distinct.map(api.fetchSubscription));
+  return {for (final (i, o) in distinct.indexed) o: got[i]};
+}
+
+/// The subscription of each owner of a plan in the Family Circle, keyed by
+/// owner address; re-read when the watched plans are.
+final watchedSubscriptionsProvider =
+    FutureProvider<Map<String, AccountSubscription?>>(
+      (ref) async => fetchSubscriptionsOf(ref.watch(apiProvider), [
+        for (final v in await ref.watch(watchedVaultsProvider.future)) v.owner,
+      ]),
+    );
+
+/// What each of the connected owner's plans holds of [mint], keyed by
+/// vault address, in one batched lookup; plans with no tier or schedule in
+/// [mint] are left out.
+final ownerPlanHoldingsProvider =
+    FutureProvider.family<Map<String, int>, String>((ref, mint) async {
+      final plans = [
+        for (final v in await ref.watch(vaultsProvider.future))
+          if (v.rules.any((r) => r.mint == mint)) v.address,
+      ];
+      if (plans.isEmpty) return const {};
+      final got = await ref.watch(apiProvider).tokenBalances([
+        for (final a in plans) (a, mint),
+      ]);
+      return {for (final (i, a) in plans.indexed) a: got[i]};
+    });
+
+/// [mint] (base units) held by the plan vault at `vault`.
+final planTokenProvider =
+    FutureProvider.family<int, ({String vault, String mint})>(
+      (ref, k) => ref.watch(apiProvider).tokenBalance(k.vault, k.mint),
+    );

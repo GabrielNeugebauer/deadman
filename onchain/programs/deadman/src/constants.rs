@@ -1,5 +1,7 @@
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const VAULT_SEED: &[u8] = b"vault";
+pub const SUB_CONFIG_SEED: &[u8] = b"sub_config";
+pub const SUBSCRIPTION_SEED: &[u8] = b"sub";
 
 pub const MAX_RULES: usize = 8;
 /// Plan label length in bytes.
@@ -31,6 +33,8 @@ pub const MAX_LOCK_SECS: i64 = 30 * SECS_PER_DAY;
 /// start at most this far in the past or future of creation.
 pub const MAX_VEST_SECS: i64 = 20 * 366 * SECS_PER_DAY;
 pub const MAX_VEST_START_SKEW_SECS: i64 = 366 * SECS_PER_DAY;
+/// Shortest installment of a stepped vesting plan (0 = continuous).
+pub const MIN_VEST_PERIOD_SECS: i64 = 60;
 
 /// SOL sent along with token payouts on private rails so a fresh claim key
 /// can pay to route its funds onward. A Cloak SPL deposit needs about
@@ -38,3 +42,10 @@ pub const MAX_VEST_START_SKEW_SECS: i64 = 366 * SECS_PER_DAY;
 /// deposit address's ATA rent plus fees.
 pub const CLOAK_GAS_STIPEND: u64 = 12_000_000;
 pub const ZCASH_GAS_STIPEND: u64 = 3_000_000;
+
+/// Subscription period bounds and the default the app offers (30 days).
+pub const MIN_SUB_PERIOD_SECS: i64 = SECS_PER_DAY;
+pub const MAX_SUB_PERIOD_SECS: i64 = 366 * SECS_PER_DAY;
+pub const DEFAULT_SUB_PERIOD_SECS: i64 = 30 * SECS_PER_DAY;
+/// Most periods one `subscribe` call may buy.
+pub const MAX_SUB_PERIODS: u16 = 36;

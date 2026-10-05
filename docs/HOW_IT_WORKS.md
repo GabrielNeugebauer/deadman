@@ -1,8 +1,8 @@
 # How Deadman works
 
-Every design choice, technology and user flow in the current build (updated 2026-10-04: vesting plans, USDC, network fees in USDC). Research behind the rails, with sources: [`docs/research/`](research/).
+Every design choice, technology and user flow in the current build (updated 2026-10-04: vesting plans, USDC, network fees in USDC, account-wide monthly plan). Research behind the rails, with sources: [`docs/research/`](research/).
 
-**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Next to these inheritance plans you can open _vesting plans_ that release SOL or USDC to someone linearly over time, whether you check in or not. Plans hold SOL and USDC, and an owner with no SOL at all can pay network fees in USDC. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, and earns on the optional staking yield path.
+**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Next to these inheritance plans you can open _vesting plans_ that release SOL or USDC to someone linearly over time, whether you check in or not. Plans hold SOL and USDC, and an owner with no SOL at all can pay network fees in USDC. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, or the owner prefers an optional monthly plan that covers their whole account, and it earns on the optional staking yield path.
 
 ---
 
@@ -116,11 +116,16 @@ beneficiary · rail · asset (SOL or USDC in the app) · total · cliff · durat
 
 ### 3.6 Fees (your new pricing policy)
 
-- **No subscription.** Creating a vault, depositing, checking in and locking are free (Solana network fees only, paid in SOL, or in USDC through the paymaster, §3.8).
+- **Free to use.** Creating a vault, depositing, checking in and locking are free (Solana network fees only, paid in SOL, or in USDC through the paymaster, §3.8).
 - **Fee on release only**, charged on-chain from each payout, inheritance tier or vesting release: **2% on the Solana rail, 5% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
 - **Why the private rails cost more:** the beneficiary gets privacy and cross-chain delivery, and a token payout also carries a SOL gas stipend (0.012 SOL on Cloak, 0.003 SOL on Zcash) so their claim key can route the funds.
 - **Why the fee lives in the program, not with the rail operators:** we measured NEAR Intents' `appFees` live. The fee you set is **split 50/50 with 1Click** and capped at 5% total, so a Deadman 5% through NEAR is impossible (2.5% maximum), and the fee would land inside NEAR, not in our Solana treasury. Charging on-chain is predictable and enforced the same way on every rail.
 - If the treasury can't accept a tiny SOL fee (rent rules), the fee is waived to the beneficiary instead of blocking the payout.
+- **Or an optional monthly plan, for the whole account.** An owner can pay a flat price instead of the release fee: **10 USDC per 30 days on devnet**, set by the admin in the `SubscriptionConfig` PDA (`tool/set_subscription.dart`). A new or lapsed subscription buys at least **12 months** at once (so one cheap month cannot waive the fee on a large release); an active one can be extended by 1 to 36 months, from its current end date. One `Subscription` PDA per owner (`["sub", owner]`) covers **every plan of that owner, present and future, at 0% release fee**:
+  - **Inheritance:** a tier releases fee-free if the owner's **last check-in happened while subscribed** (`paid_until >= last_pulse`). An owner who dies while subscribed leaves fee-free payouts even after the subscription runs out.
+  - **Vesting:** a release is fee-free **while the subscription is active** (`paid_until >= now`).
+  - Every payout instruction names the owner's subscription PDA. The program checks it is that exact address, so a keeper cannot drop the waiver by passing another account; an owner who never subscribed pays the normal fee.
+  - Subscribing needs no plan. The owner signs the USDC payment; the account rent can be paid by the owner or by the Kora paymaster (USDC network fees). The app shows the plan in Pulse and Settings (`MonthlyPlanCard`) and the fee line on each plan card.
 
 ### 3.7 Yield (Earn)
 
@@ -247,10 +252,11 @@ Pulse tab → **New plan** → **Vesting** → name, start (now or a date), revo
 | Stream        | Mechanism                                             | Illustration                                                                            |
 | ------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | Release fee   | 2% (Solana) / 5% (private) of each payout, on-chain   | $10M of protected assets, 1% released per year, about half via private rails: ~$3.5k/yr |
+| Monthly plan  | optional, account-wide: 10 USDC/month (devnet), 12-month minimum, replaces the release fee on all the owner's plans | 1,000 subscribers: ~$120k/yr, earned whether or not anything releases |
 | Earn referral | ≥0.5% of each SOL→JitoSOL swap, protocol keeps 80%    | ~$4,000 per $1M swapped at 0.5%                                                         |
 | Yield effect  | the release fee applies to a balance growing ~4.8%/yr | compounds the first stream                                                              |
 
-An honest note, since you said you know the risks: releases are rare by nature (people rarely die or vanish in a given year), so the release fee alone stays small until protected assets reach the hundreds of millions. Earn swaps and the private rails' higher fee are what make the numbers move earlier. The SKR prize track (10k SKR) is no longer covered now that Plus is gone. An SKR integration that isn't a subscription would put it back in play; that's your call.
+An honest note, since you said you know the risks: releases are rare by nature (people rarely die or vanish in a given year), so the release fee alone stays small until protected assets reach the hundreds of millions. Earn swaps and the private rails' higher fee are what make the numbers move earlier. The optional monthly plan is the predictable stream: owners with large plans save money with it (2% of a $10k release is $200, a year of the plan is $120), and the protocol earns from day one instead of at release. The SKR prize track (10k SKR) is not covered; paying the monthly plan in SKR would put it back in play; that's your call.
 
 ---
 

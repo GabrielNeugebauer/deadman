@@ -23,6 +23,69 @@ impl Config {
     }
 }
 
+/// Optional flat subscription that waives the payout fee on all of an
+/// owner's plans (see [`Subscription`]).
+#[account]
+#[derive(InitSpace)]
+pub struct SubscriptionConfig {
+    /// Price of one period in base units of `mint`.
+    pub price_per_period: u64,
+    pub period_secs: i64,
+    pub mint: Pubkey,
+    pub enabled: bool,
+    pub bump: u8,
+    /// Periods a new (or lapsed) subscription must buy at once, so one
+    /// cheap period cannot waive the fee on a large release.
+    pub min_periods: u16,
+}
+
+/// An owner's account-wide subscription, PDA `[SUBSCRIPTION_SEED, owner]`.
+/// While paid it waives the payout fee on every plan of `owner`.
+#[account]
+#[derive(InitSpace)]
+pub struct Subscription {
+    pub owner: Pubkey,
+    /// End of the paid coverage; 0 if never paid.
+    pub paid_until: i64,
+    pub bump: u8,
+    /// Zeroed space for future fields.
+    pub _reserved: [u8; 32],
+}
+
+impl Subscription {
+    pub const SPACE: usize = 8 + Subscription::INIT_SPACE;
+
+    /// Loads `owner`'s subscription from `info`, which must be its PDA.
+    /// `None` while the account was never created (no coverage).
+    pub fn load(info: &AccountInfo, owner: &Pubkey) -> Result<Option<Self>> {
+        if info.owner != &crate::ID || info.data_is_empty() {
+            let (expected, _) =
+                Pubkey::find_program_address(&[SUBSCRIPTION_SEED, owner.as_ref()], &crate::ID);
+            require_keys_eq!(info.key(), expected, DeadmanError::InvalidSubscription);
+            return Ok(None);
+        }
+        let sub = Subscription::try_deserialize(&mut &info.try_borrow_data()?[..])?;
+        require_keys_eq!(sub.owner, *owner, DeadmanError::InvalidSubscription);
+        let expected = Pubkey::create_program_address(
+            &[SUBSCRIPTION_SEED, owner.as_ref(), &[sub.bump]],
+            &crate::ID,
+        )
+        .map_err(|_| error!(DeadmanError::InvalidSubscription))?;
+        require_keys_eq!(info.key(), expected, DeadmanError::InvalidSubscription);
+        Ok(Some(sub))
+    }
+
+    /// Covers a payout of `vault`: for inheritance, the owner's last
+    /// check-in fell within a paid period; for vesting, it is paid now.
+    pub fn covers(&self, vault: &Vault, now: i64) -> bool {
+        self.paid_until != 0
+            && match vault.kind {
+                PlanKind::Inheritance => self.paid_until >= vault.last_pulse,
+                PlanKind::Vesting => self.paid_until >= now,
+            }
+    }
+}
+
 /// Delivery rail. On-chain every rail pays a Solana key; for private rails
 /// that key is a fresh claim key whose app routes the funds onward.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
@@ -52,8 +115,9 @@ pub enum PlanKind {
 }
 
 /// One beneficiary's vesting schedule: `total` of `mint` (None = SOL) vests
-/// linearly from `start_at` over `duration_secs`; nothing is claimable
-/// before `cliff_secs` have passed.
+/// linearly from `start_at` over `duration_secs` (in installments when the
+/// plan has a vesting period); nothing is claimable before `cliff_secs`
+/// have passed.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub struct VestingInput {
     pub beneficiary: Pubkey,
@@ -162,8 +226,11 @@ pub struct Vault {
     /// Bit `i` set once rule `i`'s claim key got its gas stipend, so a
     /// private-rail beneficiary is topped up at most once per rule.
     pub stipend_paid: u8,
+    /// Vesting: installment length. Vesting unlocks only at whole multiples
+    /// of it from `start_at` (fully at `duration_secs`); 0 = continuous.
+    pub vest_period_secs: i64,
     /// Zeroed space for future fields; see the layout note above.
-    pub _reserved: [u8; 63],
+    pub _reserved: [u8; 55],
 }
 
 impl Vault {
@@ -182,6 +249,8 @@ impl Vault {
     }
 
     /// Gross amount of rule `index` vested at `now` (stops at revocation).
+    /// With a vesting period it steps up once per installment; the last one
+    /// may be shorter so the full total vests exactly at `duration_secs`.
     pub fn vested(&self, index: usize, now: i64) -> Result<u64> {
         let rule = &self.rules[index];
         let end = if self.revoked_at != 0 {
@@ -196,8 +265,17 @@ impl Vault {
         if elapsed >= rule.duration_secs {
             return Ok(rule.amount);
         }
+        // Installments: only whole periods since the start count.
+        let unlocked = if self.vest_period_secs > 0 {
+            elapsed
+                .checked_div(self.vest_period_secs)
+                .and_then(|n| n.checked_mul(self.vest_period_secs))
+                .ok_or(DeadmanError::MathOverflow)?
+        } else {
+            elapsed
+        };
         let v = u128::from(rule.amount)
-            .checked_mul(u128::try_from(elapsed).map_err(|_| DeadmanError::MathOverflow)?)
+            .checked_mul(u128::try_from(unlocked).map_err(|_| DeadmanError::MathOverflow)?)
             .and_then(|v| v.checked_div(u128::try_from(rule.duration_secs).ok()?))
             .ok_or(DeadmanError::MathOverflow)?;
         u64::try_from(v).map_err(|_| error!(DeadmanError::MathOverflow))
@@ -235,6 +313,7 @@ impl Vault {
         vault: &Pubkey,
         now: i64,
         start_at: i64,
+        period_secs: i64,
         schedules: &[VestingInput],
     ) -> Result<()> {
         require!(
@@ -265,8 +344,13 @@ impl Vault {
                     && v.mint != Some(Pubkey::default()),
                 DeadmanError::InvalidVesting
             );
+            require!(
+                period_secs == 0 || (MIN_VEST_PERIOD_SECS..=v.duration_secs).contains(&period_secs),
+                DeadmanError::InvalidVesting
+            );
         }
         self.start_at = start_at;
+        self.vest_period_secs = period_secs;
         self.rules = schedules
             .iter()
             .map(|v| Rule {

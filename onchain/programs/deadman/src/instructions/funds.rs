@@ -9,7 +9,7 @@ use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{split_fee, Config, PlanKind, Rail, Vault},
+    state::{split_fee, Config, PlanKind, Rail, Subscription, Vault},
 };
 
 /// Lamports above the rent reserve (see [`Vault::rent_reserve`]).
@@ -18,6 +18,21 @@ fn withdrawable_lamports(vault: &Account<Vault>) -> Result<u64> {
     Ok(info
         .lamports()
         .saturating_sub(vault.rent_reserve(info.data_len())?))
+}
+
+/// Payout fee for `rail`: 0 while the owner's account subscription covers
+/// the payout. `subscription` must be the owner's subscription PDA, created
+/// or not, so an executor cannot drop the waiver by passing another account.
+fn payout_fee_bps(
+    vault: &Vault,
+    config: &Config,
+    subscription: &AccountInfo,
+    rail: Rail,
+    now: i64,
+) -> Result<u16> {
+    let covered =
+        Subscription::load(subscription, &vault.owner)?.is_some_and(|sub| sub.covers(vault, now));
+    Ok(if covered { 0 } else { config.fee_bps(rail) })
 }
 
 /// Private-rail token payouts also send the rail's SOL stipend so a fresh
@@ -200,6 +215,9 @@ pub struct ExecuteSolRule<'info> {
     /// CHECK: lamport destination only; pinned to the configured treasury.
     #[account(mut, address = config.treasury @ DeadmanError::Unauthorized)]
     pub treasury: UncheckedAccount<'info>,
+    /// CHECK: the owner's subscription PDA `[SUBSCRIPTION_SEED, vault.owner]`,
+    /// possibly not created yet; verified in [`Subscription::load`].
+    pub subscription: UncheckedAccount<'info>,
 }
 
 /// Permissionless: pays a due SOL rule. Destinations are fixed in the rule,
@@ -220,7 +238,16 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
     let gross = ctx.accounts.vault.payout_gross(i, balance)?;
     // An empty payout would burn the tier; leave it pending instead.
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail))?;
+    let (mut net, mut fee) = split_fee(
+        gross,
+        payout_fee_bps(
+            &ctx.accounts.vault,
+            &ctx.accounts.config,
+            &ctx.accounts.subscription,
+            rule.rail,
+            now,
+        )?,
+    )?;
 
     let rent = Rent::get()?;
     let treasury = &ctx.accounts.treasury;
@@ -302,6 +329,9 @@ pub struct ExecuteTokenRule<'info> {
     )]
     pub treasury_token: Box<InterfaceAccount<'info, TokenAccount>>,
     pub token_program: Interface<'info, TokenInterface>,
+    /// CHECK: the owner's subscription PDA `[SUBSCRIPTION_SEED, vault.owner]`,
+    /// possibly not created yet; verified in [`Subscription::load`].
+    pub subscription: UncheckedAccount<'info>,
 }
 
 /// Permissionless: pays a due token rule. Private rails also receive a small
@@ -336,7 +366,10 @@ pub fn handle_execute_token_rule<'info>(
 
     let gross = a.vault.payout_gross(i, a.vault_token.amount)?;
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = split_fee(gross, a.config.fee_bps(rule.rail))?;
+    let (net, fee) = split_fee(
+        gross,
+        payout_fee_bps(&a.vault, &a.config, &a.subscription, rule.rail, now)?,
+    )?;
     vault_transfer(
         &a.token_program,
         &a.vault_token,
@@ -455,7 +488,16 @@ pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Res
     let due = vault.vested(i, now)?.saturating_sub(rule.released);
     let gross = due.min(withdrawable_lamports(vault)?);
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail))?;
+    let (mut net, mut fee) = split_fee(
+        gross,
+        payout_fee_bps(
+            &ctx.accounts.vault,
+            &ctx.accounts.config,
+            &ctx.accounts.subscription,
+            rule.rail,
+            now,
+        )?,
+    )?;
     let rent = Rent::get()?;
     let treasury = &ctx.accounts.treasury;
     if fee > 0
@@ -519,7 +561,10 @@ pub fn handle_release_vested_token<'info>(
     let due = a.vault.vested(i, now)?.saturating_sub(rule.released);
     let gross = due.min(a.vault_token.amount);
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = split_fee(gross, a.config.fee_bps(rule.rail))?;
+    let (net, fee) = split_fee(
+        gross,
+        payout_fee_bps(&a.vault, &a.config, &a.subscription, rule.rail, now)?,
+    )?;
     vault_transfer(
         &a.token_program,
         &a.vault_token,

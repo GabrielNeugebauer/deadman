@@ -9,11 +9,13 @@ import '../../state/assets.dart';
 import '../../state/fee_settings.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
+import '../../state/subscription.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
 import '../web/web_ui.dart';
 import '../widgets/feedback.dart';
+import '../widgets/plan_pricing.dart';
 import 'rails_check_screen.dart';
 import 'recovery_phrase_screen.dart';
 
@@ -319,7 +321,8 @@ class SettingsTab extends ConsumerWidget {
             ),
           ],
           const SizedBox(height: 12),
-          const _FeesCard(),
+          const PricingCard(),
+          const MonthlyPlanCard(margin: EdgeInsets.only(top: 12)),
           const SizedBox(height: 12),
           const NetworkFeesCard(),
           const SizedBox(height: 12),
@@ -574,21 +577,53 @@ class _RecoveryCard extends ConsumerWidget {
   );
 }
 
-class _FeesCard extends ConsumerWidget {
-  const _FeesCard();
+/// How Deadman charges: a percentage of each release, or, when offered, a
+/// flat monthly plan covering all of the owner's plans that replaces it.
+class PricingCard extends ConsumerWidget {
+  const PricingCard({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final fees = ref.watch(feesProvider).value;
+    final terms = ref.watch(subscriptionTermsProvider).value;
+    const small = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.4);
     return Card(
-      child: ListTile(
-        leading: const Icon(Icons.receipt_long_outlined),
-        title: const Text('Pricing'),
-        subtitle: Text(
-          fees == null
-              ? 'Free to use. A fee applies only when a tier releases funds.'
-              : 'Free to use. On release: ${fees.feeBpsPublic / 100}% via Solana, '
-                    '${fees.feeBpsPrivate / 100}% via Cloak or Zcash.',
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.receipt_long_outlined),
+                SizedBox(width: 12),
+                Text('Pricing', style: TextStyle(fontWeight: FontWeight.w600)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              fees == null
+                  ? 'Free to use. A fee applies only when a tier releases funds.'
+                  : 'Free to use. A fee is taken from each release: '
+                        '${percentText(fees.feeBpsPublic / 10000)} via Solana, '
+                        '${percentText(fees.feeBpsPrivate / 10000)} via Cloak or Zcash.',
+              style: small,
+            ),
+            if (terms != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Or pay ${amountText(terms.pricePerPeriod, terms.mint)} '
+                '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} and '
+                'releases carry no fee: one subscription covers all your plans, '
+                'present and future. Better for larger holdings. A new or lapsed '
+                'subscription starts with ${terms.minPeriods} '
+                '${periodWord(terms, terms.minPeriods)} paid at once (up to '
+                '${SubscriptionTerms.maxPeriods} per payment); while it runs, '
+                'extend by any amount.',
+                style: small,
+              ),
+            ],
+          ],
         ),
       ),
     );

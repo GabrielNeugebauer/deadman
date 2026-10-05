@@ -63,7 +63,10 @@ void main() {
     expect(assetSymbol(circleDevnetUsdcMint), 'USDC (Circle)');
     expect(amountText(1500000, circleDevnetUsdcMint), '1.5 USDC (Circle)');
     expect(parseAmount('2.5', circleDevnetUsdcMint), 2500000);
-    expect(presetAssets.map((a) => a.mint), isNot(contains(circleDevnetUsdcMint)));
+    expect(
+      presetAssets.map((a) => a.mint),
+      isNot(contains(circleDevnetUsdcMint)),
+    );
     final other = addr(61);
     expect(assetInfo(other).decimals, 0);
     expect(assetInfo(other).symbol, assetSymbol(other));

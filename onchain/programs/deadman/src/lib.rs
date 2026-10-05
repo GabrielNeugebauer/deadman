@@ -126,9 +126,18 @@ pub mod deadman {
         start_at: i64,
         revocable: bool,
         schedules: Vec<VestingInput>,
+        period_secs: i64,
     ) -> Result<()> {
         instructions::vault::handle_create_vesting(
-            ctx, plan_id, label, guard, lock_secs, start_at, revocable, schedules,
+            ctx,
+            plan_id,
+            label,
+            guard,
+            lock_secs,
+            start_at,
+            revocable,
+            schedules,
+            period_secs,
         )
     }
 
@@ -152,6 +161,28 @@ pub mod deadman {
         index: u8,
     ) -> Result<()> {
         instructions::funds::handle_execute_token_rule(ctx, index)
+    }
+
+    pub fn set_subscription(
+        ctx: Context<SetSubscription>,
+        price_per_period: u64,
+        period_secs: i64,
+        mint: Pubkey,
+        enabled: bool,
+        min_periods: u16,
+    ) -> Result<()> {
+        instructions::subscription::handle_set_subscription(
+            ctx,
+            price_per_period,
+            period_secs,
+            mint,
+            enabled,
+            min_periods,
+        )
+    }
+
+    pub fn subscribe(ctx: Context<Subscribe>, periods: u16) -> Result<()> {
+        instructions::subscription::handle_subscribe(ctx, periods)
     }
 
     pub fn recover_legacy_vault(ctx: Context<RecoverLegacyVault>, plan_id: u16) -> Result<()> {

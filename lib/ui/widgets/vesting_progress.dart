@@ -36,6 +36,14 @@ String vestingStatus(ScheduleProgress p, String? mint, int now) {
         ? 'Revoked · everything vested was released'
         : 'Revoked · capped at ${amountText(p.cap, mint)}';
   }
+  final count = p.installmentCount;
+  if (p.installments && count != null && !p.fullyVested) {
+    final unlocked = p.installmentsUnlocked ?? 0;
+    final head = '$unlocked of $count installments unlocked';
+    return now < p.startAt
+        ? '$head · starts in ${span(p.startAt - now)}'
+        : head;
+  }
   if (now < p.startAt) return 'Starts in ${span(p.startAt - now)}';
   if (now < p.cliffAt) {
     return 'First unlock at the cliff, in ${span(p.cliffAt - now)}';
@@ -44,6 +52,16 @@ String vestingStatus(ScheduleProgress p, String? mint, int now) {
     return 'Unlocking continuously · fully vested in ${span(p.endAt - now)}';
   }
   return p.settled ? 'Fully vested and released' : 'Fully vested';
+}
+
+/// "Next installment: 100 USDC on Nov 3, 2026"; null when none is coming.
+String? nextInstallmentText(ScheduleProgress p, String? mint) {
+  final at = p.nextInstallmentAt;
+  if (!p.installments || at == null || p.nextInstallmentAmount <= 0) {
+    return null;
+  }
+  return 'Next installment: ${amountText(p.nextInstallmentAmount, mint)} on '
+      '${installmentDate(at, p.periodSecs)}';
 }
 
 /// "Vested 250 of 1000 USDC · released 100 USDC".
@@ -133,6 +151,8 @@ class VestingScheduleView extends StatelessWidget {
             color: progress.revoked ? DmColors.warn : DmColors.muted,
           ),
         ),
+        if (nextInstallmentText(progress, rule.mint) case final next?)
+          Text(next, style: small),
       ],
     );
   }

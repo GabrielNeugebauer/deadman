@@ -218,6 +218,11 @@ class DeadmanException implements Exception {
     6026: ('InvalidConfig', 'Treasury must be set'),
     6027: ('MathOverflow', 'Arithmetic overflow'),
     6028: ('NotLegacyVault', 'Not a plan account in an older layout'),
+    6029: ('SubscriptionDisabled', 'Subscriptions are disabled'),
+    6030: (
+      'InvalidSubscription',
+      'Invalid subscription parameters or accounts',
+    ),
   };
 
   /// Clearer wording than the program's `msg` where the user must act.
@@ -248,6 +253,12 @@ class DeadmanException implements Exception {
     6025:
         'Those funds are owed to vesting beneficiaries. You can only withdraw '
         'what is above the amount still to be released to them',
+    6029: 'Monthly plans are not available right now',
+    6030:
+        'A new monthly plan needs at least 12 months paid at once (an active '
+        'one can be extended by any number, up to 36 per payment), or a '
+        "release named the wrong subscription account (update the app). "
+        'Refresh and try again',
   };
 
   static const vaultLocked = 6006;
@@ -264,6 +275,8 @@ class DeadmanException implements Exception {
   static const alreadyRevoked = 6024;
   static const fundsCommitted = 6025;
   static const notLegacyVault = 6028;
+  static const subscriptionDisabled = 6029;
+  static const invalidSubscription = 6030;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -305,6 +318,7 @@ class DeadmanClient implements DeadmanApi {
     this.sponsor,
     this.paymaster,
     this.paymasterSigner = AppConfig.koraPaymasterSigner,
+    this.paymasterToken = AppConfig.usdcMint,
     this.maxFee = AppConfig.koraMaxFee,
     int Function()? clock,
   }) : _now = clock ?? _systemNow,
@@ -329,6 +343,10 @@ class DeadmanClient implements DeadmanApi {
   /// Pinned paymaster key (audit M-3); empty refuses the paymaster.
   final String paymasterSigner;
 
+  /// Token the paymaster accepts. A beneficiary's claim paying out this
+  /// token pays the paymaster from the payout, whatever [feeToken] is.
+  final String paymasterToken;
+
   /// Highest paymaster fee accepted, in fee-token base units.
   final int maxFee;
   final int Function() _now;
@@ -342,9 +360,9 @@ class DeadmanClient implements DeadmanApi {
   /// Wallet-signed builds go through [paymaster] and charge [feeToken].
   bool get paysFeesInToken => paymaster != null && _feeToken != null;
 
-  /// Fee payers of transactions built for the paymaster; signed bytes with
-  /// one of these first are sent through it.
-  final _paymasterPayers = <String>{};
+  /// Fee payers of transactions built for the paymaster or the sponsor;
+  /// signed bytes with one of these first are sent through that node.
+  final _koraPayers = <String, KoraClient>{};
 
   /// Whether the last [pulseWithGuard] or [lockdownWithGuard] was paid by
   /// the guard key because the sponsor failed (down, drained, rejected).
@@ -521,6 +539,140 @@ class DeadmanClient implements DeadmanApi {
   Future<FeeSchedule> fetchFees() async => (await fetchConfig()).fees;
 
   @override
+  Future<SubscriptionTerms?> fetchSubscriptionTerms() async {
+    final data = _programData(await _account(subConfigPda().address));
+    if (data == null) return null;
+    final terms = decodeSubscriptionConfig(data);
+    return terms.enabled ? terms : null;
+  }
+
+  @override
+  Future<AccountSubscription?> fetchSubscription(String owner) async =>
+      _subscriptionOf(owner, await _account(subPda(owner).address));
+
+  /// Subscriptions of [owners] in batched reads (null = never created);
+  /// for sweeps over many plans.
+  Future<Map<String, AccountSubscription?>> fetchSubscriptions(
+    Iterable<String> owners,
+  ) async {
+    final list = owners.toSet().toList();
+    final out = <String, AccountSubscription?>{};
+    // getMultipleAccounts takes at most 100 keys.
+    for (var i = 0; i < list.length; i += 100) {
+      final batch = list.skip(i).take(100).toList();
+      final found = await _net(
+        () => _rpc
+            .getMultipleAccounts(
+              [for (final o in batch) subPda(o).address],
+              commitment: commitment,
+              encoding: Encoding.base64,
+            )
+            .value,
+      );
+      for (var j = 0; j < batch.length; j++) {
+        out[batch[j]] = _subscriptionOf(batch[j], found[j]);
+      }
+    }
+    return out;
+  }
+
+  /// [owner]'s subscription from its PDA account, or null when it is not a
+  /// current `Subscription` of [owner] (as the program reads it).
+  static AccountSubscription? _subscriptionOf(String owner, Account? account) {
+    final data = _programData(account);
+    if (data == null || !hasDiscriminator(data, Disc.subscriptionAccount)) {
+      return null;
+    }
+    try {
+      final sub = decodeSubscription(data);
+      return sub.owner == owner ? sub : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  @override
+  Future<Uint8List> buildSubscribe({
+    required String owner,
+    required int periods,
+  }) async {
+    final terms = await fetchSubscriptionTerms();
+    if (terms == null) {
+      throw DeadmanException.program(DeadmanException.subscriptionDisabled);
+    }
+    final sub = await fetchSubscription(owner);
+    final now = _now();
+    if (subscribeError(terms, sub, periods, now) != null) {
+      throw _subscriptionPeriodsError(terms, sub, now);
+    }
+    final mint = terms.mint;
+    final decimals = await _mintDecimals(mint);
+    final treasury = (await fetchFees()).treasury;
+    if (await _account(ataAddress(treasury, mint)) == null) {
+      throw const DeadmanException(
+        'Monthly plans are not set up on this network yet (no treasury '
+        'account for the payment token).',
+        code: DeadmanException.subscriptionDisabled,
+        name: 'SubscriptionDisabled',
+      );
+    }
+    final cost = terms.cost(periods);
+    final held = await tokenBalance(owner, mint);
+    if (held < cost) {
+      final name = _tokenName(mint);
+      throw DeadmanException(
+        '$periods ${_periodWord(terms, periods)} cost ${_units(cost, decimals)} '
+        '$name and your wallet holds ${_units(held, decimals)} $name.',
+        name: 'NoSubscriptionFunds',
+      );
+    }
+    final exists = sub != null;
+    return _build(
+      owner,
+      (payer) => [
+        subscribeIx(
+          owner: owner,
+          // Only a first payment creates the account; then the paymaster
+          // funds its rent, otherwise the owner signs as a payer of nothing.
+          payer: exists ? owner : payer,
+          mint: mint,
+          treasury: treasury,
+          periods: periods,
+        ),
+      ],
+      // Counts against a fee paid in the same token.
+      spend: {mint: cost},
+    );
+  }
+
+  static DeadmanException _subscriptionPeriodsError(
+    SubscriptionTerms terms,
+    AccountSubscription? sub,
+    int now,
+  ) {
+    const max = SubscriptionTerms.maxPeriods;
+    final min = terms.minPeriodsFor(sub, now);
+    final String message;
+    if (min > 1) {
+      final kind = (sub?.paidUntil ?? 0) == 0 ? 'A new' : 'A lapsed';
+      message =
+          '$kind monthly plan needs at least $min '
+          '${_periodWord(terms, min)} paid at once (up to $max).';
+    } else {
+      message = 'Extend by 1 to $max ${_periodWord(terms, max)} per payment.';
+    }
+    return DeadmanException(
+      message,
+      code: DeadmanException.invalidSubscription,
+      name: 'InvalidSubscription',
+    );
+  }
+
+  /// "months" for ~30-day periods, else "periods".
+  static String _periodWord(SubscriptionTerms terms, int n) =>
+      '${terms.monthly ? 'month' : 'period'}${n == 1 ? '' : 's'}';
+
+  @override
   Future<int> balance(String address) =>
       _net(() => _rpc.getBalance(address, commitment: commitment).value);
 
@@ -633,6 +785,7 @@ class DeadmanClient implements DeadmanApi {
     required int startAt,
     required bool revocable,
     required List<VestingSpec> schedules,
+    int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
   }) async {
@@ -648,6 +801,7 @@ class DeadmanClient implements DeadmanApi {
       startAt: startAt,
       schedules: schedules,
       now: _now(),
+      periodSecs: periodSecs,
     );
     if (code != null) throw DeadmanException.program(code);
     // Rejects Token-2022 and non-mint accounts before anything is signed.
@@ -670,6 +824,7 @@ class DeadmanClient implements DeadmanApi {
       startAt: startAt,
       revocable: revocable,
       schedules: schedules,
+      periodSecs: periodSecs,
     );
     return _build(
       owner,
@@ -943,6 +1098,288 @@ class DeadmanClient implements DeadmanApi {
   );
 
   @override
+  Future<ClaimQuote> quoteClaim({
+    required String claimer,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  }) async {
+    final p = await _claimPayout(claimer, vaultOwner, planId, index);
+    final mint = p.rule.mint;
+    final net = await _netPayout(p);
+    ClaimQuote byWallet([String? problem]) => ClaimQuote(
+      payer: ClaimPayer.wallet,
+      mint: mint,
+      net: net,
+      problem: problem,
+    );
+    if (p.rule.beneficiary != claimer) return byWallet();
+    if (mint == null) {
+      final problem = await _rentProblem(claimer, net);
+      return sponsor == null
+          ? byWallet(problem)
+          : ClaimQuote(
+              payer: ClaimPayer.sponsor,
+              mint: null,
+              net: net,
+              problem: problem,
+            );
+    }
+    final paymaster = _claimPaymaster(mint);
+    if (paymaster == null) return byWallet();
+    final _PaidPlan plan;
+    try {
+      plan = await _paidPlan(paymaster, mint, claimer, p.ixs, hint: _later);
+    } on Object catch (e) {
+      if (!_koraUnavailable(e)) rethrow;
+      return byWallet();
+    }
+    final problem = await _prizeProblem(claimer, mint, plan, net);
+    if (problem != null && await _walletCanClaimToken(claimer, p)) {
+      return byWallet();
+    }
+    return ClaimQuote(
+      payer: ClaimPayer.payout,
+      mint: mint,
+      net: net,
+      feeToken: mint,
+      feeAmount: plan.fee,
+      problem: problem,
+    );
+  }
+
+  @override
+  Future<ClaimTx> buildClaim({
+    required String claimer,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+    bool sponsored = true,
+  }) async {
+    final p = await _claimPayout(claimer, vaultOwner, planId, index);
+    final mint = p.rule.mint;
+    Future<ClaimTx> byWallet([String? note]) async =>
+        ClaimTx(await _build(claimer, p.ixs), ClaimPayer.wallet, note: note);
+    if (p.rule.beneficiary != claimer) return byWallet();
+    final net = await _netPayout(p);
+    if (mint == null) {
+      final problem = await _rentProblem(claimer, net);
+      if (problem != null) {
+        throw DeadmanException(problem, name: 'PayoutBelowRent');
+      }
+      final sponsor = this.sponsor;
+      if (sponsor == null) return byWallet();
+      if (sponsored) {
+        try {
+          return ClaimTx(
+            await _buildSponsored(sponsor, claimer, p.ixs(claimer)),
+            ClaimPayer.sponsor,
+          );
+        } on Object catch (e) {
+          if (!_koraUnavailable(e)) rethrow;
+        }
+        await _checkWalletPays(claimer, 'The free claim service is down');
+        return byWallet(
+          'The free claim service was unreachable, so your wallet paid the '
+          'network fee.',
+        );
+      }
+      await _checkWalletPays(claimer, 'The free claim service refused this');
+      return byWallet();
+    }
+    final paymaster = _claimPaymaster(mint);
+    if (paymaster == null) return byWallet();
+    try {
+      final plan = await _paidPlan(
+        paymaster,
+        mint,
+        claimer,
+        p.ixs,
+        hint: _later,
+      );
+      final problem = await _prizeProblem(claimer, mint, plan, net);
+      if (problem != null) {
+        // Too small for the paymaster: a wallet with a little SOL can still
+        // open its token account and pay the network fee itself.
+        if (await _walletCanClaimToken(claimer, p)) {
+          return await byWallet(
+            'This prize is smaller than the free-claim fee, so your wallet '
+            'paid the network fee in SOL instead.',
+          );
+        }
+        throw DeadmanException(
+          '$problem Add about '
+          '${_units(await _walletTokenClaimCost(claimer, p), 9)} SOL to your '
+          'wallet to claim it yourself.',
+          name: 'PrizeBelowFee',
+        );
+      }
+      return ClaimTx(
+        _sized(_withPayment(paymaster, plan, claimer, mint)),
+        ClaimPayer.payout,
+      );
+    } on Object catch (e) {
+      if (!_koraUnavailable(e)) rethrow;
+    }
+    await _checkWalletPays(claimer, 'The claim fee service is down');
+    return byWallet(
+      'The claim fee service was unreachable, so your wallet paid the '
+      'network fee.',
+    );
+  }
+
+  static const _later = 'Try again later.';
+
+  /// The payout of rule or schedule [index] when [claimer] claims it.
+  Future<_Payout> _claimPayout(
+    String claimer,
+    String vaultOwner,
+    int planId,
+    int index,
+  ) async {
+    final vault = await fetchVault(vaultOwner, planId);
+    if (vault == null) throw const DeadmanException('Vault not found');
+    return vault.isVesting
+        ? _releasePayout(claimer, vaultOwner, planId, index, known: vault)
+        : _executePayout(claimer, vaultOwner, planId, index, known: vault);
+  }
+
+  /// The paymaster, when it takes a claim of [mint] from the payout.
+  KoraClient? _claimPaymaster(String mint) =>
+      mint == paymasterToken && paymasterSigner.isNotEmpty ? paymaster : null;
+
+  /// What the beneficiary receives from [p]: the gross minus the protocol
+  /// fee (none while the owner's subscription covers the plan), which a SOL
+  /// payout keeps when the treasury could not hold it (mirrors the
+  /// program).
+  Future<int> _netPayout(_Payout p) async {
+    final bps = payoutFeeBps(
+      p.fees,
+      p.vault,
+      await fetchSubscription(p.vault.owner),
+      p.rule.rail,
+      _now(),
+    );
+    final fee = (BigInt.from(p.gross) * BigInt.from(bps) ~/ BigInt.from(10000))
+        .toInt();
+    if (p.rule.mint == null &&
+        fee > 0 &&
+        await balance(p.fees.treasury) + fee < await _rentFor(0)) {
+      return p.gross;
+    }
+    return p.gross - fee;
+  }
+
+  /// The program refuses a SOL payout that leaves [beneficiary] below the
+  /// rent-exempt minimum (`BeneficiaryCannotReceive`).
+  Future<String?> _rentProblem(String beneficiary, int net) async {
+    final rent = await _rentFor(0);
+    final held = await balance(beneficiary);
+    if (held + net >= rent) return null;
+    return 'This payout is too small to open your account: a new Solana '
+        'account must hold at least ${_units(rent, 9)} SOL and this pays '
+        '${_units(net, 9)} SOL. Add ${_units(rent - held - net, 9)} SOL to '
+        'your wallet, then claim again.';
+  }
+
+  /// The paymaster fee must come out of the payout plus what the wallet
+  /// already holds of [token].
+  Future<String?> _prizeProblem(
+    String claimer,
+    String token,
+    _PaidPlan plan,
+    int net,
+  ) async {
+    final held = await tokenBalance(claimer, token);
+    if (plan.fee <= net + held) return null;
+    final name = _tokenName(token);
+    return 'This prize is smaller than the claim fee: it pays '
+        '${_units(net, plan.decimals)} $name and claiming costs '
+        '${_units(plan.fee, plan.decimals)} $name. Nothing was signed.';
+  }
+
+  /// SOL a wallet-paid token claim of [p] costs [claimer]: the network fee
+  /// plus rent for the token accounts it opens (its own and the
+  /// treasury's, when missing).
+  Future<int> _walletTokenClaimCost(String claimer, _Payout p) async {
+    final mint = p.rule.mint!;
+    final accounts = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            [ataAddress(claimer, mint), ataAddress(p.fees.treasury, mint)],
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    final missing = accounts.where((a) => a == null).length;
+    return _walletFeeLamports + missing * await _rentFor(_tokenAccountBytes);
+  }
+
+  /// Size of a classic SPL token account.
+  static const _tokenAccountBytes = 165;
+
+  Future<bool> _walletCanClaimToken(String claimer, _Payout p) async =>
+      await balance(claimer) >= await _walletTokenClaimCost(claimer, p);
+
+  /// Before a wallet-paid claim the sponsor would have paid: a wallet with
+  /// no SOL cannot pay the network fee either.
+  Future<void> _checkWalletPays(String claimer, String reason) async {
+    if (paysFeesInToken || await balance(claimer) >= _walletFeeLamports) {
+      return;
+    }
+    throw DeadmanException(
+      '$reason and your wallet has no SOL for the network fee. Try again '
+      'later, or add a little SOL to your wallet.',
+      name: 'SponsorUnavailable',
+    );
+  }
+
+  /// Network fee of a one-signature transaction.
+  static const _walletFeeLamports = 5000;
+
+  /// A Kora failure the wallet can work around by paying itself: the node
+  /// is down, overloaded or refuses by policy (not a program error, which
+  /// would fail the same way, nor a rejected paymaster key or price).
+  static bool _koraUnavailable(Object e) =>
+      e is! DeadmanException ||
+      (e.code == null &&
+          const {
+            'KoraError',
+            'KoraUnauthorized',
+            'RateLimited',
+          }.contains(e.name));
+
+  /// [instructions] with the sponsor's signer as fee payer; the sponsor
+  /// co-signs and sends once [claimer]'s wallet signed its slot.
+  Future<Uint8List> _buildSponsored(
+    KoraClient sponsor,
+    String claimer,
+    List<Instruction> instructions,
+  ) async {
+    final payer = (await _kora(sponsor.getPayerSigner)).signerAddress;
+    if (payer == claimer) {
+      throw const DeadmanException(
+        'The fee sponsor answered with your own key',
+        name: 'KoraError',
+      );
+    }
+    final blockhash = await _kora(sponsor.getBlockhash);
+    _koraPayers[payer] = sponsor;
+    return _sized(
+      serializeUnsigned(
+        instructions,
+        feePayer: payer,
+        recentBlockhash: blockhash,
+      ),
+    );
+  }
+
+  Future<int> _rentFor(int bytes) async => _rent[bytes] ??= await _net(
+    () => _rpc.getMinimumBalanceForRentExemption(bytes, commitment: commitment),
+  );
+
+  @override
   Future<String> releaseVestedWithKey(
     Ed25519HDKeyPair executor, {
     required String vaultOwner,
@@ -1074,11 +1511,11 @@ class DeadmanClient implements DeadmanApi {
       var entry = _inflight[id];
       if (entry == null) {
         final payer = _feePayerOf(tx);
-        final viaPaymaster = _paymasterPayers.contains(payer);
+        final kora = _koraPayers[payer];
         final sent = _send(
           base64Encode(tx),
-          kora: viaPaymaster ? paymaster : null,
-          koraSigner: viaPaymaster ? payer : null,
+          kora: kora,
+          koraSigner: kora == null ? null : payer,
         );
         final e = _SignedSend(
           sent,
@@ -1221,14 +1658,15 @@ class DeadmanClient implements DeadmanApi {
 
   /// Plan [planId] of [vaultOwner], checked to be of the right kind for an
   /// execute/skip ([vesting] false) or release ([vesting] true) of
-  /// [index].
+  /// [index]. [known] is the plan when already fetched.
   Future<VaultState> _payoutVault(
     String vaultOwner,
     int planId,
     int index, {
     required bool vesting,
+    VaultState? known,
   }) async {
-    final vault = await fetchVault(vaultOwner, planId);
+    final vault = known ?? await fetchVault(vaultOwner, planId);
     if (vault == null) throw const DeadmanException('Vault not found');
     if (vault.isVesting != vesting) {
       throw DeadmanException.program(DeadmanException.wrongPlanKind);
@@ -1245,16 +1683,32 @@ class DeadmanClient implements DeadmanApi {
     String vaultOwner,
     int planId,
     int index,
-  ) async {
-    final vault = await _payoutVault(vaultOwner, planId, index, vesting: false);
+  ) async => (await _executePayout(executor, vaultOwner, planId, index)).ixs;
+
+  Future<_Payout> _executePayout(
+    String executor,
+    String vaultOwner,
+    int planId,
+    int index, {
+    VaultState? known,
+  }) async {
+    final vault = await _payoutVault(
+      vaultOwner,
+      planId,
+      index,
+      vesting: false,
+      known: known,
+    );
     final rule = vault.rules[index];
     if (rule.executed) throw DeadmanException.program(6008);
     final mint = rule.mint;
+    var held = vault.withdrawableLamports;
     if (mint != null) {
       await _mintDecimals(mint);
+      held = await tokenBalance(vault.address, mint);
       // A vault that never held the mint has no token account: the program
       // would fail with AccountNotInitialized inside the wallet's preview.
-      if (await tokenBalance(vault.address, mint) <= 0) {
+      if (held <= 0) {
         throw DeadmanException(
           'This plan holds none of ${_tokenName(mint)} yet, so this tier has '
           'nothing to pay. The owner must deposit it first; after the grace '
@@ -1266,33 +1720,55 @@ class DeadmanClient implements DeadmanApi {
       }
     }
     final fees = await fetchFees();
-    return (payer) => executeRuleIxs(
-      executor: executor,
-      vaultOwner: vaultOwner,
-      planId: planId,
+    return (
+      vault: vault,
       rule: rule,
-      index: index,
-      treasury: fees.treasury,
-      payer: payer,
+      fees: fees,
+      gross: vault.payoutGross(index, held),
+      ixs: (String payer) => executeRuleIxs(
+        executor: executor,
+        vaultOwner: vaultOwner,
+        planId: planId,
+        rule: rule,
+        index: index,
+        treasury: fees.treasury,
+        payer: payer,
+      ),
     );
   }
 
-  /// Rejects what `release_vested_*` would, as far as the client knows
-  /// (the chain clock decides at the edges).
   Future<List<Instruction> Function(String payer)> _releaseVestedIxs(
     String executor,
     String vaultOwner,
     int planId,
     int index,
-  ) async {
-    final vault = await _payoutVault(vaultOwner, planId, index, vesting: true);
+  ) async => (await _releasePayout(executor, vaultOwner, planId, index)).ixs;
+
+  /// Rejects what `release_vested_*` would, as far as the client knows
+  /// (the chain clock decides at the edges).
+  Future<_Payout> _releasePayout(
+    String executor,
+    String vaultOwner,
+    int planId,
+    int index, {
+    VaultState? known,
+  }) async {
+    final vault = await _payoutVault(
+      vaultOwner,
+      planId,
+      index,
+      vesting: true,
+      known: known,
+    );
     final rule = vault.rules[index];
     if (rule.executed) {
       throw DeadmanException.program(DeadmanException.ruleAlreadyExecuted);
     }
-    if (vault.claimable(index, _now()) <= 0) {
-      throw const DeadmanException(
-        'Nothing new has vested on this schedule yet.',
+    final now = _now();
+    final due = vault.claimable(index, now);
+    if (due <= 0) {
+      throw DeadmanException(
+        await _nothingUnlockedMessage(vault, index, now),
         code: DeadmanException.nothingToPay,
         name: 'NothingToPay',
       );
@@ -1306,15 +1782,40 @@ class DeadmanClient implements DeadmanApi {
     }
     if (mint != null) await _mintDecimals(mint);
     final fees = await fetchFees();
-    return (payer) => releaseVestedIxs(
-      executor: executor,
-      vaultOwner: vaultOwner,
-      planId: planId,
+    return (
+      vault: vault,
       rule: rule,
-      index: index,
-      treasury: fees.treasury,
-      payer: payer,
+      fees: fees,
+      gross: due < held ? due : held,
+      ixs: (String payer) => releaseVestedIxs(
+        executor: executor,
+        vaultOwner: vaultOwner,
+        planId: planId,
+        rule: rule,
+        index: index,
+        treasury: fees.treasury,
+        payer: payer,
+      ),
     );
+  }
+
+  /// Why schedule [index] has nothing to release at [now]: for installment
+  /// vesting, when the next installment unlocks and how much it pays.
+  Future<String> _nothingUnlockedMessage(
+    VaultState vault,
+    int index,
+    int now,
+  ) async {
+    final next = vault.nextInstallmentAt(index, now);
+    if (next == null) return 'Nothing new has vested on this schedule yet.';
+    final rule = vault.rules[index];
+    final amount = vault.vested(index, next) - rule.released;
+    final mint = rule.mint;
+    final asset = mint == null
+        ? '${_units(amount, 9)} SOL'
+        : '${_units(amount, await _mintDecimals(mint))} ${_tokenName(mint)}';
+    return 'Nothing new has unlocked yet. Next installment: $asset on '
+        '${_utcMinute(next)}.';
   }
 
   Future<Account?> _account(String address) => _net(
@@ -1404,6 +1905,10 @@ class DeadmanClient implements DeadmanApi {
         recentBlockhash: bh.blockhash,
       );
     }
+    return _sized(tx);
+  }
+
+  static Uint8List _sized(Uint8List tx) {
     if (tx.length > maxTxBytes) {
       throw const DeadmanException(
         'This is too much for one transaction. Split it into smaller steps '
@@ -1424,6 +1929,37 @@ class DeadmanClient implements DeadmanApi {
     List<Instruction> Function(String payer) instructions,
     Map<String, int> spend,
   ) async {
+    final plan = await _paidPlan(paymaster, token, signer, instructions);
+    final fee = plan.fee;
+    final decimals = plan.decimals;
+    final extra = spend[token] ?? 0;
+    final needed = fee + (extra > 0 ? extra : 0);
+    final held = await tokenBalance(signer, token) + (extra < 0 ? -extra : 0);
+    if (held < needed) {
+      final name = _tokenName(token);
+      throw DeadmanException(
+        'Not enough $name for the network fee: this needs '
+        '${_units(fee, decimals)} $name'
+        '${extra > 0 ? ' plus the ${_units(extra, decimals)} $name moved' : ''}'
+        ', the wallet holds ${_units(held, decimals)}. Add $name or switch '
+        'network fees back to SOL.',
+        name: 'NoFeeToken',
+      );
+    }
+    return _withPayment(paymaster, plan, signer, token);
+  }
+
+  static const _feesToSol = 'Switch network fees back to SOL.';
+
+  /// [instructions] with the pinned paymaster as fee and rent payer, priced
+  /// by it in [token]. [hint] ends errors about the paymaster itself.
+  Future<_PaidPlan> _paidPlan(
+    KoraClient paymaster,
+    String token,
+    String signer,
+    List<Instruction> Function(String payer) instructions, {
+    String hint = _feesToSol,
+  }) async {
     final pinned = paymasterSigner;
     if (pinned.isEmpty) {
       throw const DeadmanException(
@@ -1433,7 +1969,7 @@ class DeadmanClient implements DeadmanApi {
       );
     }
     final payer = await _kora(paymaster.getPayerSigner);
-    _checkPaymasterKey(payer.signerAddress, payer.paymentAddress);
+    _checkPaymasterKey(payer.signerAddress, payer.paymentAddress, hint);
     final kora = payer.signerAddress;
     final blockhash = await _kora(paymaster.getBlockhash);
     final decimals = await _mintDecimals(token);
@@ -1451,12 +1987,11 @@ class DeadmanClient implements DeadmanApi {
         signerKey: kora,
       ),
     );
-    _checkPaymasterKey(estimate.signerPubkey, estimate.paymentAddress);
+    _checkPaymasterKey(estimate.signerPubkey, estimate.paymentAddress, hint);
     final fee = estimate.feeInToken;
     if (fee == null || fee < 0) {
       throw DeadmanException(
-        'The fee service does not accept ${_tokenName(token)}. Switch '
-        'network fees back to SOL.',
+        'The fee service does not accept ${_tokenName(token)}. $hint',
         name: 'KoraError',
       );
     }
@@ -1465,51 +2000,52 @@ class DeadmanClient implements DeadmanApi {
       throw DeadmanException(
         'The fee service asks ${_units(fee, decimals)} $name for this, more '
         'than the ${_units(maxFee, decimals)} $name limit. Nothing was '
-        'signed. Switch network fees back to SOL.',
+        'signed. $hint',
         name: 'KoraFeeTooHigh',
       );
     }
-    final extra = spend[token] ?? 0;
-    final needed = fee + (extra > 0 ? extra : 0);
-    final held = await tokenBalance(signer, token) + (extra < 0 ? -extra : 0);
-    if (held < needed) {
-      final name = _tokenName(token);
-      throw DeadmanException(
-        'Not enough $name for the network fee: this needs '
-        '${_units(fee, decimals)} $name'
-        '${extra > 0 ? ' plus the ${_units(extra, decimals)} $name moved' : ''}'
-        ', the wallet holds ${_units(held, decimals)}. Add $name or switch '
-        'network fees back to SOL.',
-        name: 'NoFeeToken',
-      );
-    }
-    _paymasterPayers.add(kora);
+    return (
+      kora: kora,
+      blockhash: blockhash,
+      ixs: ixs,
+      fee: fee,
+      decimals: decimals,
+    );
+  }
+
+  /// [plan] followed by the signer's [token] payment to the paymaster.
+  Uint8List _withPayment(
+    KoraClient paymaster,
+    _PaidPlan plan,
+    String signer,
+    String token,
+  ) {
+    _koraPayers[plan.kora] = paymaster;
     return serializeUnsigned(
       [
-        ...ixs,
-        if (fee > 0)
+        ...plan.ixs,
+        if (plan.fee > 0)
           transferCheckedIx(
             source: ataAddress(signer, token),
             mint: token,
             destination: ataAddress(paymasterSigner, token),
             authority: signer,
-            amount: fee,
-            decimals: decimals,
+            amount: plan.fee,
+            decimals: plan.decimals,
           ),
       ],
-      feePayer: kora,
-      recentBlockhash: blockhash,
+      feePayer: plan.kora,
+      recentBlockhash: plan.blockhash,
     );
   }
 
   /// The paymaster must be the pinned key, as fee payer and as payment
   /// address, so a tampered response cannot take the fee (audit M-3).
-  void _checkPaymasterKey(String signer, String paymentAddress) {
+  void _checkPaymasterKey(String signer, String paymentAddress, String hint) {
     if (signer != paymasterSigner || paymentAddress != paymasterSigner) {
       throw DeadmanException(
         'The fee service answered as $signer (payments to $paymentAddress), '
-        'not the expected $paymasterSigner. Nothing was signed. Switch '
-        'network fees back to SOL.',
+        'not the expected $paymasterSigner. Nothing was signed. $hint',
         name: 'KoraUntrusted',
       );
     }
@@ -1589,12 +2125,18 @@ class DeadmanClient implements DeadmanApi {
     return out;
   }
 
-  Future<int> _ataRent() async => _rent[165] ??= await _net(
-    () => _rpc.getMinimumBalanceForRentExemption(165, commitment: commitment),
-  );
+  Future<int> _ataRent() => _rentFor(165);
 
   static String _tokenName(String mint) =>
       mint == AppConfig.usdcMint ? 'USDC' : 'token ${mint.substring(0, 4)}…';
+
+  /// [unixSecs] as `yyyy-MM-dd HH:mm UTC`.
+  static String _utcMinute(int unixSecs) {
+    final t = DateTime.fromMillisecondsSinceEpoch(unixSecs * 1000, isUtc: true);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)} UTC';
+  }
 
   /// [amount] base units as a decimal string, e.g. 12340 at 6 -> 0.01234.
   static String _units(int amount, int decimals) {
@@ -1879,3 +2421,22 @@ class _SignedSend {
   final Future<String> done;
   DateTime? confirmedAt;
 }
+
+/// A rule or schedule payout as the client predicts it: [gross] before the
+/// protocol fee, and its instructions for a given rent payer.
+typedef _Payout = ({
+  VaultState vault,
+  RuleState rule,
+  FeeSchedule fees,
+  int gross,
+  List<Instruction> Function(String payer) ixs,
+});
+
+/// A paymaster-paid transaction before its fee payment.
+typedef _PaidPlan = ({
+  String kora,
+  String blockhash,
+  List<Instruction> ixs,
+  int fee,
+  int decimals,
+});

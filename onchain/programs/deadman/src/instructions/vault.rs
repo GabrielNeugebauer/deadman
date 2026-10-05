@@ -298,7 +298,8 @@ pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
 }
 
 /// Creates a vesting plan: each schedule vests linearly from `start_at`
-/// regardless of check-ins. Revocable plans let the owner stop future
+/// regardless of check-ins, continuously (`period_secs` 0) or in
+/// installments of `period_secs`. Revocable plans let the owner stop future
 /// vesting; what already vested always stays with the beneficiary.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_create_vesting(
@@ -310,6 +311,7 @@ pub fn handle_create_vesting(
     start_at: i64,
     revocable: bool,
     schedules: Vec<VestingInput>,
+    period_secs: i64,
 ) -> Result<()> {
     let owner = ctx.accounts.owner.key();
     require!(
@@ -333,7 +335,7 @@ pub fn handle_create_vesting(
     vault.rent_paid = init_rent(vault)?;
     vault.set_label(label)?;
     let key = vault.key();
-    vault.apply_vesting(&key, now, start_at, &schedules)?;
+    vault.apply_vesting(&key, now, start_at, period_secs, &schedules)?;
     vault.record_owner_pulse(now)?;
     emit!(VaultCreated {
         vault: key,

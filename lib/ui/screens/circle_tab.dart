@@ -33,6 +33,7 @@ class CircleTab extends ConsumerWidget {
       ref.invalidate(watchedTokenBalancesProvider);
       ref.invalidate(claimFundsProvider);
       ref.invalidate(transferStatusProvider);
+      ref.invalidate(claimQuoteProvider);
     }
 
     return SafeArea(
@@ -100,10 +101,34 @@ class _PersonCard extends ConsumerStatefulWidget {
 class _PersonCardState extends ConsumerState<_PersonCard> {
   bool _busy = false;
 
-  Future<void> _run(Future<void> Function() action, String success) async {
+  /// Claims rule or schedule [index]; the toast adds why it was not free
+  /// as quoted, if so.
+  Future<void> _claim(int index, String success) async {
     setState(() => _busy = true);
-    await runGuarded(context, action, success: success);
+    String? note;
+    final ok = await runGuarded(context, () async {
+      note = await ref.read(actionsProvider).claim(widget.vault, index);
+    });
+    if (ok && mounted) {
+      toast(context, note == null ? success : '$success. $note');
+    }
     if (mounted) setState(() => _busy = false);
+  }
+
+  /// Quote for the connected wallet's own claim of [index]; null while
+  /// unknown or when someone else (a claim key) is the beneficiary.
+  ClaimQuote? _quote(int index, bool claimable) {
+    final v = widget.vault;
+    if (!claimable || v.rules[index].beneficiary != widget.me) return null;
+    return ref
+        .watch(
+          claimQuoteProvider((
+            vaultOwner: v.owner,
+            planId: v.planId,
+            index: index,
+          )),
+        )
+        .value;
   }
 
   Future<void> _route(RuleState r) async {
@@ -122,6 +147,12 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
         if (widget.keys.contains(r.beneficiary)) (i, r),
     ];
     final next = v.nextRuleDue;
+    // The owner's account-wide monthly plan waives the protocol fee.
+    final waived = feeWaivedFor(
+      v,
+      ref.watch(watchedSubscriptionsProvider).value?[v.owner],
+      now,
+    );
 
     final (status, color) = v.isVesting
         ? v.revokedAt != 0
@@ -149,7 +180,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
         ? ('Locked down', DmColors.warn)
         : ('Alive', DmColors.alive);
 
-    final actions = ref.read(actionsProvider);
     final tokens = ref
         .watch(watchedTokenBalancesProvider)
         .whenOrNull(data: (b) => b[v.address] ?? const <String, int>{});
@@ -217,10 +247,13 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     live: live,
                     web: web,
                     funded: tierFunded(v, i, tokens),
-                    onClaim: () => _run(
-                      () => actions.releaseVested(v, i),
-                      'Vested amount claimed',
+                    quote: _quote(
+                      i,
+                      v.claimable(i, now) > 0 &&
+                          tierFunded(v, i, tokens) != false,
                     ),
+                    waived: waived,
+                    onClaim: () => _claim(i, 'Vested amount claimed'),
                     onRoute: () => _route(r),
                   ),
                 ],
@@ -250,10 +283,13 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                       style: FilledButton.styleFrom(
                         backgroundColor: DmColors.danger,
                       ),
-                      onPressed: _busy || tierFunded(v, i, tokens) == false
+                      onPressed:
+                          _busy ||
+                              tierFunded(v, i, tokens) == false ||
+                              _quote(i, true)?.problem != null
                           ? null
-                          : () => _run(
-                              () => actions.executeRule(v, i),
+                          : () => _claim(
+                              i,
                               r.skipped
                                   ? 'Reserved share claimed'
                                   : 'Tier released',
@@ -266,10 +302,13 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     ),
                     if (tierFunded(v, i, tokens) == false)
                       _Note(waitingForFunds(r.mint))
+                    else if (_quote(i, true) case final q?)
+                      _ClaimCost(q)
                     else if (r.rail != Rail.solana)
                       const _Note(
                         'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
                       ),
+                    if (waived) _Note(feeWaivedText(_quote(i, true))),
                   ],
                   // Tiers past due and grace that cannot pay: the keeper
                   // skips them; nobody does it by hand.
@@ -319,6 +358,8 @@ class _VestingClaim extends StatelessWidget {
     required this.live,
     required this.web,
     required this.funded,
+    required this.quote,
+    required this.waived,
     required this.onClaim,
     required this.onRoute,
   });
@@ -333,6 +374,12 @@ class _VestingClaim extends StatelessWidget {
 
   /// The plan holds some of the schedule's asset; null when unknown.
   final bool? funded;
+
+  /// What claiming costs this wallet; null when unknown.
+  final ClaimQuote? quote;
+
+  /// The owner's monthly plan waives the protocol fee.
+  final bool waived;
   final VoidCallback onClaim;
   final VoidCallback onRoute;
 
@@ -352,13 +399,18 @@ class _VestingClaim extends StatelessWidget {
           const SizedBox(height: 10),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: DmColors.plus),
-            onPressed: busy || funded == false ? null : onClaim,
+            onPressed: busy || funded == false || quote?.problem != null
+                ? null
+                : onClaim,
             child: Text('Claim vested ${amountText(p.claimable, rule.mint)}'),
           ),
           if (funded == false)
             _Note(waitingForFunds(rule.mint))
+          else if (quote case final q?)
+            _ClaimCost(q)
           else if (rule.rail != Rail.solana)
             const _Note('Claiming from your wallet links it to this payout.'),
+          if (waived) _Note(feeWaivedText(quote)),
         ],
         if (rule.paid > 0 &&
             rule.rail != Rail.solana &&
@@ -377,6 +429,47 @@ class _VestingClaim extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Under a claim button: what claiming costs, or why it cannot go through.
+class _ClaimCost extends StatelessWidget {
+  const _ClaimCost(this.quote);
+
+  final ClaimQuote quote;
+
+  @override
+  Widget build(BuildContext context) {
+    final problem = quote.problem;
+    final text =
+        problem ??
+        switch (quote.payer) {
+          ClaimPayer.sponsor => 'Free: no SOL needed, Deadman pays the fee',
+          ClaimPayer.payout when quote.feeAmount == 0 => 'Free',
+          ClaimPayer.payout =>
+            'Fee ${amountText(quote.feeAmount, quote.feeToken)}, taken '
+                'from the prize',
+          ClaimPayer.wallet => 'Your wallet pays the network fee',
+        };
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: problem == null ? DmColors.muted : DmColors.warn,
+          fontSize: 12,
+          height: 1.35,
+        ),
+      ),
+    );
+  }
+}
+
+/// Next to a claim from a plan whose protocol fee the owner's monthly plan
+/// waives; with [quote], what the claim pays.
+String feeWaivedText(ClaimQuote? quote) {
+  const text = "No protocol fee (owner's monthly plan)";
+  if (quote == null || quote.problem != null) return text;
+  return '$text · you receive ${amountText(quote.net, quote.mint)}';
 }
 
 String waitingForFunds(String? mint) =>

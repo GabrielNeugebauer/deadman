@@ -9,12 +9,14 @@ import '../../state/actions.dart';
 import '../../state/assets.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
+import '../../state/subscription.dart';
 import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/amount_dialog.dart';
 import '../widgets/feedback.dart';
+import '../widgets/plan_pricing.dart';
 import '../widgets/pulse_ring.dart';
 import '../widgets/vesting_progress.dart';
 import 'rules_editor.dart';
@@ -77,6 +79,7 @@ class _PulseTabState extends ConsumerState<PulseTab> {
                         ref.invalidate(vaultsProvider);
                         ref.invalidate(planUsdcProvider);
                         ref.invalidate(planTokenBalancesProvider);
+                        ref.invalidate(accountSubscriptionProvider);
                       },
                       child: _Dashboard(plans: list, now: _now),
                     ),
@@ -237,12 +240,18 @@ class _Dashboard extends ConsumerWidget {
                   ref.invalidate(vaultsProvider);
                   ref.invalidate(planUsdcProvider);
                   ref.invalidate(planTokenBalancesProvider);
+                  ref.invalidate(accountSubscriptionProvider);
                 },
                 icon: const Icon(Icons.refresh),
               ),
           ],
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 8),
+        const MonthlyPlanCard(
+          compact: true,
+          margin: EdgeInsets.only(bottom: 4),
+        ),
+        const SizedBox(height: 12),
         Center(
           child: PulseRing(
             progress: progress,
@@ -703,6 +712,7 @@ class _PlanCard extends ConsumerWidget {
                   style: const TextStyle(color: DmColors.warn),
                 ),
               ),
+            PlanFeeLine(vault: vault, now: now),
             const SizedBox(height: 10),
             Padding(
               padding: const EdgeInsets.only(right: 10),
@@ -890,6 +900,7 @@ class _ArmIntro extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final fees = ref.watch(feesProvider).value;
+    final terms = ref.watch(subscriptionTermsProvider).value;
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
@@ -926,10 +937,11 @@ class _ArmIntro extends ConsumerWidget {
         ),
         const SizedBox(height: 10),
         Text(
-          fees == null
-              ? 'No subscription. Deadman only charges when a tier releases funds.'
-              : 'No subscription. Deadman only charges when a tier releases funds: '
-                    '${fees.feeBpsPublic / 100}% on Solana transfers, ${fees.feeBpsPrivate / 100}% on private rails.',
+          '${fees == null ? 'Deadman only charges when a tier releases funds.' : 'Deadman only charges when a tier releases funds: '
+                    '${percentText(fees.feeBpsPublic / 10000)} on Solana transfers, ${percentText(fees.feeBpsPrivate / 10000)} on private rails.'}'
+          '${terms == null ? '' : ' Or pay a flat ${amountText(terms.pricePerPeriod, terms.mint)} '
+                    '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} for all your plans instead '
+                    '(${terms.minPeriods} ${periodWord(terms, terms.minPeriods)} minimum).'}',
           textAlign: TextAlign.center,
           style: const TextStyle(
             color: DmColors.muted,
@@ -1253,6 +1265,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
                   style: const TextStyle(color: DmColors.warn),
                 ),
               ),
+            PlanFeeLine(vault: v, now: now),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,

@@ -28,9 +28,13 @@ abstract final class Disc {
   static const releaseVestedSol = [136, 188, 48, 45, 14, 211, 200, 228];
   static const releaseVestedToken = [50, 241, 129, 168, 233, 106, 179, 16];
   static const recoverLegacyVault = [202, 5, 20, 4, 206, 216, 105, 134];
+  static const setSubscription = [63, 240, 195, 242, 14, 124, 40, 179];
+  static const subscribe = [254, 28, 191, 138, 156, 179, 183, 53];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
+  static const subscriptionConfigAccount = [4, 195, 89, 89, 82, 60, 44, 175];
+  static const subscriptionAccount = [64, 7, 26, 135, 102, 132, 98, 33];
 }
 
 /// `Vault::SPACE` (8 + `Vault::INIT_SPACE`). A Vault account of any other
@@ -63,6 +67,10 @@ abstract final class Limits {
   };
   static const maxVestSecs = 20 * 366 * 86400;
   static const maxVestStartSkewSecs = 366 * 86400;
+  static const minVestPeriodSecs = 60;
+  static const minSubPeriodSecs = 86400;
+  static const maxSubPeriodSecs = 366 * 86400;
+  static const maxSubPeriods = 36;
 }
 
 const systemProgramId = SystemProgram.programId;
@@ -114,6 +122,13 @@ bool labelFits(String label) =>
     utf8.encode(label).length <= Limits.maxLabelBytes;
 
 Pda configPda() => findPda([utf8.encode('config')]);
+
+Pda subConfigPda() => findPda([utf8.encode('sub_config')]);
+
+/// [owner]'s account-wide subscription (`Subscription`), which every payout
+/// instruction of the owner's plans names.
+Pda subPda(String owner) =>
+    findPda([utf8.encode('sub'), Ed25519HDPublicKey.fromBase58(owner).bytes]);
 
 /// Classic SPL Token associated token account of [owner] for [mint].
 String ataAddress(String owner, String mint) => findPda([
@@ -300,6 +315,7 @@ Uint8List encodeCreateVesting({
   required int startAt,
   required bool revocable,
   required List<VestingSpec> schedules,
+  int periodSecs = 0,
 }) =>
     (BorshWriter()
           ..bytes(Disc.createVesting)
@@ -309,7 +325,8 @@ Uint8List encodeCreateVesting({
           ..i64(lockSecs)
           ..i64(startAt)
           ..u8(revocable ? 1 : 0)
-          ..vestingInputs(schedules))
+          ..vestingInputs(schedules)
+          ..i64(periodSecs))
         .toBytes();
 
 Uint8List encodeUpdatePolicy({
@@ -371,6 +388,65 @@ Uint8List encodeRecoverLegacyVault(int planId) =>
           ..bytes(Disc.recoverLegacyVault)
           ..u16(planId))
         .toBytes();
+
+Uint8List encodeSubscribe(int periods) =>
+    (BorshWriter()
+          ..bytes(Disc.subscribe)
+          ..u16(periods))
+        .toBytes();
+
+Uint8List encodeSetSubscription({
+  required int pricePerPeriod,
+  required int periodSecs,
+  required String mint,
+  required bool enabled,
+  required int minPeriods,
+}) =>
+    (BorshWriter()
+          ..bytes(Disc.setSubscription)
+          ..u64(pricePerPeriod)
+          ..i64(periodSecs)
+          ..pubkey(mint)
+          ..u8(enabled ? 1 : 0)
+          ..u16(minPeriods))
+        .toBytes();
+
+/// Mirrors the checks of `set_subscription`: the program error code the
+/// chain would raise (6030 `InvalidSubscription`), or null if valid.
+int? setSubscriptionError({
+  required int pricePerPeriod,
+  required int periodSecs,
+  required String mint,
+  required int minPeriods,
+}) {
+  if (pricePerPeriod <= 0 ||
+      periodSecs < Limits.minSubPeriodSecs ||
+      periodSecs > Limits.maxSubPeriodSecs ||
+      minPeriods < 1 ||
+      minPeriods > Limits.maxSubPeriods ||
+      mint == defaultPubkey) {
+    return 6030;
+  }
+  return null;
+}
+
+/// Mirrors the checks of `subscribe` on [periods] for an owner whose
+/// subscription is [sub] (null = never created): the program error code the
+/// chain would raise, or null if valid. [now] is unix seconds.
+int? subscribeError(
+  SubscriptionTerms terms,
+  AccountSubscription? sub,
+  int periods,
+  int now,
+) {
+  if (!terms.enabled) return 6029;
+  if (periods < 1 ||
+      periods > Limits.maxSubPeriods ||
+      periods < terms.minPeriodsFor(sub, now)) {
+    return 6030;
+  }
+  return null;
+}
 
 /// Tiers `update_policy` keeps as history in front of the new rules: every
 /// paid or skipped one, or none once every tier has paid.
@@ -444,6 +520,7 @@ int? vestingError({
   required int startAt,
   required List<VestingSpec> schedules,
   required int now,
+  int periodSecs = 0,
 }) {
   if (guard == defaultPubkey || guard == owner) return 6005;
   if (lockSecs < Limits.minLockSecs || lockSecs > Limits.maxLockSecs) {
@@ -466,6 +543,11 @@ int? vestingError({
         v.beneficiary == guard ||
         v.beneficiary == vault ||
         v.mint == defaultPubkey) {
+      return 6022;
+    }
+    if (periodSecs != 0 &&
+        (periodSecs < Limits.minVestPeriodSecs ||
+            periodSecs > v.durationSecs)) {
       return 6022;
     }
   }
@@ -530,7 +612,9 @@ VaultState decodeVault(
     ),
   );
   final label = r.string();
-  r.u8(); // bump; 64 reserved (zero) bytes follow.
+  r.u8(); // bump
+  r.u8(); // stipend_paid
+  final vestPeriodSecs = r.i64(); // 55 reserved (zero) bytes follow.
   final rentReserve = rentPaid > rentExemptMinimum
       ? rentPaid
       : rentExemptMinimum;
@@ -560,6 +644,7 @@ VaultState decodeVault(
     revokedAt: revokedAt,
     rentPayer: rentPayer,
     rentPaid: rentPaid,
+    vestPeriodSecs: vestPeriodSecs,
   );
 }
 
@@ -584,6 +669,38 @@ DeadmanConfig decodeConfig(List<int> data) {
     ),
   );
 }
+
+SubscriptionTerms decodeSubscriptionConfig(List<int> data) {
+  if (!hasDiscriminator(data, Disc.subscriptionConfigAccount)) {
+    throw const FormatException('Not a SubscriptionConfig account');
+  }
+  final r = BorshReader(data)..offset = 8;
+  final price = r.u64();
+  final periodSecs = r.i64();
+  final mint = r.pubkey();
+  final enabled = r.boolean();
+  r.u8(); // bump
+  return SubscriptionTerms(
+    pricePerPeriod: price,
+    periodSecs: periodSecs,
+    mint: mint,
+    enabled: enabled,
+    minPeriods: r.u16(),
+  );
+}
+
+/// `Subscription` account (owner, paid_until, bump, reserved).
+AccountSubscription decodeSubscription(List<int> data) {
+  if (!hasDiscriminator(data, Disc.subscriptionAccount) ||
+      data.length < subscriptionAccountSize) {
+    throw const FormatException('Not a Subscription account');
+  }
+  final r = BorshReader(data)..offset = 8;
+  return AccountSubscription(owner: r.pubkey(), paidUntil: r.i64());
+}
+
+/// `Subscription::SPACE`.
+const subscriptionAccountSize = 81;
 
 /// `decimals` of an SPL mint account.
 int decodeMintDecimals(List<int> data) {
@@ -708,6 +825,53 @@ Instruction createVaultIx({
   _r(systemProgramId),
 ], data);
 
+/// `subscribe`: [owner] pays its account-wide subscription in [mint] from
+/// its ATA into the treasury's ATA (classic SPL Token). [payer] (default
+/// [owner]; or a fee sponsor) funds the subscription account's rent when it
+/// is created.
+Instruction subscribeIx({
+  required String owner,
+  String? payer,
+  required String mint,
+  required String treasury,
+  required int periods,
+}) => deadmanIx([
+  _r(owner, signer: true),
+  _w(payer ?? owner, signer: true),
+  _w(subPda(owner).address),
+  _r(configPda().address),
+  _r(subConfigPda().address),
+  _r(mint),
+  _w(ataAddress(owner, mint)),
+  _w(ataAddress(treasury, mint)),
+  _r(tokenProgramId),
+  _r(systemProgramId),
+], encodeSubscribe(periods));
+
+/// `set_subscription` (admin only; creates the config on first use).
+Instruction setSubscriptionIx({
+  required String admin,
+  required int pricePerPeriod,
+  required int periodSecs,
+  required String mint,
+  required bool enabled,
+  required int minPeriods,
+}) => deadmanIx(
+  [
+    _w(admin, signer: true),
+    _r(configPda().address),
+    _w(subConfigPda().address),
+    _r(systemProgramId),
+  ],
+  encodeSetSubscription(
+    pricePerPeriod: pricePerPeriod,
+    periodSecs: periodSecs,
+    mint: mint,
+    enabled: enabled,
+    minPeriods: minPeriods,
+  ),
+);
+
 /// `close_vault`: the rent goes back to [rentPayer] (`Vault.rent_payer`),
 /// everything above it to the owner.
 Instruction closeVaultIx({
@@ -824,7 +988,9 @@ List<Instruction> releaseVestedIxs({
   data: encodeReleaseVested(index, token: rule.mint != null),
 );
 
-/// [payer] (default: [executor]) funds any missing ATA.
+/// [payer] (default: [executor]) funds any missing ATA. Every payout names
+/// the owner's subscription PDA, created or not, last (before any
+/// Token-2022 hook accounts).
 List<Instruction> _payoutIxs({
   required String executor,
   required String vaultOwner,
@@ -844,6 +1010,7 @@ List<Instruction> _payoutIxs({
         _r(configPda().address),
         _w(rule.beneficiary),
         _w(treasury),
+        _r(subPda(vaultOwner).address),
       ], data),
     ];
   }
@@ -865,6 +1032,7 @@ List<Instruction> _payoutIxs({
       _w(ataAddress(rule.beneficiary, mint)),
       _w(ataAddress(treasury, mint)),
       _r(tokenProgramId),
+      _r(subPda(vaultOwner).address),
     ], data),
   ];
 }

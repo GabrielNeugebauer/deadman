@@ -1,6 +1,8 @@
 // Devnet end-to-end check of USDC vesting with network fees paid in USDC
 // through the Kora paymaster gateway: an owner holding no SOL creates a
-// revocable USDC vesting plan, releases twice and closes it.
+// revocable USDC vesting plan paying in two 60 s installments, checks that
+// nothing more can be claimed between installments, releases each one and
+// closes it.
 //
 // Needs the Kora stack (scripts/kora_start.sh) accepting --mint, and the
 // `spl-token` CLI whose default wallet holds --mint to fund the owner.
@@ -86,9 +88,10 @@ Future<void> main(List<String> argv) async {
           mint: mint,
           total: 10000000,
           cliffSecs: 0,
-          durationSecs: 90,
+          durationSecs: 120,
         ),
       ],
+      periodSecs: 60,
       tokenDeposits: {mint: 10000000},
     ),
   );
@@ -96,31 +99,26 @@ Future<void> main(List<String> argv) async {
   stdout.writeln(
     'vault ${vault.address} kind=${vault.kind.name} '
     'rentPayer=${vault.rentPayer} '
+    'period=${vault.vestPeriodSecs} '
     'held=${await usdc(vault.address)}',
+  );
+  Future<Uint8List> release() => client.buildReleaseVested(
+    executor: owner.address,
+    vaultOwner: owner.address,
+    planId: 0,
+    index: 0,
   );
 
   await Future<void>.delayed(const Duration(seconds: 30));
-  await step(
-    'release #1 (Kora pays heir ATA)',
-    () => client.buildReleaseVested(
-      executor: owner.address,
-      vaultOwner: owner.address,
-      planId: 0,
-      index: 0,
-    ),
-  );
-  stdout.writeln('heir USDC ${await usdc(heir.address)}');
+  await _expectNothingToPay('before the first installment', release);
 
-  await Future<void>.delayed(const Duration(seconds: 65));
-  await step(
-    'release #2 (fully vested, basic tier)',
-    () => client.buildReleaseVested(
-      executor: owner.address,
-      vaultOwner: owner.address,
-      planId: 0,
-      index: 0,
-    ),
-  );
+  await Future<void>.delayed(const Duration(seconds: 35));
+  await step('release #1 (installment 1 of 2, Kora pays heir ATA)', release);
+  stdout.writeln('heir USDC ${await usdc(heir.address)}');
+  await _expectNothingToPay('right after installment 1', release);
+
+  await Future<void>.delayed(const Duration(seconds: 60));
+  await step('release #2 (fully vested, basic tier)', release);
   vault = (await client.fetchVault(owner.address, 0))!;
   final heirGot = await usdc(heir.address);
   stdout.writeln(
@@ -138,6 +136,23 @@ Future<void> main(List<String> argv) async {
   if ((heirGot - 9800000).abs() > 2) exit(1);
   stdout.writeln('E2E OK');
   exit(0);
+}
+
+/// Fails the run unless [build] is refused with `NothingToPay` ([when]
+/// names the moment).
+Future<void> _expectNothingToPay(
+  String when,
+  Future<Uint8List> Function() build,
+) async {
+  try {
+    await build();
+  } on DeadmanException catch (e) {
+    if (e.name != 'NothingToPay') rethrow;
+    stdout.writeln('release $when refused: ${e.message}');
+    return;
+  }
+  stderr.writeln('release $when was allowed: installments are not enforced');
+  exit(1);
 }
 
 Future<void> _run(String cmd, List<String> args) async {

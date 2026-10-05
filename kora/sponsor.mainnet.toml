@@ -1,6 +1,7 @@
 # Deadman SPONSOR node, MAINNET (Kora 2.0.5), port 8090, API key required.
 # Same policy as kora/sponsor.toml (devnet): only tool/kora_gateway.dart
-# (public :8080) holds the key and forwards guard-key `pulse` / `lockdown`.
+# (public :8080) holds the key and forwards guard-key `pulse` / `lockdown`
+# and a beneficiary's own SOL claim (`execute_sol_rule` / `release_vested_sol`).
 # Free pricing: Kora pays the network fee. The fee payer may not move SOL or
 # tokens, create accounts or approve anything.
 # scripts/kora_start.sh uses this file when CLUSTER=mainnet-beta; secrets
@@ -21,7 +22,8 @@ enabled = false
 default_ttl = 300
 account_ttl = 60
 
-# Lifetime per-wallet cap, keyed on the first non-Kora signer (the guard key).
+# Lifetime per-wallet cap, keyed on the first non-Kora signer (the guard key
+# or the claiming beneficiary).
 # Needs Redis; the counter never expires. Fails closed if Redis is down.
 [kora.usage_limit]
 enabled = true
@@ -41,16 +43,18 @@ get_blockhash = true
 get_config = true
 
 [validation]
-# Caps the network fee (base + priority) and any fee-payer outflow. Pulse/lockdown
-# have no outflow, so this only bounds the fee: 2 signatures + a small priority fee.
+# Caps the network fee (base + priority) and any fee-payer outflow. Pulse,
+# lockdown and SOL claims have no outflow, so this only bounds the fee:
+# 2 signatures + a small priority fee.
 max_allowed_lamports = 50000
-max_signatures = 2
+max_signatures = 2                    # Kora + the guard key or the claimer
 price_source = "Mock"                 # unused with Free pricing (Kora warns)
 allow_durable_transactions = false
 
 # Checked against every instruction, including CPIs found by simulation.
-# Kora cannot filter by instruction discriminator; the gateway does (pulse and
-# lockdown only). This list is the second line: create_vault fails here (System CPI).
+# Kora cannot filter by instruction discriminator; the gateway does (pulse,
+# lockdown, SOL claims). This list is the second line: create_vault and token
+# claims fail here (System / Token CPI).
 allowed_programs = [
     "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
     "ComputeBudget111111111111111111111111111111",  # Compute Budget

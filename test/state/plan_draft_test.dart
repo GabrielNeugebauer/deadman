@@ -1,0 +1,422 @@
+import 'package:deadman/core/config.dart';
+import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/plan_draft.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'fakes.dart';
+
+const usdc = AppConfig.usdcMint;
+final _fees = FeeSchedule(
+  treasury: addr(9),
+  feeBpsPublic: 200,
+  feeBpsPrivate: 500,
+);
+
+PayoutDraft _share(
+  int bps, {
+  String? mint = usdc,
+  Rail rail = Rail.solana,
+  int after = 10 * 86400,
+  String name = 'Ana',
+}) => PayoutDraft(
+  beneficiary: addr(12),
+  rail: rail,
+  mint: mint,
+  shareBps: bps,
+  afterSecs: after,
+  name: name,
+);
+
+PayoutDraft _fixed(int amount, {String? mint = usdc, int after = 10 * 86400}) =>
+    PayoutDraft(
+      beneficiary: addr(12),
+      mint: mint,
+      mode: AmountMode.fixed,
+      fixedAmount: amount,
+      afterSecs: after,
+      name: 'Ana',
+    );
+
+PlanPreview _preview(List<PayoutDraft> ps, int balance, {FeeInfo? fee}) =>
+    PlanPreview.of(
+      ps,
+      balanceOf: (_) => balance,
+      feeBps: (fee ?? FeeInfo(fees: _fees)).bpsFor,
+    );
+
+Set<IssueCode> _codes(
+  List<PayoutDraft> ps,
+  int balance, {
+  DeliveryFacts facts = DeliveryFacts.unknown,
+  FeeInfo? fee,
+}) {
+  final f = fee ?? FeeInfo(fees: _fees);
+  final preview = _preview(ps, balance, fee: f);
+  return {
+    for (var i = 0; i < ps.length; i++)
+      ...payoutWarnings(
+        payouts: ps,
+        index: i,
+        preview: preview,
+        fee: f,
+        facts: facts,
+      ).map((x) => x.code),
+    for (final a in preview.assets)
+      ...assetIssues(
+        asset: a,
+        mint: a.mint,
+        payouts: ps,
+        creating: true,
+        balance: balance,
+        numberOf: (i) => i + 1,
+      ).map((x) => x.code),
+  };
+}
+
+void main() {
+  group('the incident', () {
+    test('1% of 1 USDC to a new wallet: 0.0098 USDC, D2 + A1 + L1', () {
+      final ps = [_share(100)];
+      expect(_preview(ps, 1000000).amounts.single.net, 9800);
+      expect(moneyText(9800, usdc), '0.0098 USDC');
+      expect(_codes(ps, 1000000), {IssueCode.d2, IssueCode.a1, IssueCode.l1});
+    });
+
+    test('100% of 1 USDC needs a claim (D3), not D2', () {
+      final ps = [_share(10000)];
+      expect(_preview(ps, 1000000).amounts.single.net, 980000);
+      expect(_codes(ps, 1000000), {IssueCode.d3});
+    });
+
+    test('an existing heir token account clears D2 and D3', () {
+      const held = DeliveryFacts(walletLamports: 0, tokenUnits: 5);
+      expect(_codes([_share(100)], 1000000, facts: held), {
+        IssueCode.a1,
+        IssueCode.l1,
+      });
+      expect(_codes([_share(10000)], 1000000, facts: held), isEmpty);
+    });
+
+    test('while facts load no delivery warning is raised', () {
+      final ps = [_share(10000)];
+      final preview = _preview(ps, 1000000);
+      expect(
+        payoutWarnings(
+          payouts: ps,
+          index: 0,
+          preview: preview,
+          fee: FeeInfo(fees: _fees),
+          facts: null,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('above the keeper threshold it arrives on its own', () {
+      expect(_codes([_share(10000)], 20000000), isEmpty);
+    });
+  });
+
+  group('keeperAutoDeliverMin', () {
+    test('USDC at 2% and 5%', () {
+      expect(keeperAutoDeliverMin(usdc, 200), 16994000);
+      expect(keeperAutoDeliverMin(usdc, 500), 6797600);
+    });
+
+    test('never with the fee waived or an unpriced token', () {
+      expect(keeperAutoDeliverMin(usdc, 0), isNull);
+      expect(keeperAutoDeliverMin(addr(40), 200), isNull);
+      expect(keeperAutoDeliverMin(null, 200), isNull);
+    });
+
+    test('matches the keeper floor', () {
+      final min = keeperAutoDeliverMin(usdc, 200)!;
+      int feeValue(int gross) =>
+          (splitFee(gross, 200).$2 * keeperUsdcLamportsPerUnit).floor();
+      expect(feeValue(min), greaterThanOrEqualTo(tokenAccountRentLamports));
+      expect(feeValue(min - 50), lessThan(tokenAccountRentLamports));
+    });
+
+    test('a waived fee always needs a claim on a new wallet', () {
+      expect(
+        _codes([_share(10000)], 900000000, fee: const FeeInfo(waived: true)),
+        {IssueCode.d3},
+      );
+    });
+  });
+
+  group('SOL delivery', () {
+    test('0.0005 SOL to an empty wallet cannot arrive (D4)', () {
+      final ps = [_fixed(510205, mint: null)];
+      final net = _preview(ps, 1000000000).amounts.single.net!;
+      expect(net, lessThan(walletRentMinLamports));
+      expect(_codes(ps, 1000000000), {IssueCode.d4, IssueCode.l1});
+    });
+
+    test('the same payout to a funded wallet is fine', () {
+      final ps = [_fixed(510205, mint: null)];
+      expect(
+        _codes(
+          ps,
+          1000000000,
+          facts: const DeliveryFacts(walletLamports: 1000000),
+        ),
+        {IssueCode.l1},
+      );
+    });
+
+    test('a small private SOL payout cannot be routed (D5)', () {
+      final ps = [_share(10000, mint: null, rail: Rail.cloak)];
+      expect(
+        _codes(
+          ps,
+          10000000,
+          facts: const DeliveryFacts(walletLamports: 1000000),
+        ),
+        {IssueCode.d5},
+      );
+    });
+
+    test('private token payouts warn they are not routed yet (D6)', () {
+      final ps = [_share(10000, rail: Rail.zcash)];
+      expect(_codes(ps, 50000000, facts: const DeliveryFacts(tokenUnits: 1)), {
+        IssueCode.d6,
+      });
+      expect(stipendNeed(ps), 3000000);
+    });
+  });
+
+  group('previews', () {
+    test('shares compound in delay order per asset', () {
+      final ps = [
+        _share(10000, after: 20 * 86400),
+        _share(5000, after: 10 * 86400),
+      ];
+      final p = _preview(ps, 1000000);
+      expect(p.amounts[1].gross, 500000);
+      expect(p.amounts[0].gross, 500000);
+      expect(p.assetOf(usdc).order, [1, 0]);
+      expect(p.assetOf(usdc).leftover, 0);
+      expect(p.assetOf(usdc).feeTotal, 20000);
+    });
+
+    test('fixed payouts are capped at what is left', () {
+      final ps = [_fixed(700000), _fixed(700000, after: 20 * 86400)];
+      final p = _preview(ps, 1000000);
+      expect([p.amounts[0].gross, p.amounts[1].gross], [700000, 300000]);
+      expect(
+        assetIssues(
+          asset: p.assetOf(usdc),
+          mint: usdc,
+          payouts: ps,
+          creating: true,
+          balance: 1000000,
+          numberOf: (i) => i + 1,
+        ).map((i) => i.code),
+        [IssueCode.f4, IssueCode.l1],
+      );
+    });
+
+    test('an unknown balance gives no amounts', () {
+      final p = PlanPreview.of(
+        [_share(10000)],
+        balanceOf: (_) => null,
+        feeBps: (_) => 200,
+      );
+      expect(p.amounts.single.net, isNull);
+      expect(p.assets.single.leftover, isNull);
+    });
+
+    test('SOL, then USDC, then other tokens', () {
+      expect(assetOrder([addr(40), usdc, null, usdc]), [null, usdc, addr(40)]);
+    });
+
+    test('A1 only on the last payout of an asset', () {
+      final ps = [_share(500), _share(10000, after: 20 * 86400)];
+      expect(_codes(ps, 100000000), {IssueCode.d3});
+      expect(_codes([_share(501)], 100000000), {IssueCode.l1, IssueCode.d3});
+    });
+
+    test('F2 when a used asset gets no deposit', () {
+      expect(
+        assetIssues(
+          asset: _preview([_share(10000)], 0).assetOf(usdc),
+          mint: usdc,
+          payouts: [_share(10000)],
+          creating: true,
+          balance: 0,
+          numberOf: (i) => i + 1,
+        ).single.body,
+        'The plan will hold no USDC, so payout 1 has nothing to send until '
+        'you deposit some from the plan card.',
+      );
+    });
+  });
+
+  group('text', () {
+    test('words line', () {
+      expect(shareWords(10000, 'USDC'), "Everything that's left");
+      expect(shareWords(5000, 'USDC'), "Half of what's left");
+      expect(shareWords(100, 'USDC'), '1 out of every 100 USDC left');
+      expect(shareWords(1250, 'SOL'), '12.5 out of every 100 SOL left');
+      expect(shareWords(null, 'SOL'), isNull);
+    });
+
+    test('share parsing: 0.01 to 100, at most 2 decimals', () {
+      expect(parseShareBps('1'), 100);
+      expect(parseShareBps('100'), 10000);
+      expect(parseShareBps('0,5'), 50);
+      expect(parseShareBps('0.01'), 1);
+      expect(parseShareBps('0'), isNull);
+      expect(parseShareBps('100.01'), isNull);
+      expect(parseShareBps('1.005'), isNull);
+      expect(parseShareBps(''), isNull);
+    });
+
+    test('money keeps two significant digits', () {
+      expect(moneyText(9800, usdc), '0.0098 USDC');
+      expect(moneyText(490000, null), '0.00049 SOL');
+      expect(moneyText(980000, usdc), '0.98 USDC');
+      expect(moneyText(98000000, usdc), '98 USDC');
+      expect(moneyText(1234567890, null), '1.235 SOL');
+    });
+
+    test('payout sentences on each rail', () {
+      final a = addr(12);
+      final shortA = '${a.substring(0, 4)}…\u2060${a.substring(a.length - 4)}';
+      expect(
+        payoutSentence(_share(10000), net: 980000),
+        'Ana gets everything left of your USDC (≈\u00a00.98 USDC) as a normal '
+        'transfer to $shortA.',
+      );
+      expect(
+        payoutSentence(_share(2500, rail: Rail.cloak)),
+        'Ana gets 25% of the USDC left at that point privately through '
+        'Cloak, using their claim code.',
+      );
+      expect(
+        payoutSentence(
+          PayoutDraft(
+            beneficiary: a,
+            rail: Rail.zcash,
+            mode: AmountMode.fixed,
+            fixedAmount: 1500000000,
+            afterSecs: 86400,
+          ),
+          net: 1425000000,
+        ),
+        '$shortA gets 1.5 SOL (≈\u00a01.425 SOL) privately as Zcash, using '
+        'their claim code.',
+      );
+      expect(
+        payoutSentence(
+          PayoutDraft(
+            beneficiary: a,
+            rail: Rail.solana,
+            mode: AmountMode.fixed,
+            fixedAmount: 50000000,
+            mint: usdc,
+            afterSecs: 86400,
+          ),
+          net: 11760000,
+          capped: true,
+        ),
+        '$shortA gets 50 USDC (only ≈\u00a011.76 USDC will be left for it) as '
+        'a normal transfer.',
+      );
+      expect(
+        payoutSentence(_share(10000)),
+        'Ana gets everything left of your USDC as a normal transfer to '
+        '$shortA.',
+      );
+      expect(
+        payoutWhen(10 * 86400, 7 * 86400),
+        'After 10 days of silence (3 days after a missed check-in)',
+      );
+    });
+
+    test('leftover sentences', () {
+      final p = _preview([_share(100)], 1000000);
+      expect(
+        leftoverSentence(p.assets.single),
+        '0.99 USDC (99% of what the plan holds) stays locked in the plan '
+        "after the last payout. Nobody can withdraw it once you're gone.",
+      );
+      expect(
+        leftoverSentence(_preview([_fixed(1000000)], 1000000).assets.single),
+        startsWith('Nothing is left over today, but the last USDC payout'),
+      );
+      expect(
+        leftoverSentence(_preview([_share(10000)], 1000000).assets.single),
+        'Nothing of your USDC is left behind.',
+      );
+    });
+  });
+
+  group('PayoutDraft', () {
+    test('round-trips RuleSpec; 100% reads "100"', () {
+      final r = RuleSpec(
+        beneficiary: addr(12),
+        rail: Rail.solana,
+        afterSecs: 10 * 86400,
+        mode: AmountMode.percent,
+        amount: 10000,
+        mint: usdc,
+      );
+      final d = PayoutDraft.fromRule(r);
+      expect(shareInput(d.shareBps!), '100');
+      final back = d.toRuleSpec();
+      expect(
+        [back.beneficiary, back.rail, back.afterSecs, back.mode, back.amount],
+        [r.beneficiary, r.rail, r.afterSecs, r.mode, r.amount],
+      );
+      expect(back.mint, usdc);
+    });
+
+    test('validate reports each field', () {
+      expect(_share(10000).validate(intervalSecs: 7 * 86400), isEmpty);
+      expect(
+        PayoutDraft(
+          beneficiary: 'nope',
+          mode: AmountMode.fixed,
+          fixedAmount: 1000,
+          afterSecs: 7 * 86400,
+        ).validate(intervalSecs: 7 * 86400).map((i) => i.code),
+        [IssueCode.b2, IssueCode.a2, IssueCode.d1],
+      );
+      expect(delayError(10 * 86400, 30 * 86400)!.action, 'Move to 37 days');
+    });
+
+    test('delay choices hide anything not past the interval', () {
+      expect(delayChoices(120), [180, 300, 600, 1800]);
+      expect(delayChoices(7 * 86400).first, 10 * 86400);
+    });
+  });
+
+  group('funding', () {
+    test('defaults cover fixed payouts, capped by the wallet', () {
+      expect(defaultDeposit(fixedSum: 0, stipend: 0), isNull);
+      expect(defaultDeposit(fixedSum: 5, stipend: 0, wallet: 100), 5);
+      expect(
+        defaultDeposit(fixedSum: 100, stipend: 0, wallet: 100, reserve: 30),
+        70,
+      );
+      expect(defaultDeposit(fixedSum: 0, stipend: 12000000), 12000000);
+    });
+
+    test('the SOL fee reserve', () {
+      expect(feeReserveLamports(solFeeMode: false, sponsored: false), 0);
+      expect(feeReserveLamports(solFeeMode: true, sponsored: true), 20000000);
+      expect(feeReserveLamports(solFeeMode: true, sponsored: false), 30000000);
+    });
+
+    test('V1 when a vesting deposit is short', () {
+      expect(vestingShortfall(usdc, 100, 100), isNull);
+      expect(
+        vestingShortfall(usdc, 1000000000, 400000000)!.body,
+        'The deposit is 600 USDC short. Unlocking pauses when the plan runs '
+        'dry, until you deposit more.',
+      );
+    });
+  });
+}

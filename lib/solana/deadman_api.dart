@@ -35,8 +35,9 @@ class RuleSpec {
 enum PlanKind { inheritance, vesting }
 
 /// One beneficiary's vesting schedule: [total] of [mint] (null = SOL)
-/// vests linearly from the plan start over [durationSecs]; nothing is
-/// claimable before [cliffSecs].
+/// vests from the plan start over [durationSecs], continuously or in
+/// installments (the plan's period); nothing is claimable before
+/// [cliffSecs].
 class VestingSpec {
   const VestingSpec({
     required this.beneficiary,
@@ -129,6 +130,7 @@ class VaultState {
     this.revokedAt = 0,
     this.rentPayer = '',
     this.rentPaid = 0,
+    this.vestPeriodSecs = 0,
   });
 
   final String address;
@@ -183,20 +185,91 @@ class VaultState {
   /// to them and everything else to the owner.
   final int rentPaid;
 
+  /// Vesting: installment length in seconds; vesting unlocks only at whole
+  /// multiples of it from [startAt] (fully at the duration). 0 = continuous
+  /// (plans created before installments existed).
+  final int vestPeriodSecs;
+
   bool get isVesting => kind == PlanKind.vesting;
 
-  /// Vesting: gross amount of schedule [index] vested at [now] (mirrors
-  /// the program's `vested`, including the stop at revocation).
-  int vested(int index, int now) {
+  /// Seconds of schedule time counted at [now]: vesting stops at revocation.
+  int _elapsed(int now) =>
+      (revokedAt != 0 && revokedAt < now ? revokedAt : now) - startAt;
+
+  /// Gross amount of schedule [index] vested after [elapsed] seconds.
+  int _vestedAt(int index, int elapsed) {
     final r = rules[index];
-    final end = revokedAt != 0 && revokedAt < now ? revokedAt : now;
-    final elapsed = end - startAt;
     if (elapsed < r.afterSecs) return 0;
     if (elapsed >= r.durationSecs) return r.amount;
+    final unlocked = vestPeriodSecs > 0
+        ? elapsed ~/ vestPeriodSecs * vestPeriodSecs
+        : elapsed;
     return (BigInt.from(r.amount) *
-            BigInt.from(elapsed) ~/
+            BigInt.from(unlocked) ~/
             BigInt.from(r.durationSecs))
         .toInt();
+  }
+
+  /// Vesting: gross amount of schedule [index] vested at [now] (mirrors
+  /// the program's `vested`, including the stop at revocation and the
+  /// installment steps).
+  int vested(int index, int now) => _vestedAt(index, _elapsed(now));
+
+  /// Vesting: number of installments of schedule [index] (the last one may
+  /// be shorter); null for continuous vesting.
+  int? installmentCount(int index) {
+    if (vestPeriodSecs <= 0) return null;
+    final d = rules[index].durationSecs;
+    return (d + vestPeriodSecs - 1) ~/ vestPeriodSecs;
+  }
+
+  /// Vesting: installments of schedule [index] unlocked at [now] (0 before
+  /// the cliff, all of them once fully vested); null for continuous
+  /// vesting.
+  int? installmentsUnlocked(int index, int now) {
+    final count = installmentCount(index);
+    if (count == null) return null;
+    final r = rules[index];
+    final elapsed = _elapsed(now);
+    if (elapsed < r.afterSecs) return 0;
+    if (elapsed >= r.durationSecs) return count;
+    final n = elapsed ~/ vestPeriodSecs;
+    return n < count ? n : count;
+  }
+
+  /// Vesting: gross amount of one full installment of schedule [index]
+  /// (the cliff may unlock several at once, the last one is the rest);
+  /// null for continuous vesting.
+  int? installmentAmount(int index) {
+    if (vestPeriodSecs <= 0) return null;
+    final r = rules[index];
+    return (BigInt.from(r.amount) *
+            BigInt.from(vestPeriodSecs) ~/
+            BigInt.from(r.durationSecs))
+        .toInt();
+  }
+
+  /// Vesting: unix seconds of the first moment after [now] when schedule
+  /// [index] vests more (the cliff, an installment boundary, or the end of
+  /// the duration); null when fully vested, revoked, or continuous.
+  int? nextInstallmentAt(int index, int now) {
+    if (vestPeriodSecs <= 0 || revokedAt != 0) return null;
+    final r = rules[index];
+    final elapsed = now - startAt;
+    if (elapsed >= r.durationSecs) return null;
+    final current = _vestedAt(index, elapsed);
+    if (current >= r.amount) return null;
+    final first = elapsed + 1 > r.afterSecs ? elapsed + 1 : r.afterSecs;
+    if (_vestedAt(index, first) > current) return startAt + first;
+    // Fewest whole periods k with floor(total * k * period / duration)
+    // above the current amount.
+    final p = BigInt.from(vestPeriodSecs);
+    final need = BigInt.from(current + 1) * BigInt.from(r.durationSecs);
+    final per = BigInt.from(r.amount) * p;
+    final k = (need + per - BigInt.one) ~/ per;
+    final at = k * p;
+    final end = BigInt.from(r.durationSecs);
+    return startAt + (at < end ? at : end).toInt();
   }
 
   /// Vesting: the most schedule [index] can ever release.
@@ -326,6 +399,142 @@ class FeeSchedule {
   final int feeBpsPrivate;
 
   int bpsFor(Rail rail) => rail == Rail.solana ? feeBpsPublic : feeBpsPrivate;
+}
+
+/// An owner's account-wide subscription (`Subscription`, PDA
+/// `["sub", owner]`): while paid it waives the payout fee on every plan of
+/// [owner], present and future.
+class AccountSubscription {
+  const AccountSubscription({required this.owner, required this.paidUntil});
+
+  final String owner;
+
+  /// End of the paid coverage (unix seconds); 0 if never paid.
+  final int paidUntil;
+
+  /// Paid through [now]: an extension may then be any number of periods,
+  /// while a new or lapsed subscription needs the minimum term.
+  bool active(int now) => paidUntil >= now;
+}
+
+/// Whether [sub] (the owner's subscription, null when never created)
+/// waives the payout fee of [vault] at [now]. Mirrors the program's
+/// `Subscription::covers`: for inheritance, the owner's last check-in fell
+/// within a paid period, however late the payout runs; for vesting, the
+/// subscription is paid at [now].
+bool feeWaivedFor(VaultState vault, AccountSubscription? sub, int now) =>
+    sub != null &&
+    sub.owner == vault.owner &&
+    sub.paidUntil != 0 &&
+    switch (vault.kind) {
+      PlanKind.inheritance => sub.paidUntil >= vault.lastPulse,
+      PlanKind.vesting => sub.paidUntil >= now,
+    };
+
+/// Payout fee of [vault] on [rail] at [now]: 0 while [sub] covers it (see
+/// [feeWaivedFor]), else the [fees] schedule (mirrors `payout_fee_bps`).
+int payoutFeeBps(
+  FeeSchedule fees,
+  VaultState vault,
+  AccountSubscription? sub,
+  Rail rail,
+  int now,
+) => feeWaivedFor(vault, sub, now) ? 0 : fees.bpsFor(rail);
+
+/// The optional flat subscription (`SubscriptionConfig`) that waives the
+/// payout fee on all of an owner's plans while paid.
+class SubscriptionTerms {
+  const SubscriptionTerms({
+    required this.pricePerPeriod,
+    required this.periodSecs,
+    required this.mint,
+    required this.minPeriods,
+    this.enabled = true,
+  });
+
+  /// Base units of [mint] per period.
+  final int pricePerPeriod;
+  final int periodSecs;
+  final String mint;
+
+  /// Periods a new or lapsed subscription must buy at once.
+  final int minPeriods;
+  final bool enabled;
+
+  /// Most periods one `subscribe` may buy.
+  static const maxPeriods = 36;
+
+  int cost(int periods) => pricePerPeriod * periods;
+
+  /// Fewest periods an owner whose subscription is [sub] (null = never
+  /// created) may buy at [now]: [minPeriods] when new or lapsed, else 1.
+  int minPeriodsFor(AccountSubscription? sub, int now) =>
+      sub != null && sub.active(now) ? 1 : minPeriods;
+
+  /// `Subscription.paid_until` after buying [periods] at [now].
+  int paidUntilAfter(AccountSubscription? sub, int periods, int now) {
+    final current = sub?.paidUntil ?? 0;
+    return (current > now ? current : now) + periodSecs * periods;
+  }
+
+  /// Whether a period is about a month (28 to 31 days).
+  bool get monthly => periodSecs >= 28 * 86400 && periodSecs <= 31 * 86400;
+}
+
+/// Who pays for a beneficiary's own claim.
+enum ClaimPayer {
+  /// The Kora sponsor pays the network fee: the claim is free.
+  sponsor,
+
+  /// The Kora paymaster pays the network fee and any token account rent,
+  /// and takes its USDC fee from the payout in the same transaction.
+  payout,
+
+  /// The wallet pays the network fee (in SOL, or in the fee token).
+  wallet,
+}
+
+/// What claiming a tier or vested amount costs its beneficiary.
+class ClaimQuote {
+  const ClaimQuote({
+    required this.payer,
+    required this.mint,
+    required this.net,
+    this.feeToken,
+    this.feeAmount = 0,
+    this.problem,
+  });
+
+  final ClaimPayer payer;
+
+  /// Asset paid out (null = SOL).
+  final String? mint;
+
+  /// What the beneficiary receives from the plan, base units of [mint],
+  /// before any claim fee.
+  final int net;
+
+  /// Token the paymaster charges ([ClaimPayer.payout]); null otherwise.
+  final String? feeToken;
+
+  /// Claim fee in [feeToken] base units; 0 when free or paid by the wallet.
+  final int feeAmount;
+
+  /// Why the claim cannot go through as quoted; null when it can.
+  final String? problem;
+
+  bool get free => payer == ClaimPayer.sponsor;
+}
+
+/// A beneficiary's unsigned claim and who pays for it.
+class ClaimTx {
+  const ClaimTx(this.transaction, this.payer, {this.note});
+
+  final Uint8List transaction;
+  final ClaimPayer payer;
+
+  /// Why the claim is not paid as quoted (the free service is down).
+  final String? note;
 }
 
 /// Client for the Deadman program. `build*` methods return serialized,
@@ -470,10 +679,12 @@ abstract class DeadmanApi {
     required int index,
   });
 
-  /// Creates vesting plan [planId]: [schedules] vest linearly from
-  /// [startAt] whatever the owner does. Optionally funds it in the same
-  /// transaction with SOL ([depositLamports]) and/or tokens
-  /// ([tokenDeposits]: mint -> base units, from the owner's ATA).
+  /// Creates vesting plan [planId]: [schedules] vest from [startAt]
+  /// whatever the owner does, in installments of [periodSecs] (at least
+  /// `Limits.minVestPeriodSecs` and at most the shortest schedule duration;
+  /// 0 = continuously). Optionally funds it in the same transaction with
+  /// SOL ([depositLamports]) and/or tokens ([tokenDeposits]: mint -> base
+  /// units, from the owner's ATA).
   Future<Uint8List> buildCreateVesting({
     required String owner,
     required int planId,
@@ -483,6 +694,7 @@ abstract class DeadmanApi {
     required int startAt,
     required bool revocable,
     required List<VestingSpec> schedules,
+    int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
   });
@@ -501,6 +713,31 @@ abstract class DeadmanApi {
     required String vaultOwner,
     required int planId,
     required int index,
+  });
+
+  /// What [buildClaim] would cost [claimer], the beneficiary of rule or
+  /// schedule [index].
+  Future<ClaimQuote> quoteClaim({
+    required String claimer,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+  });
+
+  /// Rule or schedule [index] (execute or release, from the plan kind)
+  /// claimed by its own beneficiary [claimer], who needs no SOL: a SOL
+  /// payout goes through the free Kora sponsor, a USDC payout through the
+  /// paymaster, which takes its fee from the payout. Falls back to
+  /// [buildExecuteRule] / [buildReleaseVested] (the wallet pays) when
+  /// [claimer] is not the beneficiary, Kora is not configured, or, for
+  /// SOL, the sponsor is unreachable or [sponsored] is false (after the
+  /// sponsor refused the signed claim).
+  Future<ClaimTx> buildClaim({
+    required String claimer,
+    required String vaultOwner,
+    required int planId,
+    required int index,
+    bool sponsored = true,
   });
 
   /// Same as [buildReleaseVested], signed by a local key (keeper, claim
@@ -550,6 +787,26 @@ abstract class DeadmanApi {
     required String vaultOwner,
     required int planId,
     required int index,
+  });
+
+  /// The monthly-plan terms, or null when not offered (no config on chain,
+  /// or disabled).
+  Future<SubscriptionTerms?> fetchSubscriptionTerms();
+
+  /// [owner]'s account-wide subscription, or null when never created.
+  Future<AccountSubscription?> fetchSubscription(String owner);
+
+  /// Prepays [periods] periods of [owner]'s account-wide subscription,
+  /// which waives the payout fee on every plan of the owner, including
+  /// plans created later (see [feeWaivedFor]). A new or lapsed subscription
+  /// must buy at least [SubscriptionTerms.minPeriods]; an active one may
+  /// extend by any number (1 to [SubscriptionTerms.maxPeriods] per
+  /// transaction). The price comes from the owner's token account of
+  /// [SubscriptionTerms.mint]; the subscription account's rent, on first
+  /// use, from the owner (or the paymaster when fees are paid in USDC).
+  Future<Uint8List> buildSubscribe({
+    required String owner,
+    required int periods,
   });
 
   /// Submits wallet-signed transactions; returns signatures after confirmation.

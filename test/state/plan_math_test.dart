@@ -225,10 +225,7 @@ void main() {
     test('SOL tiers: withdrawable minus what is reserved for others', () {
       final reservedOnly = vault(
         withdrawableLamports: 300,
-        rules: [
-          rule(seed: 11, skippedAt: 900, reserved: 300),
-          rule(seed: 12),
-        ],
+        rules: [rule(seed: 11, skippedAt: 900, reserved: 300), rule(seed: 12)],
       );
       expect(tierFunded(reservedOnly, 0, null), isTrue);
       expect(tierFunded(reservedOnly, 1, null), isFalse);
@@ -239,7 +236,10 @@ void main() {
     test('token tiers: the vault balance of the tier mint; unknown = null', () {
       final v = vault(
         withdrawableLamports: 1000,
-        rules: [rule(seed: 11), rule(seed: 12, mint: usdc)],
+        rules: [
+          rule(seed: 11),
+          rule(seed: 12, mint: usdc),
+        ],
       );
       expect(tierFunded(v, 1, null), isNull);
       expect(tierFunded(v, 1, const {}), isNull);
