@@ -12,6 +12,7 @@ import '../../state/plan_draft.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../../state/vesting.dart';
+import '../format.dart' show installmentDate;
 import '../rules_format.dart';
 import '../theme.dart';
 import '../widgets/editor/fund_asset_card.dart';
@@ -44,11 +45,16 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   final _edited = <String?>{};
   final _scroll = ScrollController();
   final _labelKey = GlobalKey();
+  final _periodKey = GlobalKey();
   final _schedulesKey = GlobalKey();
   final _ackKey = GlobalKey();
   DateTime? _startDate;
   bool _revocable = true;
   bool _demo = false;
+
+  /// Installment interval in seconds; 0 = continuous.
+  int _period = defaultPeriodSecs(demo: false);
+  bool _periodPicked = false;
   int _step = 0;
   bool _check = false;
   bool _checkFund = false;
@@ -113,7 +119,12 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   void _setDemo(bool on) => setState(() {
     _demo = on;
     if (!on) _schedules = _schedules.map(_withoutDemoTimings).toList();
+    final offered = periodChoices(demo: on).any((c) => c.$1 == _period);
+    if (!_periodPicked || !offered) _period = defaultPeriodSecs(demo: on);
   });
+
+  String? get _periodError =>
+      vestPeriodError(_period, _schedules, duration: durationLabel);
 
   static ScheduleDraft _withoutDemoTimings(ScheduleDraft s) {
     if (!durationChoices(demo: false).any((c) => c.$1 == s.durationSecs)) {
@@ -150,6 +161,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           number: (index ?? _schedules.length) + 1,
           demo: _demo,
           startAt: _startAt(nowSecs()),
+          periodSecs: _period,
         ),
       ),
     );
@@ -246,9 +258,15 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
     switch (_step) {
       case 0:
         final labelBad = labelError(_label.text) != null;
-        if (_schedules.isEmpty || labelBad) {
+        if (_schedules.isEmpty || labelBad || _periodError != null) {
           setState(() => _check = true);
-          _reveal(labelBad ? _labelKey : _schedulesKey);
+          _reveal(
+            labelBad
+                ? _labelKey
+                : _periodError != null
+                ? _periodKey
+                : _schedulesKey,
+          );
           return;
         }
         _goTo(1);
@@ -295,6 +313,10 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
       toast(context, e.message, error: true);
       return;
     }
+    if (_periodError case final error?) {
+      toast(context, error, error: true);
+      return;
+    }
     final deposits = {for (final m in _assets) m: _depositOf(m) ?? 0};
     setState(() => _busy = true);
     var unguarded = const <VaultState>[];
@@ -308,6 +330,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
             revocable: _revocable,
             schedules: [for (final s in _schedules) s.toSpec()],
             lockSecs: vestingLockSecs(demo: _demo),
+            periodSecs: _period,
             depositLamports: deposits[null] ?? 0,
             tokenDeposits: {
               for (final e in deposits.entries)
@@ -375,8 +398,8 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
     final start = _startAt(nowSecs());
     return [
       const Text(
-        'Each schedule unlocks money for someone gradually from the start '
-        'date, whether or not you check in.',
+        'Each schedule unlocks money for someone in installments from the '
+        'start date, whether or not you check in.',
         style: muted,
       ),
       const SizedBox(height: 12),
@@ -456,6 +479,41 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                       'take back what they owe.',
             style: muted,
           ),
+          const SizedBox(height: 16),
+          Text(
+            'Release every',
+            key: _periodKey,
+            style: const TextStyle(color: DmColors.muted),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final (secs, text) in periodChoices(demo: _demo))
+                ChoiceChip(
+                  label: Text(text),
+                  selected: _period == secs,
+                  onSelected: (_) => setState(() {
+                    _period = secs;
+                    _periodPicked = true;
+                  }),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          if (_periodError case final error?)
+            Text(error, style: const TextStyle(color: DmColors.danger))
+          else
+            Text(
+              _period == 0
+                  ? 'Money unlocks a little every second, so it can be claimed '
+                        'in tiny amounts at any time.'
+                  : 'Money unlocks in equal installments, one every '
+                        '${vestPeriodWord(_period)}. Nothing can be claimed '
+                        'in between.',
+              style: muted,
+            ),
         ],
       ),
       const SizedBox(height: 16),
@@ -464,6 +522,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           number: i + 1,
           schedule: s,
           startAt: start,
+          periodSecs: _period,
           onTap: () => _edit(i),
         ),
         const SizedBox(height: 12),
@@ -520,8 +579,8 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
               onChanged: _setDemo,
               title: const Text('Demo timings'),
               subtitle: const Text(
-                'Adds a 2-minute cliff and 10-minute vesting so it can be '
-                'shown live.',
+                'Adds a 2-minute cliff, 10-minute vesting and one-minute '
+                'installments so it can be shown live.',
                 style: muted,
               ),
             ),
@@ -596,7 +655,8 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   List<Widget> _reviewStep(FeeInfo fee, int reserve) {
     final t = Theme.of(context).textTheme;
     final now = nowSecs();
-    final start = startText(_startAt(now), now);
+    final startAt = _startAt(now);
+    final start = startText(startAt, now);
     final solMode = ref.watch(feeModeProvider) == FeeMode.sol;
     final deposits = [
       for (final m in _assets)
@@ -628,7 +688,14 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
               ),
               const SizedBox(height: 2),
               Text(
-                vestingSentence(s, start: start, duration: durationLabel),
+                vestingSentence(
+                  s,
+                  start: start,
+                  duration: durationLabel,
+                  periodSecs: _period,
+                  startAt: startAt,
+                  date: (at) => installmentDate(at, _period),
+                ),
                 style: const TextStyle(height: 1.4),
               ),
               if (!_busy)
@@ -725,12 +792,14 @@ class _ScheduleSummaryCard extends StatelessWidget {
     required this.number,
     required this.schedule,
     required this.startAt,
+    required this.periodSecs,
     required this.onTap,
   });
 
   final int number;
   final ScheduleDraft schedule;
   final int startAt;
+  final int periodSecs;
   final VoidCallback onTap;
 
   @override
@@ -773,6 +842,20 @@ class _ScheduleSummaryCard extends StatelessWidget {
                         'over ${durationLabel(s.durationSecs)}'
                         '${s.cliffSecs == 0 ? '' : ', nothing for the first ${durationLabel(s.cliffSecs)}'}',
                       ),
+                      if (installmentsText(
+                            s,
+                            periodSecs: periodSecs,
+                            startAt: startAt,
+                            date: (at) => installmentDate(at, periodSecs),
+                          )
+                          case final text?)
+                        Text(
+                          '${text[0].toUpperCase()}${text.substring(1)}.',
+                          style: const TextStyle(
+                            color: DmColors.muted,
+                            fontSize: 13,
+                          ),
+                        ),
                       const SizedBox(height: 10),
                       VestingBar(
                         color: s.rail.color,

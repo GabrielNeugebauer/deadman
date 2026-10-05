@@ -1821,6 +1821,26 @@ void paymasterTests() {
       }
     }
 
+    test('answers browser preflight and sets CORS headers', () async {
+      final client = HttpClient();
+      final pre = await client.openUrl(
+        'OPTIONS',
+        Uri.parse('http://127.0.0.1:${server.port}/'),
+      );
+      pre.headers.set('Origin', 'http://localhost:8686');
+      pre.headers.set('Access-Control-Request-Method', 'POST');
+      final res = await pre.close();
+      await res.drain<void>();
+      expect(res.statusCode, HttpStatus.noContent);
+      expect(res.headers.value('access-control-allow-origin'), '*');
+      expect(
+        res.headers.value('access-control-allow-headers'),
+        contains('content-type'),
+      );
+      expect(forwarded, isEmpty, reason: 'preflight never reaches Kora');
+      client.close();
+    });
+
     test('forwards a paid create_vault, refuses an unpaid one', () async {
       final owner = await keypair(24);
       chain[usdcAta(owner.address)] = tokenAccount(owner.address, 3000000);

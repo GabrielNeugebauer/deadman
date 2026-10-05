@@ -1,6 +1,7 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/plan_draft.dart';
+import 'package:deadman/state/vesting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fakes.dart';
@@ -417,6 +418,208 @@ void main() {
         'The deposit is 600 USDC short. Unlocking pauses when the plan runs '
         'dry, until you deposit more.',
       );
+    });
+  });
+
+  group('installments', () {
+    const year = 12 * monthSecs;
+    const start = 1000;
+    ScheduleDraft draft({
+      int total = 1200000000,
+      int cliff = 0,
+      int duration = year,
+      String? mint = usdc,
+    }) => ScheduleDraft(
+      beneficiary: addr(30),
+      mint: mint,
+      total: total,
+      cliffSecs: cliff,
+      durationSecs: duration,
+      name: 'Ana',
+    );
+    String date(int at) => 't+${at - start}';
+    String dur(int secs) => '${secs}s';
+
+    test('monthly over a year: 12 even installments, first after a month', () {
+      final n = draft().installments(periodSecs: monthSecs, startAt: start)!;
+      expect(n.count, 12);
+      expect(n.amount, 100000000);
+      expect(n.firstAt, start + monthSecs);
+      expect(n.firstCount, 1);
+      expect(n.firstAmount, 100000000);
+      expect(n.even, isTrue);
+      expect(n.lastSmaller, isFalse);
+      expect(draft().installments(periodSecs: 0, startAt: start), isNull);
+    });
+
+    test('a cliff unlocks the installments it covered at once', () {
+      final n = draft(cliff: 3 * monthSecs)
+          .installments(periodSecs: monthSecs, startAt: start)!;
+      expect(n.firstAt, start + 3 * monthSecs);
+      expect(n.firstCount, 3);
+      expect(n.firstAmount, 300000000);
+
+      // A cliff between boundaries unlocks the whole periods it covered.
+      final m = draft(cliff: 90 * 86400)
+          .installments(periodSecs: monthSecs, startAt: start)!;
+      expect(m.firstAt, start + 90 * 86400);
+      expect(m.firstCount, 2);
+      expect(m.firstAmount, 200000000);
+
+      // A cliff shorter than a period: the first boundary.
+      final short = draft(cliff: 86400)
+          .installments(periodSecs: monthSecs, startAt: start)!;
+      expect(short.firstAt, start + monthSecs);
+      expect(short.firstCount, 1);
+    });
+
+    test('weeks over 3 months: 14, the last one partial', () {
+      final n = draft(duration: 3 * monthSecs)
+          .installments(periodSecs: weekSecs, startAt: start)!;
+      expect(n.count, 14);
+      expect(n.lastSmaller, isTrue);
+      expect(n.even, isFalse);
+    });
+
+    test('demo: 10 one-minute installments after a 2-minute cliff', () {
+      final n = draft(
+        mint: null,
+        total: 500000000,
+        cliff: 120,
+        duration: 600,
+      ).installments(periodSecs: 60, startAt: start)!;
+      expect(n.count, 10);
+      expect(n.amount, 50000000);
+      expect(n.firstAt, start + 120);
+      expect(n.firstCount, 2);
+      expect(n.firstAmount, 100000000);
+    });
+
+    test('vestedAfter steps at whole periods, mirroring the program', () {
+      int at(int elapsed, {int period = 60, int cliff = 0}) => vestedAfter(
+        total: 1000,
+        cliffSecs: cliff,
+        durationSecs: 600,
+        periodSecs: period,
+        elapsed: elapsed,
+      );
+      expect(at(59), 0);
+      expect(at(60), 100);
+      expect(at(119), 100);
+      expect(at(599), 900);
+      expect(at(600), 1000);
+      expect(at(5000), 1000);
+      expect(at(150, cliff: 180), 0);
+      expect(at(180, cliff: 180), 300);
+      expect(at(59, period: 0), 98);
+      // A duration that is not a whole number of periods ends on time.
+      expect(
+        vestedAfter(
+          total: 1000,
+          cliffSecs: 0,
+          durationSecs: 650,
+          periodSecs: 60,
+          elapsed: 649,
+        ),
+        923,
+      );
+    });
+
+    test('a period longer than a schedule is explained', () {
+      final schedules = [draft(), draft(duration: 600)];
+      expect(vestPeriodError(0, schedules, duration: dur), isNull);
+      expect(vestPeriodError(60, schedules, duration: dur), isNull);
+      expect(
+        vestPeriodError(monthSecs, schedules, duration: dur),
+        'Schedule 2 is fully unlocked after 600s, before its first '
+        'installment (one every month). Release more often, or give it a '
+        'longer duration.',
+      );
+      expect(vestPeriodError(30, schedules, duration: dur), isNotNull);
+    });
+
+    test('sentences', () {
+      expect(
+        installmentsText(
+          draft(),
+          periodSecs: monthSecs,
+          startAt: start,
+          date: date,
+        ),
+        '12 installments of 100 USDC every month, first on t+$monthSecs',
+      );
+      expect(
+        installmentsText(
+          draft(cliff: 3 * monthSecs),
+          periodSecs: quarterSecs,
+          startAt: start,
+          date: date,
+        ),
+        '4 installments of 300 USDC every quarter, first on t+$quarterSecs',
+      );
+      expect(
+        installmentsText(
+          draft(cliff: 6 * monthSecs),
+          periodSecs: monthSecs,
+          startAt: start,
+          date: date,
+        ),
+        '12 installments of 100 USDC every month, the first 6 together '
+        '(600 USDC) on t+${6 * monthSecs}',
+      );
+      expect(
+        installmentsText(
+          draft(total: 1000000000, duration: 3 * monthSecs),
+          periodSecs: weekSecs,
+          startAt: start,
+          date: date,
+        ),
+        startsWith(
+          '14 installments of about 76.66 USDC every week (the last one '
+          'smaller), first on',
+        ),
+      );
+      expect(
+        vestingSentence(
+          draft(),
+          start: 'today',
+          duration: (s) => s == year ? '12 months' : '?',
+          periodSecs: monthSecs,
+          startAt: start,
+          date: date,
+        ),
+        'Starting today, Ana receives 1200 USDC over 12 months in 12 '
+        'installments of 100 USDC every month, first on t+$monthSecs, as a '
+        'normal transfer.',
+      );
+      expect(
+        vestingSentence(
+          draft(),
+          start: 'today',
+          duration: (s) => '12 months',
+          date: date,
+        ),
+        startsWith('Starting today, Ana receives 1200 USDC gradually'),
+      );
+      expect(
+        [
+          for (final p in [
+            60,
+            86400,
+            weekSecs,
+            monthSecs,
+            quarterSecs,
+            2592000,
+          ])
+            vestPeriodWord(p),
+        ],
+        ['minute', 'day', 'week', 'month', 'quarter', '30 days'],
+      );
+      expect(periodChoices(demo: false).first, (monthSecs, 'Month'));
+      expect(periodChoices(demo: false).last, (0, 'Continuously'));
+      expect(periodChoices(demo: true).first.$1, 60);
+      expect(defaultPeriodSecs(demo: true), 60);
+      expect(defaultPeriodSecs(demo: false), monthSecs);
     });
   });
 }

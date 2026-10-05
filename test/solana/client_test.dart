@@ -1417,6 +1417,7 @@ void main() {
     int lockedUntil = 0,
     int lamports = 1000000,
     String? rentPayer,
+    int vestPeriodSecs = 0,
   }) {
     final o = of ?? owner;
     final address = vaultPda(o, planId).address;
@@ -1434,6 +1435,7 @@ void main() {
         revokedAt: revokedAt,
         rentPayer: rentPayer,
         rules: schedules,
+        vestPeriodSecs: vestPeriodSecs,
       ),
       lamports: lamports,
     );
@@ -1470,6 +1472,7 @@ void main() {
       List<VestingSpec>? schedules,
       int depositLamports = 0,
       Map<String, int> tokenDeposits = const {},
+      int periodSecs = 0,
     }) => client.buildCreateVesting(
       owner: owner,
       planId: 4,
@@ -1479,6 +1482,7 @@ void main() {
       startAt: startAt,
       revocable: true,
       schedules: schedules ?? [alpha, beta],
+      periodSecs: periodSecs,
       depositLamports: depositLamports,
       tokenDeposits: tokenDeposits,
     );
@@ -1531,6 +1535,32 @@ void main() {
         owner,
       ]);
       expect(ixs[4].data.toList(), [12, ...le(8, 1200000), 6]);
+    });
+
+    test('buildCreateVesting sends the installment period last', () async {
+      final tx = await createVesting(periodSecs: 30 * day);
+      expect(
+        instructions(tx)[1].data.toList(),
+        encodeCreateVesting(
+          planId: 4,
+          label: 'Team',
+          guard: guard,
+          lockSecs: 3600,
+          startAt: now,
+          revocable: true,
+          schedules: [alpha, beta],
+          periodSecs: 30 * day,
+        ),
+      );
+      for (final bad in [59, 365 * day + 1, -1]) {
+        await expectLater(
+          createVesting(periodSecs: bad),
+          throwsNamed('InvalidVesting'),
+          reason: 'period $bad',
+        );
+      }
+      await createVesting(periodSecs: 60);
+      await createVesting(periodSecs: 365 * day);
     });
 
     test('buildCreateVesting validates before signing', () async {
@@ -1724,6 +1754,115 @@ void main() {
         reason: 'the vault holds no spare SOL',
       );
       expect(rpc.calls, isNot(contains('getLatestBlockhash')));
+    });
+
+    group('installments', () {
+      // 100 days in, monthly installments: 3 have unlocked (90 days); the
+      // 4th unlocks at day 120, 20 days from now.
+      const vested90 = 246575342;
+      const usdcVested90 = 295890;
+      late Ed25519HDKeyPair heir;
+      setUp(() async {
+        heir = await Ed25519HDKeyPair.random();
+        final v = addVesting(
+          4,
+          [
+            schedule(to: heir.address, cliff: 0, released: vested90),
+            schedule(
+              to: heir.address,
+              mint: usdc,
+              total: 1200000,
+              cliff: 0,
+              released: usdcVested90,
+            ),
+            schedule(to: heir.address, cliff: 0),
+          ],
+          lamports: rpc.rentExempt + 1000000000,
+          vestPeriodSecs: 30 * day,
+        );
+        addTokens(v, usdc, 1200000);
+      });
+
+      Matcher nothingUntil(String amount) => throwsA(
+        isA<DeadmanException>()
+            .having((e) => e.name, 'name', 'NothingToPay')
+            .having(
+              (e) => e.message,
+              'message',
+              'Nothing new has unlocked yet. Next installment: $amount on '
+                  '2026-10-17 09:06 UTC.',
+            ),
+      );
+
+      test('every claim path refuses until the next installment', () async {
+        const sol = '0.082191781 SOL';
+        await expectLater(
+          client.buildReleaseVested(
+            executor: executor,
+            vaultOwner: owner,
+            planId: 4,
+            index: 0,
+          ),
+          nothingUntil(sol),
+        );
+        await expectLater(
+          client.releaseVestedWithKey(
+            heir,
+            vaultOwner: owner,
+            planId: 4,
+            index: 0,
+          ),
+          nothingUntil(sol),
+        );
+        await expectLater(
+          client.quoteClaim(
+            claimer: heir.address,
+            vaultOwner: owner,
+            planId: 4,
+            index: 0,
+          ),
+          nothingUntil(sol),
+        );
+        await expectLater(
+          client.buildClaim(
+            claimer: heir.address,
+            vaultOwner: owner,
+            planId: 4,
+            index: 0,
+          ),
+          nothingUntil(sol),
+        );
+        await expectLater(
+          client.buildClaim(
+            claimer: heir.address,
+            vaultOwner: owner,
+            planId: 4,
+            index: 1,
+          ),
+          nothingUntil('0.09863 token ${usdc.substring(0, 4)}…'),
+        );
+        expect(rpc.sent, isEmpty);
+      });
+
+      test('an unclaimed installment releases exactly what unlocked', () async {
+        final quote = await client.quoteClaim(
+          claimer: heir.address,
+          vaultOwner: owner,
+          planId: 4,
+          index: 2,
+        );
+        expect(quote.net, lessThanOrEqualTo(vested90));
+        expect(quote.net, greaterThan(vested90 * 9 ~/ 10));
+        final ix = instructions(
+          await client.buildReleaseVested(
+            executor: executor,
+            vaultOwner: owner,
+            planId: 4,
+            index: 2,
+          ),
+        ).single;
+        expect(ix.data.toList(), [...Disc.releaseVestedSol, 2]);
+      });
     });
 
     test('inheritance-only builds reject vesting plans', () async {

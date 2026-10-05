@@ -129,7 +129,7 @@ Future<void> chooseNewPlan(BuildContext context) async {
                 Icons.stacked_line_chart,
                 DmColors.plus,
                 'Vesting',
-                'Release gradually over time, with an optional cliff. No check-ins.',
+                'Release in installments over time, with an optional cliff. No check-ins.',
               ),
             ])
               Padding(
@@ -933,7 +933,9 @@ class _ArmIntro extends ConsumerWidget {
         OutlinedButton.icon(
           onPressed: () => openVestingEditor(context),
           icon: const Icon(Icons.stacked_line_chart, color: DmColors.plus),
-          label: const Text('Or set up vesting: release gradually over time'),
+          label: const Text(
+            'Or set up vesting: release in installments over time',
+          ),
         ),
         const SizedBox(height: 10),
         Text(

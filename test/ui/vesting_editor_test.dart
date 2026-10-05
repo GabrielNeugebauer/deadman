@@ -2,6 +2,7 @@ import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
 import 'package:deadman/state/providers.dart';
+import 'package:deadman/state/vesting.dart';
 import 'package:deadman/ui/screens/vesting_editor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,11 +12,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../state/fakes.dart';
 
 class _Created {
-  _Created(this.schedules, this.revocable, this.lamports, this.tokens);
+  _Created(
+    this.schedules,
+    this.revocable,
+    this.lamports,
+    this.tokens,
+    this.periodSecs,
+  );
   final List<VestingSpec> schedules;
   final bool revocable;
   final int lamports;
   final Map<String, int> tokens;
+  final int periodSecs;
 }
 
 class _FakeActions extends VaultActions {
@@ -30,10 +38,19 @@ class _FakeActions extends VaultActions {
     required bool revocable,
     required List<VestingSpec> schedules,
     required int lockSecs,
+    int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
   }) async {
-    created.add(_Created(schedules, revocable, depositLamports, tokenDeposits));
+    created.add(
+      _Created(
+        schedules,
+        revocable,
+        depositLamports,
+        tokenDeposits,
+        periodSecs,
+      ),
+    );
     return const [];
   }
 }
@@ -154,10 +171,17 @@ void main() {
     expect(find.text('Your schedules add up to 1500.5 USDC.'), findsOneWidget);
 
     await _tap(tester, 'Next: review');
-    expect(find.textContaining('receives 1500.5 USDC gradually'), findsOne);
+    expect(
+      find.textContaining(
+        'receives 1500.5 USDC over 12 months in 12 installments of about '
+        '125.04 USDC every month, first on',
+      ),
+      findsOne,
+    );
     await _tap(tester, 'Create vesting plan');
 
     final c = created.single;
+    expect(c.periodSecs, monthSecs);
     expect(c.revocable, isTrue);
     expect(c.schedules.single.total, 1500500000);
     expect(c.schedules.single.mint, usdc);
@@ -225,8 +249,19 @@ void main() {
     await tester.enterText(find.byKey(const ValueKey('vest-total')), '0.5');
     await _tap(tester, '10 minutes');
     await _tap(tester, '2 minutes');
-    expect(find.textContaining('unlocks at once'), findsOneWidget);
+    expect(
+      find.textContaining('the first 2 installments unlock together'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Then 0.05 SOL every minute'), findsOneWidget);
     await _tap(tester, 'Done');
+    expect(
+      find.textContaining(
+        '10 installments of 0.05 SOL every minute, the '
+        'first 2 together (0.1 SOL) on',
+      ),
+      findsOneWidget,
+    );
 
     await _tap(tester, 'Next: fund the plan');
     await _tap(tester, 'Next: review');
@@ -245,6 +280,7 @@ void main() {
 
     final c = created.single;
     expect(c.revocable, isFalse);
+    expect(c.periodSecs, 60);
     expect(c.schedules.single.mint, isNull);
     expect(c.schedules.single.total, 500000000);
     expect(c.schedules.single.durationSecs, 600);
@@ -270,6 +306,85 @@ void main() {
     );
     await _tap(tester, 'Create vesting plan');
     expect(created, hasLength(1));
+  });
+
+  testWidgets('"Continuously" keeps the legacy per-second vesting', (
+    tester,
+  ) async {
+    final created = await _pump(tester, api: heldUsdc);
+    expect(find.text('Release every'), findsOneWidget);
+    await _tap(tester, 'Continuously');
+    expect(find.textContaining('a little every second'), findsOneWidget);
+    await _schedule(tester, total: '1200');
+    expect(find.textContaining('Each month after: about'), findsOneWidget);
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    expect(find.textContaining('receives 1200 USDC gradually'), findsOne);
+    await _tap(tester, 'Create vesting plan');
+    expect(created.single.periodSecs, 0);
+  });
+
+  testWidgets('installments: editor preview and summary card', (tester) async {
+    final created = await _pump(tester, api: heldUsdc);
+    await _tap(tester, 'Quarter');
+    await _schedule(tester, total: '1200');
+    await _tap(tester, '3 months');
+    expect(find.textContaining('first installment, 300 USDC'), findsOne);
+    expect(find.textContaining('Then 300 USDC every quarter'), findsOne);
+    expect(find.textContaining('in 4 installments'), findsOne);
+    expect(find.textContaining('Nothing can be claimed between'), findsOne);
+    await _tap(tester, 'Done');
+    expect(
+      find.textContaining(
+        '4 installments of 300 USDC every quarter, first '
+        'on',
+      ),
+      findsOneWidget,
+    );
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create vesting plan');
+    expect(created.single.periodSecs, quarterSecs);
+  });
+
+  testWidgets('a period longer than a schedule is explained and blocks Next', (
+    tester,
+  ) async {
+    final created = await _pump(tester, api: heldUsdc);
+    await _tap(tester, 'Advanced');
+    await _tap(tester, 'Demo timings');
+    expect(find.text('Minute'), findsOneWidget);
+    await _schedule(tester, total: '10');
+    await _tap(tester, '10 minutes');
+    await _tap(tester, 'Done');
+    await tester.enterText(_field('Plan name'), 'Demo');
+    await _tap(tester, 'Day');
+    const why =
+        'Schedule 1 is fully unlocked after 10 minutes, before its first '
+        'installment (one every day). Release more often, or give it a '
+        'longer duration.';
+    expect(find.text(why), findsOneWidget);
+    await _tap(tester, 'Next: fund the plan');
+    expect(find.text('Put in this plan'), findsNothing);
+
+    // The schedule editor offers no duration shorter than one installment.
+    await tester.tap(find.textContaining('· 10 USDC'));
+    await tester.pumpAndSettle();
+    final chip = tester.widget<ChoiceChip>(
+      find.widgetWithText(ChoiceChip, '10 minutes'),
+    );
+    expect(chip.onSelected, isNull);
+    expect(find.textContaining('must last at least that long'), findsOne);
+    await tester.tap(find.byTooltip('Cancel'));
+    await tester.pumpAndSettle();
+
+    await _tap(tester, 'Minute');
+    expect(find.text(why), findsNothing);
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create vesting plan');
+    expect(created.single.periodSecs, 60);
   });
 
   testWidgets('no overflow at 200% text on a phone', (tester) async {

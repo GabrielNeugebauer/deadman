@@ -1,0 +1,31 @@
+import 'package:deadman/solana/deadman_api.dart';
+
+/// [v] releasing in installments of [periodSecs].
+VaultState withPeriod(VaultState v, int periodSecs) => VaultState(
+  address: v.address,
+  owner: v.owner,
+  planId: v.planId,
+  label: v.label,
+  guard: v.guard,
+  guardian: v.guardian,
+  intervalSecs: v.intervalSecs,
+  lockSecs: v.lockSecs,
+  skipGraceSecs: v.skipGraceSecs,
+  lastPulse: v.lastPulse,
+  ownerLastSeen: v.ownerLastSeen,
+  lockedUntil: v.lockedUntil,
+  guardianReadyAt: v.guardianReadyAt,
+  totalPulses: v.totalPulses,
+  streak: v.streak,
+  bestStreak: v.bestStreak,
+  rules: v.rules,
+  lamports: v.lamports,
+  withdrawableLamports: v.withdrawableLamports,
+  kind: v.kind,
+  startAt: v.startAt,
+  revocable: v.revocable,
+  revokedAt: v.revokedAt,
+  rentPayer: v.rentPayer,
+  rentPaid: v.rentPaid,
+  vestPeriodSecs: periodSecs,
+);

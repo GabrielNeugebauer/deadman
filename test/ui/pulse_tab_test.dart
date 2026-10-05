@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
+import '../state/installment_fakes.dart';
 
 Future<void> _pump(
   WidgetTester tester,
@@ -86,6 +87,31 @@ void main() {
     expect(find.textContaining('Committed: 1000 USDC'), findsOneWidget);
     expect(find.textContaining(RegExp(r'^Release \d')), findsOneWidget);
     expect(find.text('Revoke'), findsOneWidget);
+    await _unmount(tester);
+  });
+
+  testWidgets('installments: progress, next date, Release only when due', (
+    tester,
+  ) async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    VaultState plan(int released) => withPeriod(
+      vestingVault(
+        planId: 1,
+        guard: addr(2),
+        startAt: now - 150,
+        withdrawableLamports: 2000000000,
+        schedules: [schedule(duration: 600, released: released)],
+      ),
+      60,
+    );
+    await _pump(tester, [plan(200000000)]);
+    expect(find.text('2 of 10 installments unlocked'), findsOneWidget);
+    expect(find.textContaining('Next installment: 0.100 SOL on '), findsOne);
+    expect(find.textContaining(RegExp(r'^Release \d')), findsNothing);
+    await _unmount(tester);
+
+    await _pump(tester, [plan(0)]);
+    expect(find.text('Release 0.200 SOL'), findsOneWidget);
     await _unmount(tester);
   });
 

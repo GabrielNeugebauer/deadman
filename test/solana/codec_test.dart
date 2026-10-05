@@ -1319,7 +1319,10 @@ void main() {
         schedules: [solSchedule, usdcSchedule],
         periodSecs: 30 * 86400,
       );
-      expect(monthly.sublist(0, data.length - 8), data.sublist(0, data.length - 8));
+      expect(
+        monthly.sublist(0, data.length - 8),
+        data.sublist(0, data.length - 8),
+      );
       expect(monthly.sublist(data.length - 8), le(8, 30 * 86400));
       final irrevocable = encodeCreateVesting(
         planId: 0,
@@ -1557,6 +1560,226 @@ void main() {
       expect(v.vested(0, start + year), 250);
       expect(v.vestingCap(0), 250);
       expect(v.committed(null), 250);
+    });
+
+    group('installments', () {
+      const start = 1780000000;
+      VaultState plan({
+        int period = 100,
+        int total = 1000,
+        int cliff = 0,
+        int duration = 1000,
+        int released = 0,
+        int revokedAt = 0,
+        String? mint,
+      }) => decodeVault(
+        vaultBytes(
+          owner: owner,
+          guard: guard,
+          kind: PlanKind.vesting,
+          startAt: start,
+          revocable: true,
+          revokedAt: revokedAt,
+          vestPeriodSecs: period,
+          rules: [
+            RuleState(
+              beneficiary: alice,
+              rail: Rail.solana,
+              afterSecs: cliff,
+              mint: mint,
+              mode: AmountMode.fixed,
+              amount: total,
+              executedAt: 0,
+              paid: 0,
+              durationSecs: duration,
+              released: released,
+            ),
+          ],
+        ),
+        address: vault,
+        lamports: 0,
+        rentExemptMinimum: 0,
+      );
+
+      test('decodes vest_period_secs right after stipend_paid', () {
+        final bytes = vaultBytes(
+          owner: owner,
+          guard: guard,
+          kind: PlanKind.vesting,
+          stipendPaid: 5,
+          vestPeriodSecs: 30 * 86400,
+        );
+        expect(bytes, hasLength(vaultAccountSize));
+        expect(
+          decodeVault(
+            bytes,
+            address: vault,
+            lamports: 0,
+            rentExemptMinimum: 0,
+          ).vestPeriodSecs,
+          30 * 86400,
+        );
+        expect(plan(period: 0).vestPeriodSecs, 0, reason: 'legacy accounts');
+      });
+
+      test('vests in whole periods, fully at the duration', () {
+        final v = plan();
+        expect(v.vested(0, start - 10), 0);
+        expect(v.vested(0, start), 0);
+        expect(v.vested(0, start + 99), 0);
+        expect(v.vested(0, start + 100), 100);
+        expect(v.vested(0, start + 250), 200);
+        expect(v.vested(0, start + 999), 900);
+        expect(v.vested(0, start + 1000), 1000);
+        expect(v.vested(0, start + 5000), 1000);
+        expect(v.installmentCount(0), 10);
+        expect(v.installmentAmount(0), 100);
+        expect(v.installmentsUnlocked(0, start - 10), 0);
+        expect(v.installmentsUnlocked(0, start + 250), 2);
+        expect(v.installmentsUnlocked(0, start + 1000), 10);
+        expect(v.nextInstallmentAt(0, start - 10), start + 100);
+        expect(v.nextInstallmentAt(0, start), start + 100);
+        expect(v.nextInstallmentAt(0, start + 100), start + 200);
+        expect(v.nextInstallmentAt(0, start + 250), start + 300);
+        expect(v.nextInstallmentAt(0, start + 999), start + 1000);
+        expect(v.nextInstallmentAt(0, start + 1000), isNull);
+      });
+
+      test('claims nothing between installments', () {
+        final v = plan(released: 200);
+        expect(v.claimable(0, start + 250), 0);
+        expect(v.claimable(0, start + 299), 0);
+        expect(v.claimable(0, start + 300), 100);
+        expect(v.committed(null), 800);
+        expect(plan(released: 1000).nextInstallmentAt(0, start + 1000), isNull);
+      });
+
+      test('the cliff unlocks every installment it covers at once', () {
+        final v = plan(cliff: 250);
+        expect(v.vested(0, start + 249), 0);
+        expect(v.vested(0, start + 250), 200);
+        expect(v.vested(0, start + 299), 200);
+        expect(v.vested(0, start + 300), 300);
+        expect(v.installmentsUnlocked(0, start + 249), 0);
+        expect(v.installmentsUnlocked(0, start + 250), 2);
+        expect(v.nextInstallmentAt(0, start + 100), start + 250);
+        expect(v.nextInstallmentAt(0, start + 250), start + 300);
+        final onBoundary = plan(cliff: 300);
+        expect(onBoundary.nextInstallmentAt(0, start), start + 300);
+        expect(onBoundary.vested(0, start + 300), 300);
+        final shortCliff = plan(cliff: 50);
+        expect(shortCliff.vested(0, start + 50), 0);
+        expect(shortCliff.nextInstallmentAt(0, start), start + 100);
+        final fullCliff = plan(cliff: 1000);
+        expect(fullCliff.vested(0, start + 999), 0);
+        expect(fullCliff.nextInstallmentAt(0, start), start + 1000);
+      });
+
+      test('a duration that is not a whole number of periods', () {
+        final v = plan(period: 300);
+        expect(v.installmentCount(0), 4);
+        expect(v.installmentAmount(0), 300);
+        expect(v.vested(0, start + 899), 600);
+        expect(v.vested(0, start + 900), 900);
+        expect(v.vested(0, start + 999), 900);
+        expect(v.vested(0, start + 1000), 1000);
+        expect(v.installmentsUnlocked(0, start + 999), 3);
+        expect(v.installmentsUnlocked(0, start + 1000), 4);
+        expect(v.nextInstallmentAt(0, start + 900), start + 1000);
+        final single = plan(period: 1000);
+        expect(single.installmentCount(0), 1);
+        expect(single.vested(0, start + 999), 0);
+        expect(single.nextInstallmentAt(0, start), start + 1000);
+      });
+
+      test('skips boundaries that round down to nothing new', () {
+        final v = plan(total: 3);
+        expect(v.vested(0, start + 300), 0);
+        expect(v.nextInstallmentAt(0, start), start + 400);
+        expect(v.vested(0, start + 400), 1);
+        expect(v.nextInstallmentAt(0, start + 400), start + 700);
+        expect(v.vested(0, start + 700), 2);
+        expect(v.nextInstallmentAt(0, start + 700), start + 1000);
+      });
+
+      test('revocation freezes the unlocked installments', () {
+        final v = plan(revokedAt: start + 250);
+        expect(v.vested(0, start + 1000), 200);
+        expect(v.vestingCap(0), 200);
+        expect(v.committed(null), 200);
+        expect(v.installmentsUnlocked(0, start + 1000), 2);
+        expect(v.nextInstallmentAt(0, start + 260), isNull);
+        expect(
+          plan(revokedAt: start + 250, released: 200).claimable(0, start + 900),
+          0,
+        );
+      });
+
+      test('period 0 vests continuously, as before', () {
+        final v = plan(period: 0, cliff: 90);
+        for (final t in [-5, 0, 89, 90, 91, 333, 999, 1000, 1500]) {
+          final elapsed = t;
+          final expected = elapsed < 90
+              ? 0
+              : elapsed >= 1000
+              ? 1000
+              : 1000 * elapsed ~/ 1000;
+          expect(v.vested(0, start + t), expected, reason: 't=$t');
+        }
+        expect(v.installmentCount(0), isNull);
+        expect(v.installmentsUnlocked(0, start + 500), isNull);
+        expect(v.nextInstallmentAt(0, start + 500), isNull);
+        expect(v.installmentAmount(0), isNull);
+      });
+
+      test('large amounts stay exact', () {
+        final v = plan(
+          total: 9000000000000000000,
+          duration: 20 * 366 * 86400,
+          period: 30 * 86400,
+        );
+        final count = v.installmentCount(0)!;
+        expect(count, (20 * 366 + 29) ~/ 30);
+        expect(
+          v.vested(0, start + 30 * 86400),
+          (BigInt.from(9000000000000000000) *
+                  BigInt.from(30 * 86400) ~/
+                  BigInt.from(20 * 366 * 86400))
+              .toInt(),
+        );
+        expect(v.nextInstallmentAt(0, start + 1), start + 30 * 86400);
+      });
+
+      test('vestingError checks the period against every schedule', () {
+        VestingSpec s(int duration) => VestingSpec(
+          beneficiary: alice,
+          rail: Rail.solana,
+          total: 10,
+          cliffSecs: 0,
+          durationSecs: duration,
+        );
+        int? check(int periodSecs, {List<int> durations = const [100, 1000]}) =>
+            vestingError(
+              owner: owner,
+              vault: vault,
+              guard: guard,
+              lockSecs: 3600,
+              startAt: now,
+              schedules: [for (final d in durations) s(d)],
+              now: now,
+              periodSecs: periodSecs,
+            );
+        expect(Limits.minVestPeriodSecs, 60);
+        expect(check(0), isNull);
+        expect(check(60), isNull);
+        expect(check(100), isNull);
+        expect(check(59), 6022);
+        expect(check(1), 6022);
+        expect(check(-60), 6022);
+        expect(check(101), 6022);
+        expect(check(60, durations: [59]), 6022);
+        expect(check(0, durations: [59]), isNull);
+      });
     });
 
     test('vestingError mirrors create_vesting', () {
