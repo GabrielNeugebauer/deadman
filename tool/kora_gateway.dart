@@ -1548,7 +1548,18 @@ class KoraGateway {
   Future<void> handle(HttpRequest req) async {
     final res = req.response;
     final ip = req.connectionInfo?.remoteAddress.address ?? '?';
+    // The web app calls from the browser. No cookies or credentials are
+    // involved, and every request is validated and rate-limited anyway.
+    res.headers
+      ..set('Access-Control-Allow-Origin', '*')
+      ..set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+      ..set('Access-Control-Allow-Headers', 'content-type')
+      ..set('Access-Control-Max-Age', '86400');
     try {
+      if (req.method == 'OPTIONS') {
+        res.statusCode = HttpStatus.noContent;
+        return;
+      }
       if (req.method == 'GET' && req.uri.path == '/liveness') {
         final r = await _http.get(upstream.resolve('/liveness'));
         res.statusCode = r.statusCode == 200 ? 200 : 502;

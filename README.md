@@ -12,7 +12,7 @@ Deadman is an Android app for the Solana Seeker plus an Anchor program. You put 
 
 You check in with a **Pulse**: one biometric touch, about 3 seconds, and no wallet prompt. It resets every pending rule and adds to an on-chain streak. With **Family Circle**, your beneficiaries and guardian see your liveness ("checked in 2h ago") and the state of each tier that names them.
 
-Next to these inheritance plans, a **vesting plan** releases SOL or USDC to up to 8 people linearly over time, with an optional cliff, whether you check in or not ([Vesting](#vesting)).
+Next to these inheritance plans, a **vesting plan** releases SOL or USDC to up to 8 people in installments (monthly by default), with an optional cliff, whether you check in or not ([Vesting](#vesting)).
 
 Deadman is free to use. The protocol charges a fee only when a rule or vesting schedule actually releases funds (2% on the Solana rail, 5% on private rails), or the owner opts into an account-wide monthly plan that waives that fee on all their plans ([Pricing](#pricing)). Network fees are paid in SOL, or, if you opt in, in USDC through a Kora paymaster, so a wallet with no SOL can use every feature ([Network fees in USDC](#network-fees-in-usdc)).
 
@@ -28,7 +28,7 @@ Deadman's bet is execution on the phone, plus a release plan richer than "split 
 
 - **Guard key.** Each install generates a hot key in secure storage behind biometrics. On-chain, this key may only `pulse` and `lockdown`; it can never withdraw. Check-ins and the duress path therefore need no Seed Vault prompt, and a stolen guard key cannot take funds.
 - **Duress is a time-lock, not a decoy.** The duress PIN does not send funds to a "safe wallet" that the attacker could demand next. It freezes the vault for `lock_secs`. An early unlock needs the owner and the guardian to sign together.
-- **Vesting next to inheritance.** The same vault, keys and lockdown also run linear vesting schedules (payroll, allowances, a gift over time), revocable or irrevocable.
+- **Vesting next to inheritance.** The same vault, keys and lockdown also run installment vesting schedules (payroll, allowances, a gift over time), revocable or irrevocable.
 - **Tiered release, not a single trigger.** "After 10 days, 1 SOL to my partner; after 30 days, everything else to my brother." Tiers fire one by one, and one Pulse stops the rest. A long trip costs you the first tier at most, not the estate.
 - **Private delivery.** A tier can pay out through Cloak (shielded pool on Solana) or as shielded ZEC, so a beneficiary's main wallet is not publicly tied to the estate on Solana. The limits of that privacy are spelled out [below](#private-rails).
 - **A habit and a social loop.** The Pulse streak and Family Circle answer the question every proof-of-life app faces: "why open it when nothing is happening?"
@@ -118,10 +118,10 @@ Full account, trust and threat models: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Vesting
 
-A vesting plan (`PlanKind::Vesting`, `create_vesting`) holds up to 8 schedules. Each pays `total` of SOL or a token (USDC in the app) to one beneficiary, linearly from the plan's `start_at` over `duration_secs`, and nothing before `cliff_secs`.
+A vesting plan (`PlanKind::Vesting`, `create_vesting`) holds up to 8 schedules. Each pays `total` of SOL or a token (USDC in the app) to one beneficiary from the plan's `start_at` over `duration_secs`, nothing before `cliff_secs`, in installments of the plan's `period_secs`: only whole periods since `start_at` count, so value unlocks once per period (the last installment lands exactly at `duration_secs`) and a claim between installments fails with `NothingToPay`. `period_secs` is 60 s up to the shortest duration, or 0 for continuous per-second vesting (also how plans created before installments read). See [How it works §3.4](docs/HOW_IT_WORKS.md).
 
-- **Release:** anyone calls `release_vested_sol` / `release_vested_token`. The keeper does it at most once per `--vest-interval` per schedule (and once it is fully vested), the owner can tap **Release**, and the beneficiary can **Claim vested** in Family Circle. Each release pays the rail's fee (2% / 5%).
-- **Revocable or irrevocable.** `revoke_vesting` stops future vesting; what vested by then stays claimable.
+- **Release:** anyone calls `release_vested_sol` / `release_vested_token`. The keeper releases installment plans as soon as an installment unlocks, and continuous plans at most once per `--vest-interval` (and once fully vested); the owner can tap **Release**, and the beneficiary can **Claim vested** in Family Circle. Each release pays the rail's fee (2% / 5%).
+- **Revocable or irrevocable.** `revoke_vesting` stops future vesting; the installments unlocked by then stay claimable.
 - **Committed funds:** the owner can always deposit, but withdraws only what the plan does not owe, and closes it only when nothing is owed.
 - **Not part of check-ins:** `pulse` refuses vesting plans. **Lockdown covers them**: the duress PIN and Panic freeze withdraw, revoke and close; releases continue.
 - App: `lib/ui/screens/vesting_editor.dart`, `VestingPlanCard` in `lib/ui/screens/pulse_tab.dart`, claims in `lib/ui/screens/circle_tab.dart`.
@@ -229,7 +229,7 @@ flutter build apk --dart-define=CLUSTER=mainnet-beta --dart-define=RPC_URL=<rpc>
   --dart-define=ONECLICK_JWT=<optional partner token>      # private rails and Earn
 ```
 
-`flutter test` runs 669 tests. The 62 LiteSVM integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover: config gated to the upgrade authority and the 5% cap, guard pulses and day streaks, rule validation, tiered SOL rules paying in order with per-rail fees, per-asset ordering, a pulse resetting pending rules after a partial release, dust to a fresh account being skipped, token rules with fees and independent order, the private-rail gas stipend, duress lockdown freezing funds and policy, lockdown not stopping inheritance, the guard being unable to move funds, the guardian lockdown cooldown and removal, co-signed unlock, owner-only token withdrawal, `close_vault` blocked while locked, independent plans per owner, a sponsor paying vault rent and getting it back on close, skipping unpayable tiers, the guard-only check-in window, vesting (linear release after the cliff, committed funds, revocation, token releases with fees, validation, plan kinds not mixing), the account-wide monthly subscription (minimum term, extension and lapse, a sponsor paying its rent, every plan of the owner fee-free including later ones, no substitution of another account), and a compute-unit profile.
+`flutter test` runs 700 tests. The 70 LiteSVM integration tests in `onchain/programs/deadman/tests/test_deadman.rs` cover: config gated to the upgrade authority and the 5% cap, guard pulses and day streaks, rule validation, tiered SOL rules paying in order with per-rail fees, per-asset ordering, a pulse resetting pending rules after a partial release, dust to a fresh account being skipped, token rules with fees and independent order, the private-rail gas stipend, duress lockdown freezing funds and policy, lockdown not stopping inheritance, the guard being unable to move funds, the guardian lockdown cooldown and removal, co-signed unlock, owner-only token withdrawal, `close_vault` blocked while locked, independent plans per owner, a sponsor paying vault rent and getting it back on close, skipping unpayable tiers, the guard-only check-in window, vesting (linear and installment release after the cliff, one payout per installment, committed funds, revocation, token releases with fees, validation, plan kinds not mixing), the account-wide monthly subscription (minimum term, extension and lapse, a sponsor paying its rent, every plan of the owner fee-free including later ones, no substitution of another account), and a compute-unit profile.
 
 **Program ID:** `ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL`. Check the devnet deployment with `solana program show ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL --url devnet`.
 

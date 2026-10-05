@@ -1080,7 +1080,7 @@ String? installmentsText(
   final amount = moneyText(n.amount, s.mint);
   final head = n.count == 1
       ? '1 installment of ${moneyText(s.total, s.mint)}'
-      : '${n.count} installments of ${n.lastSmaller ? 'about ' : ''}$amount '
+      : '${n.count} installments of ${n.even ? '' : 'about '}$amount '
             'every $every${n.lastSmaller ? ' (the last one smaller)' : ''}';
   final first = n.firstCount > 1
       ? 'the first ${n.firstCount} together '

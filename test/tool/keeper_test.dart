@@ -308,6 +308,20 @@ void main() {
       expect(due(1000 + 60, full: true, last: 1000), isTrue);
     });
 
+    test('installment plans release each unlock right away', () {
+      bool due(int claimable, {int? last}) => vestingReleaseDue(
+        claimable: claimable,
+        fullyVested: false,
+        now: 1000 + 60,
+        interval: 86400,
+        lastRelease: last,
+        installments: true,
+      );
+      expect(due(5, last: 1000), isTrue, reason: 'no --vest-interval wait');
+      expect(due(5), isTrue);
+      expect(due(0, last: 1000), isFalse, reason: 'between installments');
+    });
+
     test('an underfunded vault releases what it holds', () {
       final tier = vestingAsTier(rule(), 4000000);
       final d = decideSol(tier, sol(available: 3000000), canSkip: false);

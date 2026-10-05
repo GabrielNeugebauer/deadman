@@ -102,16 +102,18 @@ class Installments {
     required this.firstCount,
     required this.firstAmount,
     required this.lastSmaller,
+    required this.total,
   });
 
+  final int total;
   final int periodSecs;
   final int count;
 
   /// One installment: floor(total × period / duration).
   final int amount;
 
-  /// When the first installment unlocks (unix seconds): the first period
-  /// boundary at or past the cliff.
+  /// When the first installment unlocks (unix seconds): at the cliff, with
+  /// every whole period it covered, or after one period without a cliff.
   final int firstAt;
 
   /// Installments that unlock together at [firstAt] (more than one after a
@@ -122,6 +124,9 @@ class Installments {
   /// The duration is not a whole number of periods: the last one is a
   /// partial installment.
   final bool lastSmaller;
+
+  /// Every installment is exactly [amount].
+  bool get even => !lastSmaller && amount * count == total;
 }
 
 /// The installments of a schedule starting at [startAt]; null when it
@@ -137,8 +142,9 @@ Installments? installmentsOf({
     return null;
   }
   final count = (durationSecs + periodSecs - 1) ~/ periodSecs;
-  final k = math.max(1, (cliffSecs + periodSecs - 1) ~/ periodSecs);
-  final firstOffset = math.min(k * periodSecs, durationSecs);
+  // What whole periods passed unlocks at the cliff; without one, at the
+  // first period boundary.
+  final firstOffset = math.min(math.max(cliffSecs, periodSecs), durationSecs);
   return Installments(
     periodSecs: periodSecs,
     count: count,
@@ -148,7 +154,7 @@ Installments? installmentsOf({
                 BigInt.from(durationSecs))
             .toInt(),
     firstAt: startAt + firstOffset,
-    firstCount: math.min(k, count),
+    firstCount: firstOffset >= durationSecs ? count : firstOffset ~/ periodSecs,
     firstAmount: vestedAfter(
       total: total,
       cliffSecs: cliffSecs,
@@ -157,6 +163,7 @@ Installments? installmentsOf({
       elapsed: firstOffset,
     ),
     lastSmaller: durationSecs % periodSecs != 0,
+    total: total,
   );
 }
 

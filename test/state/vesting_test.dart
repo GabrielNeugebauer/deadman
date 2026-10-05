@@ -5,6 +5,7 @@ import 'package:deadman/state/vesting.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fakes.dart';
+import 'installment_fakes.dart';
 
 void main() {
   const usdc = AppConfig.usdcMint;
@@ -70,6 +71,91 @@ void main() {
       expect(p.fullyVested, isTrue);
       expect(p.revoked, isTrue);
       expect(r.committed(usdc), 250000000);
+    });
+
+    test('installments: unlocked count, next date and amount', () {
+      // 1000 USDC over 600 s from t=1000, a 120 s cliff, one per minute.
+      final w = withPeriod(
+        vestingVault(
+          startAt: 1000,
+          schedules: [
+            schedule(
+              mint: usdc,
+              total: 1000000000,
+              cliff: 120,
+              duration: 600,
+              released: 200000000,
+            ),
+          ],
+        ),
+        60,
+      );
+      final before = scheduleProgress(w, 0, 1100);
+      expect(before.installmentCount, 10);
+      expect(before.installmentsUnlocked, 0);
+      expect(before.nextInstallmentAt, 1120);
+      expect(before.nextInstallmentAmount, 200000000);
+
+      final p = scheduleProgress(w, 0, 1179);
+      expect(p.installments, isTrue);
+      expect(p.installmentsUnlocked, 2);
+      expect(p.vested, 200000000);
+      expect(p.claimable, 0);
+      expect(p.nextInstallmentAt, 1180);
+      expect(p.nextInstallmentAmount, 100000000);
+
+      final done = scheduleProgress(w, 0, 1600);
+      expect(done.installmentsUnlocked, 10);
+      expect(done.nextInstallmentAt, isNull);
+
+      final legacy = scheduleProgress(v, 0, 1500);
+      expect(legacy.installments, isFalse);
+      expect(legacy.installmentCount, isNull);
+      expect(legacy.nextInstallmentAt, isNull);
+    });
+
+    test('the editor math matches VaultState.vested', () {
+      for (final period in [0, 60, 70, 600]) {
+        for (final cliff in [0, 50, 120, 600]) {
+          final w = withPeriod(
+            vestingVault(
+              startAt: 1000,
+              schedules: [
+                schedule(total: 999999937, cliff: cliff, duration: 600),
+              ],
+            ),
+            period,
+          );
+          for (var t = 900; t <= 1700; t += 7) {
+            expect(
+              vestedAfter(
+                total: 999999937,
+                cliffSecs: cliff,
+                durationSecs: 600,
+                periodSecs: period,
+                elapsed: t - 1000,
+              ),
+              w.vested(0, t),
+              reason: 'period $period cliff $cliff t $t',
+            );
+          }
+          final n = installmentsOf(
+            total: 999999937,
+            cliffSecs: cliff,
+            durationSecs: 600,
+            periodSecs: period,
+            startAt: 1000,
+          );
+          if (period == 0) {
+            expect(n, isNull);
+            continue;
+          }
+          expect(n!.count, w.installmentCount(0));
+          expect(n.amount, w.installmentAmount(0));
+          expect(n.firstAt, w.nextInstallmentAt(0, 999));
+          expect(n.firstAmount, w.vested(0, n.firstAt));
+        }
+      }
     });
   });
 

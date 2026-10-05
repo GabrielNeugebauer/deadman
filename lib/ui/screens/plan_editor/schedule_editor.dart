@@ -67,11 +67,16 @@ class ScheduleEditorPage extends ConsumerStatefulWidget {
     required this.number,
     required this.demo,
     required this.startAt,
+    this.periodSecs = 0,
   });
 
   final ScheduleDraft? initial;
   final int number;
   final bool demo;
+
+  /// The plan's installment interval (0 = continuous): durations shorter
+  /// than one installment are not offered.
+  final int periodSecs;
 
   /// When the plan starts (unix seconds), for the milestones.
   final int startAt;
@@ -92,7 +97,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
     text: _init == null ? '' : amountInput(_init.total, _init.mint),
   );
   late int _cliff = _init?.cliffSecs ?? 0;
-  late int _duration = _init?.durationSecs ?? 12 * monthSecs;
+  late int _duration = _init?.durationSecs ?? _defaultDuration;
   late String? _factsAddress = _who.valid ? _who.value : null;
   final _totalFocus = FocusNode();
   final _whoKey = GlobalKey();
@@ -108,6 +113,13 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
     _total.dispose();
     _totalFocus.dispose();
     super.dispose();
+  }
+
+  int get _defaultDuration {
+    final fits = durationChoices(demo: widget.demo)
+        .map((c) => c.$1)
+        .where((d) => d >= widget.periodSecs);
+    return fits.contains(12 * monthSecs) ? 12 * monthSecs : fits.first;
   }
 
   int? get _totalValue {
@@ -205,6 +217,8 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
     ]);
     final cliffs = cliffChoices(demo: widget.demo);
     final durations = durationChoices(demo: widget.demo);
+    final period = widget.periodSecs;
+    final tooShort = durations.where((c) => c.$1 < period).isNotEmpty;
     const label = TextStyle(color: DmColors.muted, fontWeight: FontWeight.w600);
     return PopScope(
       canPop: !_dirty,
@@ -325,21 +339,43 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                         ChoiceChip(
                           label: Text(text),
                           selected: _duration == secs,
-                          onSelected: (_) => setState(() {
-                            _duration = secs;
-                            if (_cliff > secs) _cliff = 0;
-                            _dirty = true;
-                          }),
+                          onSelected: secs < period
+                              ? null
+                              : (_) => setState(() {
+                                  _duration = secs;
+                                  if (_cliff > secs) _cliff = 0;
+                                  _dirty = true;
+                                }),
                         ),
                     ],
                   ),
+                  if (tooShort) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'This plan releases one installment every '
+                      '${vestPeriodWord(period)}, so a schedule must last at '
+                      'least that long. For shorter ones, change "Release '
+                      'every" on the plan.',
+                      style: const TextStyle(
+                        color: DmColors.muted,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
                 ],
               ),
               const SizedBox(height: 12),
               SectionCard(
                 number: 4,
                 title: 'How it unlocks',
-                children: [SchedulePreview(draft: d, startAt: widget.startAt)],
+                children: [
+                  SchedulePreview(
+                    draft: d,
+                    startAt: widget.startAt,
+                    periodSecs: period,
+                  ),
+                ],
               ),
             ],
           ),
@@ -356,7 +392,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 LivePreview(
-                  text: TextSpan(text: _previewLine(d, total, fee)),
+                  text: TextSpan(text: _previewLine(d, total, fee, period)),
                   issue: worstOf(warnings),
                   onIssue: () {
                     final c = _whatKey.currentContext;
@@ -373,12 +409,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
     );
   }
 
-  String _previewLine(ScheduleDraft d, int? total, FeeInfo fee) {
+  String _previewLine(ScheduleDraft d, int? total, FeeInfo fee, int period) {
     if (total == null) return 'Enter a total to see what they get.';
     final (net, _) = splitFee(total, fee.bpsFor(d.rail));
+    final n = d.installments(periodSecs: period, startAt: widget.startAt);
     final over =
         '${moneyText(total, d.mint)} to ${d.who} over '
-        '${durationLabel(d.durationSecs)}';
+        '${durationLabel(d.durationSecs)}'
+        '${n == null ? '' : ' in ${n.count} ${n.count == 1 ? 'installment' : 'installments'}'}';
     if (fee.waived) return '$over (no fee).';
     if (fee.fees == null) return '$over (before fees).';
     return '$over (after the ${percentText(fee.fees!.bpsFor(d.rail) / 10000)} '
@@ -393,10 +431,14 @@ class SchedulePreview extends StatefulWidget {
     super.key,
     required this.draft,
     required this.startAt,
+    this.periodSecs = 0,
   });
 
   final ScheduleDraft draft;
   final int startAt;
+
+  /// The plan's installment interval; 0 = continuous.
+  final int periodSecs;
 
   @override
   State<SchedulePreview> createState() => _SchedulePreviewState();
@@ -410,29 +452,49 @@ class _SchedulePreviewState extends State<SchedulePreview> {
     final s = widget.draft;
     final start = widget.startAt;
     final total = s.total;
-    final perMonth = s.durationSecs >= monthSecs
+    final period = widget.periodSecs;
+    final n = s.installments(periodSecs: period, startAt: start);
+    final perMonth = n == null && s.durationSecs >= monthSecs
         ? (BigInt.from(total) *
                   BigInt.from(monthSecs) ~/
                   BigInt.from(s.durationSecs))
               .toInt()
         : null;
+    String date(int at) => installmentDate(at, period);
+    double at(int secs) => ((secs - start) / s.durationSecs).clamp(0.0, 1.0);
     final milestones = <(String, double)>[
-      ('${dateText(start)}: ${moneyText(0, s.mint)}', 0),
-      if (s.cliffSecs > 0)
-        (
-          '${dateText(start + s.cliffSecs)}: ${moneyText(s.atCliff, s.mint)} '
-              'unlocks at once',
-          s.cliffSecs / s.durationSecs,
-        ),
-      if (perMonth != null)
-        (
-          'Each month after: about ${moneyText(perMonth, s.mint)}',
-          (s.cliffSecs + monthSecs).clamp(0, s.durationSecs) / s.durationSecs,
-        ),
-      (
-        '${dateText(start + s.durationSecs)}: all ${moneyText(total, s.mint)}',
-        1,
-      ),
+      ('${date(start)}: ${moneyText(0, s.mint)}', 0),
+      if (n != null) ...[
+        if (n.firstAt < start + s.durationSecs)
+          (
+            n.firstCount > 1
+                ? '${date(n.firstAt)}: the first ${n.firstCount} '
+                      'installments unlock together, '
+                      '${moneyText(n.firstAmount, s.mint)}'
+                : '${date(n.firstAt)}: first installment, '
+                      '${moneyText(n.firstAmount, s.mint)}',
+            at(n.firstAt),
+          ),
+        if (n.firstAt + period < start + s.durationSecs)
+          (
+            'Then ${moneyText(n.amount, s.mint)} every '
+                '${vestPeriodWord(period)}',
+            at(n.firstAt + period),
+          ),
+      ] else ...[
+        if (s.cliffSecs > 0)
+          (
+            '${dateText(start + s.cliffSecs)}: ${moneyText(s.atCliff, s.mint)} '
+                'unlocks at once',
+            s.cliffSecs / s.durationSecs,
+          ),
+        if (perMonth != null)
+          (
+            'Each month after: about ${moneyText(perMonth, s.mint)}',
+            (s.cliffSecs + monthSecs).clamp(0, s.durationSecs) / s.durationSecs,
+          ),
+      ],
+      ('${date(start + s.durationSecs)}: all ${moneyText(total, s.mint)}', 1),
     ];
     final selected = _selected.clamp(0, milestones.length - 1);
     return Column(
@@ -473,8 +535,12 @@ class _SchedulePreviewState extends State<SchedulePreview> {
           ),
         const SizedBox(height: 6),
         Text(
-          'Deadman sends what has unlocked about once a day. ${s.who} can also '
-          'claim it any time.',
+          n == null
+              ? 'Deadman sends what has unlocked about once a day. ${s.who} '
+                    'can also claim it any time.'
+              : 'Nothing can be claimed between installments. Deadman sends '
+                    'each one within about a day of unlocking; ${s.who} can '
+                    'also claim it as soon as it unlocks.',
           style: const TextStyle(color: DmColors.muted, height: 1.4),
         ),
       ],

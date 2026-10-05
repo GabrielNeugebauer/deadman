@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
+import '../state/installment_fakes.dart';
 
 const usdc = AppConfig.usdcMint;
 
@@ -214,6 +215,47 @@ void main() {
       find.text('Waiting for funds: this plan holds no USDC yet'),
       findsOneWidget,
     );
+  });
+
+  group('installments', () {
+    // 1 SOL in 10 one-minute installments, started 150 s ago: 2 unlocked.
+    VaultState plan({required int released}) {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return withPeriod(
+        vestingVault(
+          startAt: now - 150,
+          withdrawableLamports: 1000000000,
+          schedules: [schedule(seed: 10, duration: 600, released: released)],
+        ),
+        60,
+      );
+    }
+
+    final claimVested = find.textContaining('Claim vested');
+
+    testWidgets('between installments there is nothing to claim', (
+      tester,
+    ) async {
+      await _pump(tester, [plan(released: 200000000)]);
+      expect(find.text('2 of 10 installments unlocked'), findsOneWidget);
+      expect(
+        find.textContaining('Next installment: 0.100 SOL on '),
+        findsOneWidget,
+      );
+      expect(claimVested, findsNothing);
+    });
+
+    testWidgets('an unclaimed installment can be claimed', (tester) async {
+      await _pump(
+        tester,
+        [plan(released: 100000000)],
+        fake: _ClaimApi(
+          const ClaimQuote(payer: ClaimPayer.sponsor, mint: null, net: 1),
+        ),
+      );
+      expect(find.text('2 of 10 installments unlocked'), findsOneWidget);
+      expect(_button(tester, 'Claim vested 0.100 SOL').onPressed, isNotNull);
+    });
   });
 
   group('claim cost', () {

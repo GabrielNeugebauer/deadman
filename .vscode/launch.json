@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Deadman web (open http://localhost:8686 in your Chrome)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "deviceId": "web-server",
+      "args": [
+        "--web-port",
+        "8686",
+        "--dart-define=KORA_SPONSOR_URL=http://localhost:8080",
+        "--dart-define=KORA_PAYMASTER_URL=http://localhost:8081"
+      ]
+    },
+    {
+      "name": "Deadman Android (phone on the same Wi-Fi)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": [
+        "--dart-define=KORA_SPONSOR_URL=http://192.168.15.54:8080",
+        "--dart-define=KORA_PAYMASTER_URL=http://192.168.15.54:8081"
+      ]
+    }
+  ]
+}

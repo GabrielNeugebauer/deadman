@@ -207,7 +207,8 @@ class DeadmanException implements Exception {
     6022: (
       'InvalidVesting',
       'Vesting schedules need a total, a cliff no longer than the duration, '
-          'and a duration up to 20 years',
+          'a duration up to 20 years, and an installment period of 0 or 60s '
+          'up to the shortest duration',
     ),
     6023: ('NotRevocable', 'This vesting plan cannot be revoked'),
     6024: ('AlreadyRevoked', 'Vesting was already revoked'),
@@ -246,7 +247,9 @@ class DeadmanException implements Exception {
     6022:
         'Each vesting schedule needs an amount, a cliff no longer than its '
         'duration (at most 20 years), a beneficiary other than you or this '
-        'device, and a start date within a year of today (1 to 8 schedules)',
+        'device, and a start date within a year of today (1 to 8 schedules). '
+        'Installments must be at least a minute apart and no longer than the '
+        'shortest schedule',
     6023:
         'This vesting plan was created as irrevocable, so it cannot be stopped',
     6024: 'Vesting on this plan was already stopped',

@@ -2,7 +2,7 @@
 
 Every design choice, technology and user flow in the current build (updated 2026-10-04: vesting plans, USDC, network fees in USDC, account-wide monthly plan). Research behind the rails, with sources: [`docs/research/`](research/).
 
-**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Next to these inheritance plans you can open _vesting plans_ that release SOL or USDC to someone linearly over time, whether you check in or not. Plans hold SOL and USDC, and an owner with no SOL at all can pay network fees in USDC. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, or the owner prefers an optional monthly plan that covers their whole account, and it earns on the optional staking yield path.
+**In one paragraph:** Deadman is a vault on Solana that you control from your Seeker. You check in with a 3-second fingerprint "pulse". You write a _release plan_: tiers like "after 30 days of silence, send 10% of my SOL to my spouse; after 90 days, send everything else to my kids as shielded Zcash". If you stop checking in, the tiers fire in order. If someone forces you to open the app, a duress PIN silently freezes the vault. Next to these inheritance plans you can open _vesting plans_ that release SOL or USDC to someone in installments (monthly by default) over time, whether you check in or not. Plans hold SOL and USDC, and an owner with no SOL at all can pay network fees in USDC. Deadman charges nothing to use; it takes a fee only when a tier actually releases funds, or the owner prefers an optional monthly plan that covers their whole account, and it earns on the optional staking yield path.
 
 ---
 
@@ -99,14 +99,27 @@ A plan is either an **inheritance** plan (§3.3) or a **vesting** plan (`PlanKin
 
 ```
 beneficiary · rail · asset (SOL or USDC in the app) · total · cliff · duration
+plan-wide: start_at · revocable · period (installment length)
 ```
 
-- **Up to 8 schedules**, all starting at the plan's `start_at` (now, or a chosen date up to a year ahead). Each vests **linearly** from `start_at` over its `duration`; nothing is claimable before the `cliff` (`create_vesting`).
-- **Release:** anyone may call `release_vested_sol` / `release_vested_token`; the destination is fixed in the schedule. It pays what has vested and not yet been released, capped at the vault balance, minus **the same release fee as inheritance** (2% Solana rail, 5% private rails, rounded down). The keeper releases each schedule at most once per `--vest-interval` (default 1 day), and always once it is fully vested.
-- **Revocable or irrevocable**, chosen at creation. `revoke_vesting` (revocable plans only) stops future vesting; what had vested by then **stays claimable** by the beneficiary.
+- **Up to 8 schedules**, all starting at the plan's `start_at` (now, or a chosen date up to a year ahead). Nothing is claimable before the `cliff` (`create_vesting`).
+- **Installments.** The plan's `period_secs` (stored as `Vault.vest_period_secs`, carved out of the reserved space so the account stays 1390 bytes) sets how often value unlocks. Vesting counts only whole periods since `start_at`:
+
+  ```
+  elapsed  = min(now, revoked_at if revoked) - start_at
+  vested   = 0                                   if elapsed < cliff
+           = total                               if elapsed >= duration
+           = total * floor(elapsed / period) * period / duration   (rounded down, u128)
+  claimable = vested - released
+  ```
+
+  So a schedule pays a fixed installment (`total * period / duration`) at each boundary and nothing in between: a claim right after an installment fails with `NothingToPay` until the next boundary. Missed installments add up and are paid together. When the duration is not a whole number of periods, the last installment is the remainder, paid exactly at `start_at + duration`. A cliff longer than one period unlocks every installment it covered at once, at the cliff itself.
+- **Period limits:** 60 seconds (`MIN_VEST_PERIOD_SECS`) up to the shortest schedule's duration; anything else is `InvalidVesting`. `period_secs = 0` keeps the original **continuous** (per-second) vesting, which is also how every plan created before installments existed reads (its reserved bytes are zero).
+- **Release:** anyone may call `release_vested_sol` / `release_vested_token`; the destination is fixed in the schedule. It pays what has vested and not yet been released, capped at the vault balance, minus **the same release fee as inheritance** (2% Solana rail, 5% private rails, rounded down). The keeper releases an installment plan as soon as something has unlocked; continuous plans at most once per `--vest-interval` (default 1 day), and always once fully vested.
+- **Revocable or irrevocable**, chosen at creation. `revoke_vesting` (revocable plans only) stops future vesting; what had vested by then **stays claimable** by the beneficiary. With installments that is only the installments unlocked before the revocation; a partly elapsed period goes back to the owner.
 - **Committed funds:** the owner may deposit at any time but can withdraw only what the plan does not owe (`FundsCommitted`). The plan closes only when nothing is owed (fully released, or revoked and the vested part released).
 - **No check-ins:** vesting plans are not part of "I'm alive" (`pulse` refuses them) and have no tiers to reset. They **are** covered by lockdown: the duress PIN and Panic lock them too, which blocks withdraw, revoke and close (releases continue).
-- **App:** Pulse tab → New plan → Vesting (`lib/ui/screens/vesting_editor.dart`), with a funding check and demo timings (2-minute cliff, 10-minute vesting). Each plan shows a `VestingPlanCard` (`lib/ui/screens/pulse_tab.dart`) with per-schedule progress and Release, Deposit, Withdraw and Revoke. Beneficiaries see the schedule in Family Circle and claim with **Claim vested** (`lib/ui/screens/circle_tab.dart`).
+- **App:** Pulse tab → New plan → Vesting (`lib/ui/screens/vesting_editor.dart`), with a funding check, a **Release every** choice (Month by default, Week, Quarter, Day, or Continuously; a month is the average calendar month, about 30.44 days) and demo timings (2-minute cliff, 10-minute vesting, one installment per minute). The editor refuses an interval longer than a schedule and describes each schedule as, for example, "12 installments of 100 USDC every month, first on <date>". Each plan shows a `VestingPlanCard` (`lib/ui/screens/pulse_tab.dart`) with per-schedule progress ("3 of 12 installments unlocked", "Next installment: X on <date>") and Release, Deposit, Withdraw and Revoke. Beneficiaries see the same in Family Circle and claim with **Claim vested** (`lib/ui/screens/circle_tab.dart`); between installments there is no button, only the next-installment line, and a claim attempt is refused with "Nothing new has unlocked yet. Next installment: <amount> <asset> on <date> UTC."
 
 ### 3.5 Duress and lockdown
 
@@ -239,11 +252,11 @@ On the new phone: connect the same Seed Vault wallet, then Security → **Move g
 
 - **Solana rail:** give them your wallet address.
 - **Private rails:** Security → Receive privately, paste your Zcash or Cloak destination, and send them the claim code. The first time, the app shows a **12-word recovery phrase**: your claim keys are derived from it, so you can restore them on a new phone. Write it down; without it, a lost phone means payouts to those claim keys are lost.
-- **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns. For a vesting plan it shows each schedule's progress, whether it is revocable or revoked, and a **Claim vested** button for what has vested.
+- **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns. For a vesting plan it shows each schedule's progress, how many installments have unlocked and when the next one comes, whether it is revocable or revoked, and a **Claim vested** button once an installment has unlocked.
 
 ### 5.7 Vesting plan
 
-Pulse tab → **New plan** → **Vesting** → name, start (now or a date), revocable or not, then up to 8 schedules (beneficiary or claim code, SOL or USDC, total, cliff, duration) and the initial deposit; the editor warns if the deposit does not cover the totals → one wallet signature (`create_vesting` + deposits). From then on the keeper, the owner (**Release**) or the beneficiary (**Claim vested**) releases what has vested. The owner can top up, withdraw only the uncommitted part, revoke (if revocable) and close once nothing is owed.
+Pulse tab → **New plan** → **Vesting** → name, start (now or a date), revocable or not, how often it releases (installment interval), then up to 8 schedules (beneficiary or claim code, SOL or USDC, total, cliff, duration) and the initial deposit; the editor warns if the deposit does not cover the totals → one wallet signature (`create_vesting` + deposits). From then on the keeper, the owner (**Release**) or the beneficiary (**Claim vested**) releases each installment once it unlocks. The owner can top up, withdraw only the uncommitted part, revoke (if revocable) and close once nothing is owed.
 
 ---
 
