@@ -10,8 +10,7 @@ import '../../../state/plan_math.dart' show percentText;
 import '../../../state/providers.dart';
 import '../../../state/vesting.dart';
 import '../../format.dart';
-import '../../rules_format.dart';
-import '../../theme.dart';
+import '../../widgets/brand/brand.dart';
 import '../../widgets/editor/asset_chips.dart';
 import '../../widgets/editor/plan_steps.dart';
 import '../../widgets/vesting_progress.dart';
@@ -219,7 +218,6 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
     final durations = durationChoices(demo: widget.demo);
     final period = widget.periodSecs;
     final tooShort = durations.where((c) => c.$1 < period).isNotEmpty;
-    const label = TextStyle(color: DmColors.muted, fontWeight: FontWeight.w600);
     return PopScope(
       canPop: !_dirty,
       onPopInvokedWithResult: (didPop, _) {
@@ -227,7 +225,6 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
       },
       child: Scaffold(
         appBar: AppBar(
-          backgroundColor: DmColors.bg,
           leading: IconButton(
             tooltip: 'Cancel',
             icon: const Icon(Icons.close),
@@ -246,7 +243,12 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
           ],
         ),
         body: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          padding: const EdgeInsets.fromLTRB(
+            DMSpace.gutter,
+            DMSpace.sm,
+            DMSpace.gutter,
+            DMSpace.xxxl,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -262,14 +264,13 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                     .where((w) => w.code == IssueCode.b1)
                     .firstOrNull,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: DMSpace.md),
               SectionCard(
                 key: _whatKey,
                 number: 2,
                 title: 'How much',
                 children: [
-                  const Text('Which money', style: label),
-                  const SizedBox(height: 8),
+                  const FieldLabel('Which money'),
                   AssetChips(
                     mint: _mint,
                     assets: vestAssets,
@@ -279,7 +280,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                       _dirty = true;
                     }),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: DMSpace.lg),
                   TextField(
                     key: const ValueKey('vest-total'),
                     controller: _total,
@@ -288,9 +289,11 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
+                    style: DMType.mono(size: 18, weight: FontWeight.w500),
                     decoration: InputDecoration(
                       labelText: 'Total',
                       suffixText: unitLabel(_mint),
+                      suffixStyle: DMType.mono(size: 14, color: DM.sub),
                       errorText: _showErrors ? _totalError : null,
                     ),
                   ),
@@ -304,20 +307,20 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                       ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: DMSpace.md),
               SectionCard(
                 number: 3,
                 title: 'Timing',
                 children: [
-                  const Text('Nothing unlocks for', style: label),
-                  const SizedBox(height: 8),
+                  const FieldLabel('Nothing unlocks for'),
                   Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
+                    spacing: DMSpace.sm,
+                    runSpacing: DMSpace.xxs,
                     children: [
                       for (final (secs, text) in cliffs)
-                        ChoiceChip(
-                          label: Text(text),
+                        pickChip(
+                          label: text,
+                          mono: true,
                           selected: _cliff == secs,
                           onSelected: secs > _duration
                               ? null
@@ -328,16 +331,16 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                         ),
                     ],
                   ),
-                  const SizedBox(height: 14),
-                  const Text('Fully unlocked after', style: label),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: DMSpace.lg),
+                  const FieldLabel('Fully unlocked after'),
                   Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
+                    spacing: DMSpace.sm,
+                    runSpacing: DMSpace.xxs,
                     children: [
                       for (final (secs, text) in durations)
-                        ChoiceChip(
-                          label: Text(text),
+                        pickChip(
+                          label: text,
+                          mono: true,
                           selected: _duration == secs,
                           onSelected: secs < period
                               ? null
@@ -350,22 +353,22 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                     ],
                   ),
                   if (tooShort) ...[
-                    const SizedBox(height: 6),
+                    const SizedBox(height: DMSpace.sm),
                     Text(
                       'This plan releases one installment every '
                       '${vestPeriodWord(period)}, so a schedule must last at '
                       'least that long. For shorter ones, change "Release '
                       'every" on the plan.',
-                      style: const TextStyle(
-                        color: DmColors.muted,
-                        fontSize: 13,
+                      style: DMType.outfit(
+                        size: 13.5,
+                        color: DM.sub,
                         height: 1.4,
                       ),
                     ),
                   ],
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: DMSpace.md),
               SectionCard(
                 number: 4,
                 title: 'How it unlocks',
@@ -380,29 +383,23 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
             ],
           ),
         ),
-        bottomNavigationBar: SafeArea(
-          child: Container(
-            decoration: const BoxDecoration(
-              color: DmColors.surface,
-              border: Border(top: BorderSide(color: DmColors.line)),
-            ),
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                LivePreview(
-                  text: TextSpan(text: _previewLine(d, total, fee, period)),
-                  issue: worstOf(warnings),
-                  onIssue: () {
-                    final c = _whatKey.currentContext;
-                    if (c != null) Scrollable.ensureVisible(c);
-                  },
-                ),
-                const SizedBox(height: 10),
-                FilledButton(onPressed: _done, child: const Text('Done')),
-              ],
-            ),
+        bottomNavigationBar: EditorBar(
+          color: DM.graphite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              LivePreview(
+                text: TextSpan(text: _previewLine(d, total, fee, period)),
+                issue: worstOf(warnings),
+                onIssue: () {
+                  final c = _whatKey.currentContext;
+                  if (c != null) Scrollable.ensureVisible(c);
+                },
+              ),
+              const SizedBox(height: DMSpace.md),
+              FilledButton(onPressed: _done, child: const Text('Done')),
+            ],
           ),
         ),
       ),
@@ -504,7 +501,7 @@ class _SchedulePreviewState extends State<SchedulePreview> {
           tween: Tween(end: milestones[selected].$2),
           duration: const Duration(milliseconds: 400),
           builder: (context, f, _) => VestingBar(
-            color: s.rail.color,
+            color: DM.signal,
             progress: previewProgress(
               total: 1000,
               vested: (f * 1000).round(),
@@ -514,26 +511,14 @@ class _SchedulePreviewState extends State<SchedulePreview> {
             ),
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: DMSpace.sm),
         for (final (i, (text, _)) in milestones.indexed)
-          InkWell(
+          _Milestone(
+            text: text,
+            selected: i == selected,
             onTap: () => setState(() => _selected = i),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 40),
-              child: Row(
-                children: [
-                  Icon(
-                    i == selected ? Icons.circle : Icons.circle_outlined,
-                    size: 12,
-                    color: i == selected ? DmColors.alive : DmColors.muted,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text(text)),
-                ],
-              ),
-            ),
           ),
-        const SizedBox(height: 6),
+        const SizedBox(height: DMSpace.sm),
         Text(
           n == null
               ? 'Deadman sends what has unlocked about once a day. ${s.who} '
@@ -541,9 +526,78 @@ class _SchedulePreviewState extends State<SchedulePreview> {
               : 'Nothing can be claimed between installments. Deadman sends '
                     'each one within about a day of unlocking; ${s.who} can '
                     'also claim it as soon as it unlocks.',
-          style: const TextStyle(color: DmColors.muted, height: 1.4),
+          style: DMType.outfit(size: 14, color: DM.sub, height: 1.45),
         ),
       ],
+    );
+  }
+}
+
+/// One milestone of [SchedulePreview]: a square marker, the date in mono
+/// and what unlocks then.
+class _Milestone extends StatelessWidget {
+  const _Milestone({
+    required this.text,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String text;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    // "Oct 4, 2026: first installment, 300 USDC" splits at the date.
+    final cut = text.indexOf(': ');
+    final color = selected ? DM.bone : DM.sub;
+    final body = DMType.outfit(
+      size: 14.5,
+      color: color,
+      weight: selected ? FontWeight.w600 : FontWeight.w400,
+      height: 1.35,
+    );
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(DMRadius.chip),
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
+          child: Row(
+            children: [
+              SizedBox.square(
+                dimension: 8,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: selected ? DM.signal : Colors.transparent,
+                    border: Border.all(color: selected ? DM.signal : DM.mist),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: cut < 0
+                    ? Text(text, style: body)
+                    : Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: text.substring(0, cut + 1),
+                              style: DMType.mono(size: 13, color: color),
+                            ),
+                            TextSpan(text: text.substring(cut + 1)),
+                          ],
+                        ),
+                        style: body,
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

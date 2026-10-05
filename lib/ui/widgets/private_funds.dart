@@ -12,11 +12,23 @@ import '../../state/secure_store.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../screens/shielded_inbox_screen.dart';
-import '../theme.dart';
 import '../web/web_ui.dart';
+import 'brand/brand.dart';
 import 'feedback.dart';
 
-const _small = TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35);
+TextStyle _small({Color color = DM.sub}) =>
+    DMType.outfit(size: 13, color: color, height: 1.4);
+
+/// Outlined rail tag: "Solana", "Cloak", "Zcash" with the rail's icon.
+class RailTag extends StatelessWidget {
+  const RailTag(this.rail, {super.key});
+
+  final Rail rail;
+
+  @override
+  Widget build(BuildContext context) =>
+      DMTag(label: rail.label, icon: rail.icon);
+}
 
 /// Quote, confirm, send: moves all of [mint] on [rail]'s claim key to its
 /// private destination.
@@ -56,18 +68,17 @@ class RoutePreviewDialog extends StatelessWidget {
     final rail = plan.profile.rail;
     final left = q.expiresAt.difference(DateTime.now()).inSeconds;
     Widget line(String label, String value) => Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: DMSpace.lg),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: _small),
-          const SizedBox(height: 2),
-          Text(value),
+          MonoLabel(label),
+          const SizedBox(height: DMSpace.xxs),
+          Text(value, style: DMType.mono(size: 14, height: 1.4)),
         ],
       ),
     );
     return AlertDialog(
-      backgroundColor: DmColors.surface,
       title: Text('Route privately via ${rail.label}'),
       content: SingleChildScrollView(
         child: Column(
@@ -82,9 +93,9 @@ class RoutePreviewDialog extends StatelessWidget {
               left > 0
                   ? 'Quote valid for ${span(left)}'
                   : 'Quote expired; route again',
-              style: TextStyle(
-                color: left > 60 ? DmColors.muted : DmColors.warn,
-                fontSize: 12,
+              style: DMType.data(
+                color: left > 60 ? DM.sub : DM.attention,
+                size: 12.5,
               ),
             ),
           ],
@@ -135,73 +146,74 @@ class _PrivateFundsSectionState extends ConsumerState<PrivateFundsSection> {
       if (rows.isEmpty) continue;
       cards.add(
         Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Ready to route',
-                          style: TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      RailBadge(p.rail),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'On claim key ${short(p.key.address)}'
-                    '${p.destination.isEmpty ? '' : ' → ${short(p.destination)}'}',
-                    style: _small,
-                  ),
-                  for (final a in rows) ...[
-                    const Divider(height: 24, color: DmColors.line),
-                    Text(amountText(a.amount, a.mint)),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: !live || _busy != null
-                          ? null
-                          : () => _route(p.rail, a.mint),
-                      icon: _busy == '${p.rail.name}:${a.mint}'
-                          ? const SizedBox.square(
-                              dimension: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Icon(p.rail.icon),
-                      label: Text(
-                        live
-                            ? 'Route privately via ${p.rail.label}'
-                            : routeOffLabel(p.rail.label, web: web),
+          padding: const EdgeInsets.only(bottom: DMSpace.lg),
+          child: DMCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Ready to route',
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
+                    const SizedBox(width: DMSpace.md),
+                    RailTag(p.rail),
                   ],
-                  if (!live)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        web
-                            ? 'Private routing runs in the Deadman Android app. '
-                                  'Your claim keys move there with your recovery phrase.'
-                            : 'Cloak and NEAR Intents run on Solana mainnet only. '
-                                  'This build is on ${AppConfig.cluster}.',
-                        style: _small,
-                      ),
+                ),
+                const SizedBox(height: DMSpace.xxs),
+                Text(
+                  'On claim key ${short(p.key.address)}'
+                  '${p.destination.isEmpty ? '' : ' → ${short(p.destination)}'}',
+                  style: DMType.data(),
+                ),
+                for (final a in rows) ...[
+                  const Divider(height: DMSpace.xxxl),
+                  Text(
+                    amountText(a.amount, a.mint),
+                    style: DMType.mono(size: 17),
+                  ),
+                  const SizedBox(height: DMSpace.md),
+                  OutlinedButton.icon(
+                    onPressed: !live || _busy != null
+                        ? null
+                        : () => _route(p.rail, a.mint),
+                    icon: _busy == '${p.rail.name}:${a.mint}'
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(p.rail.icon, size: 18),
+                    label: Text(
+                      live
+                          ? 'Route privately via ${p.rail.label}'
+                          : routeOffLabel(p.rail.label, web: web),
                     ),
-                  if (live && p.destination.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: Text(
-                        'Set a destination first: Security → Receive privately.',
-                        style: TextStyle(color: DmColors.warn, fontSize: 12),
-                      ),
-                    ),
+                  ),
                 ],
-              ),
+                if (!live)
+                  Padding(
+                    padding: const EdgeInsets.only(top: DMSpace.sm),
+                    child: Text(
+                      web
+                          ? 'Private routing runs in the Deadman Android app. '
+                                'Your claim keys move there with your recovery phrase.'
+                          : 'Cloak and NEAR Intents run on Solana mainnet only. '
+                                'This build is on ${AppConfig.cluster}.',
+                      style: _small(),
+                    ),
+                  ),
+                if (live && p.destination.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: DMSpace.sm),
+                    child: Text(
+                      'Set a destination first: Security → Receive privately.',
+                      style: _small(color: DM.attention),
+                    ),
+                  ),
+              ],
             ),
           ),
         ),
@@ -223,24 +235,32 @@ class PrivateTransfersCard extends ConsumerWidget {
     final list = ref.watch(transferHistoryProvider);
     if (list.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Private transfers',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              for (final t in list) _TransferTile(key: ValueKey(t.id), t: t),
-            ],
-          ),
+      padding: const EdgeInsets.only(bottom: DMSpace.lg),
+      child: DMListGroup(
+        header: Text(
+          'Private transfers',
+          style: Theme.of(context).textTheme.titleMedium,
         ),
+        children: [
+          for (final t in list) _TransferTile(key: ValueKey(t.id), t: t),
+        ],
       ),
     );
   }
+}
+
+/// Chip for a transfer's phase; an interrupted Cloak route can resume, so
+/// it reads as attention rather than failure.
+(DMStatus, String) _phaseChip(PrivateTransfer t) {
+  if (t.status == interruptedStatus) {
+    return (DMStatus.attention, 'Interrupted');
+  }
+  return switch (t.phase) {
+    TransferPhase.done => (DMStatus.onTrack, 'Done'),
+    TransferPhase.pending => (DMStatus.released, 'Pending'),
+    TransferPhase.refunded => (DMStatus.attention, 'Refunded'),
+    TransferPhase.failed => (DMStatus.due, 'Failed'),
+  };
 }
 
 class _TransferTile extends ConsumerStatefulWidget {
@@ -267,49 +287,79 @@ class _TransferTileState extends ConsumerState<_TransferTile> {
     final pending = t.phase == TransferPhase.pending;
     final live = pending ? ref.watch(transferStatusProvider(t.id)) : null;
     final shown = t.withStatus(live?.value ?? t.status);
-    final color = switch (shown.phase) {
-      TransferPhase.done => DmColors.alive,
-      TransferPhase.pending => DmColors.muted,
-      TransferPhase.refunded => DmColors.warn,
-      TransferPhase.failed => DmColors.danger,
-    };
+    final (status, chip) = _phaseChip(shown);
     final amount = amountText(t.amount, t.mint);
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(t.rail.icon, color: t.rail.color),
-      title: Text(
-        t.kind == TransferKind.withdraw
-            ? 'Withdraw $amount to wallet'
-            : t.estimatedOut.isEmpty
-            ? '$amount via ${t.rail.label}'
-            : '$amount → ${t.estimatedOut}',
+    final Widget? trailing = resumableCloak(t)
+        ? TextButton(
+            onPressed: _busy || !ref.watch(privateRailsLiveProvider)
+                ? null
+                : _resume,
+            child: const Text('Resume'),
+          )
+        : t.trackingId.isEmpty
+        ? null
+        : IconButton(
+            tooltip: t.rail == Rail.zcash
+                ? 'Copy deposit address'
+                : 'Copy signature',
+            icon: const Icon(Icons.copy, size: 18),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: t.trackingId));
+              toast(context, 'Tracking id copied');
+            },
+          );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        DMSpace.lg,
+        14,
+        trailing == null ? DMSpace.lg : DMSpace.xs,
+        14,
       ),
-      subtitle: Text(
-        '${transferStatusText(shown)}'
-        '${live?.hasError == true ? ' (status check failed; pull to refresh)' : ''}'
-        '\n${ago(t.createdAt, nowSecs())}',
-        style: TextStyle(color: color, fontSize: 12, height: 1.35),
-      ),
-      isThreeLine: true,
-      trailing: resumableCloak(t)
-          ? TextButton(
-              onPressed: _busy || !ref.watch(privateRailsLiveProvider)
-                  ? null
-                  : _resume,
-              child: const Text('Resume'),
-            )
-          : t.trackingId.isEmpty
-          ? null
-          : IconButton(
-              tooltip: t.rail == Rail.zcash
-                  ? 'Copy deposit address'
-                  : 'Copy signature',
-              icon: const Icon(Icons.copy, size: 18),
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: t.trackingId));
-                toast(context, 'Tracking id copied');
-              },
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IconTile(icon: t.rail.icon),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  t.kind == TransferKind.withdraw
+                      ? 'Withdraw $amount to wallet'
+                      : t.estimatedOut.isEmpty
+                      ? '$amount via ${t.rail.label}'
+                      : '$amount → ${t.estimatedOut}',
+                  style: DMType.mono(size: 14, height: 1.4),
+                ),
+                const SizedBox(height: DMSpace.xs),
+                Wrap(
+                  spacing: DMSpace.sm,
+                  runSpacing: DMSpace.xxs,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    StatusChip(status, label: chip, dense: true),
+                    Text(
+                      ago(t.createdAt, nowSecs()),
+                      style: DMType.data(color: DM.mist, size: 12),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: DMSpace.xs),
+                Text(
+                  '${transferStatusText(shown)}'
+                  '${live?.hasError == true ? ' (status check failed; pull to refresh)' : ''}',
+                  style: _small(),
+                ),
+              ],
             ),
+          ),
+          if (trailing != null) ...[
+            const SizedBox(width: DMSpace.xs),
+            trailing,
+          ],
+        ],
+      ),
     );
   }
 }
@@ -327,13 +377,15 @@ class ShieldedInboxTile extends ConsumerWidget {
     // Scanning notes needs the Cloak SDK, which runs in the Android app.
     if (!has || ref.watch(isWebProvider)) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Card(
-        child: ListTile(
-          leading: Icon(Rail.cloak.icon, color: Rail.cloak.color),
-          title: const Text('Shielded inbox'),
-          subtitle: const Text('Payouts held privately at your Cloak address'),
-          trailing: const Icon(Icons.chevron_right),
+      padding: const EdgeInsets.only(bottom: DMSpace.lg),
+      child: DMCard(
+        padding: EdgeInsets.zero,
+        child: DMListRow(
+          leading: IconTile(icon: Rail.cloak.icon),
+          title: 'Shielded inbox',
+          subtitle: 'Payouts held privately at your Cloak address',
+          monoSubtitle: false,
+          trailing: const Icon(Icons.chevron_right, color: DM.mist),
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => const ShieldedInboxScreen(),

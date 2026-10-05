@@ -2,7 +2,11 @@ import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
 import 'package:deadman/state/providers.dart';
+import 'package:deadman/state/plan_draft.dart';
 import 'package:deadman/ui/screens/rules_editor.dart';
+import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
+import 'package:deadman/ui/widgets/editor/plan_steps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -57,6 +61,7 @@ Future<List<_Sent>> _pump(
   FakeApi? api,
   Size size = const Size(1200, 6000),
   double textScale = 1,
+  ThemeData? theme,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -81,6 +86,7 @@ Future<List<_Sent>> _pump(
         ),
       ],
       child: MaterialApp(
+        theme: theme,
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context)
               .copyWith(textScaler: TextScaler.linear(textScale)),
@@ -549,7 +555,13 @@ void main() {
   });
 
   testWidgets('no overflow at 200% text on a phone', (tester) async {
-    await _pump(tester, null, size: const Size(400, 860), textScale: 2);
+    await _pump(
+      tester,
+      null,
+      size: const Size(400, 860),
+      textScale: 2,
+      theme: buildTheme(),
+    );
     await _usdcPayout(tester, share: '1');
     expect(tester.takeException(), isNull);
     await _tap(tester, 'Done');
@@ -561,4 +573,231 @@ void main() {
     await _tap(tester, 'Next: review');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('brand: the whole create flow renders without purple', (
+    tester,
+  ) async {
+    await _pump(tester, null, theme: buildTheme());
+    await _usdcPayout(tester, share: '1');
+    _expectNoPurple(tester);
+    await _tap(tester, 'Done');
+    _expectNoPurple(tester);
+    await _tap(tester, 'Next: fund the plan');
+    await tester.enterText(_field('Put in this plan'), '1');
+    await tester.pumpAndSettle();
+    _expectNoPurple(tester);
+    await _tap(tester, 'Next: review');
+    _expectNoPurple(tester);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('brand: amounts and time labels read in mono', (tester) async {
+    await _pump(tester, null, theme: buildTheme());
+    await _usdcPayout(tester, share: '1');
+    final share = tester.widget<TextField>(
+      find.byKey(const ValueKey('share-field')),
+    );
+    expect(share.style?.fontFamily, contains('JetBrains'));
+    await _tap(tester, 'Done');
+    final when = tester.widget<Text>(find.text('After 10 days of silence'));
+    expect(when.style?.fontFamily, contains('JetBrains'));
+    await _tap(tester, 'Next: fund the plan');
+    final deposit = tester.widget<TextField>(_field('Put in this plan'));
+    expect(deposit.style?.fontFamily, contains('JetBrains'));
+  });
+
+  group('editor widgets', () {
+    Future<void> host(WidgetTester tester, Widget child) => tester.pumpWidget(
+      MaterialApp(
+        theme: buildTheme(),
+        home: Scaffold(body: SingleChildScrollView(child: child)),
+      ),
+    );
+
+    testWidgets('step header announces steps and only goes back', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final taps = <int>[];
+      await host(
+        tester,
+        StepHeader(
+          labels: const ['Payouts', 'Fund', 'Review'],
+          current: 1,
+          onTap: taps.add,
+        ),
+      );
+      expect(find.bySemanticsLabel('Step 2 of 3, Fund'), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('Step 1 of 3, Payouts'));
+      await tester.tap(find.bySemanticsLabel('Step 3 of 3, Review'));
+      expect(taps, [0]);
+      // Done step shows a check, the current one its number in signal.
+      expect(find.byIcon(Icons.check), findsOneWidget);
+      final now = tester.widget<Text>(find.text('2'));
+      expect(now.style?.color, DM.signal);
+      handle.dispose();
+    });
+
+    testWidgets('selected chips sit on deep with a signal label', (
+      tester,
+    ) async {
+      await host(
+        tester,
+        Wrap(
+          children: [
+            pickChip(label: 'On', selected: true, onSelected: (_) {}),
+            pickChip(label: 'Off', selected: false, onSelected: (_) {}),
+          ],
+        ),
+      );
+      final on = tester.widget<ChoiceChip>(
+        find.widgetWithText(ChoiceChip, 'On'),
+      );
+      final off = tester.widget<ChoiceChip>(
+        find.widgetWithText(ChoiceChip, 'Off'),
+      );
+      expect(on.labelStyle?.color, DM.signal);
+      expect(off.labelStyle?.color, DM.bone);
+      expect(on.showCheckmark, isFalse);
+      expect(
+        Theme.of(tester.element(find.text('On'))).chipTheme.selectedColor,
+        DM.deep,
+      );
+    });
+
+    testWidgets('rail tiles: selection is deep + signal, never rail colors', (
+      tester,
+    ) async {
+      await host(
+        tester,
+        Column(
+          children: [
+            RailOptionTile(
+              rail: Rail.cloak,
+              selected: true,
+              onTap: () {},
+              feeLine: '5% fee',
+            ),
+            RailOptionTile(
+              rail: Rail.zcash,
+              selected: false,
+              onTap: () {},
+              feeLine: '5% fee',
+              badge: 'mainnet only',
+            ),
+          ],
+        ),
+      );
+      final materials = tester
+          .widgetList<Material>(
+            find.descendant(
+              of: find.byType(RailOptionTile),
+              matching: find.byType(Material),
+            ),
+          )
+          .map((m) => m.color)
+          .toList();
+      expect(materials, containsAllInOrder([DM.deep, DM.graphite]));
+      final radio = tester.widget<Icon>(
+        find.byIcon(Icons.radio_button_checked),
+      );
+      expect(radio.color, DM.signal);
+      expect(find.text('mainnet only'), findsOneWidget);
+      _expectNoPurple(tester);
+    });
+
+    testWidgets('rail chip is an outlined tag with the short name', (
+      tester,
+    ) async {
+      await host(tester, const RailChip(Rail.cloak));
+      expect(find.byType(DMTag), findsOneWidget);
+      expect(find.text('Cloak'), findsOneWidget);
+    });
+
+    testWidgets('warnings: status on the icon and title only; fix is signal', (
+      tester,
+    ) async {
+      var fixed = 0;
+      await host(
+        tester,
+        WarningTile.of(
+          const PlanIssue(
+            IssueCode.a1,
+            Severity.danger,
+            title: 'Too small to arrive',
+            body: 'It would never arrive.',
+            action: 'Use 100%',
+          ),
+          onAction: () => fixed++,
+        ),
+      );
+      final box = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byType(WarningTile),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      expect((box.decoration! as BoxDecoration).color, DM.raise);
+      expect(
+        tester.widget<Icon>(find.byIcon(Icons.error_outline)).color,
+        DM.due,
+      );
+      expect(
+        tester.widget<Text>(find.text('Too small to arrive')).style?.color,
+        DM.due,
+      );
+      await tester.tap(find.text('Use 100%'));
+      expect(fixed, 1);
+      expect(severityColor(Severity.warn), DM.attention);
+      expect(severityColor(Severity.info), DM.sub);
+    });
+
+    testWidgets('cost rows can set amounts in mono', (tester) async {
+      await host(
+        tester,
+        const Column(
+          children: [
+            CostRow('Put in now', '1 USDC', mono: true),
+            CostRow('Release fee', '2% of each normal payout'),
+          ],
+        ),
+      );
+      expect(
+        tester.widget<Text>(find.text('1 USDC')).style?.fontFamily,
+        contains('JetBrains'),
+      );
+      expect(
+        tester
+            .widget<Text>(find.text('2% of each normal payout'))
+            .style
+            ?.fontFamily,
+        contains('Outfit'),
+      );
+    });
+  });
+}
+
+/// Lockdown purple is reserved for duress; the editors never show it.
+void _expectNoPurple(WidgetTester tester) {
+  const banned = [DM.locked, Color(0xFF8B5CF6), Color(0xFFA78BFA)];
+  final colors = <Color?>[
+    for (final w in tester.allWidgets)
+      ...switch (w) {
+        Icon(:final color) => [color],
+        Text(:final style) => [style?.color],
+        Material(:final color) => [color],
+        DecoratedBox(:final decoration) when decoration is BoxDecoration => [
+          decoration.color,
+        ],
+        Container(:final decoration) when decoration is BoxDecoration => [
+          decoration.color,
+        ],
+        _ => const <Color?>[],
+      },
+  ];
+  for (final c in colors.nonNulls) {
+    expect(banned.contains(c), isFalse, reason: 'purple $c in the editor');
+  }
 }

@@ -60,6 +60,34 @@ void main() {
     expect(api.feeToken, AppConfig.usdcMint);
   });
 
+  testWidgets('USDC fees with an empty USDC balance warn', (tester) async {
+    SharedPreferences.setMockInitialValues({FeeSettings.key: 'usdc'});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          prefsProvider.overrideWithValue(prefs),
+          apiProvider.overrideWithValue(FakeApi(const [])),
+          paymasterAvailableProvider.overrideWithValue(true),
+          walletBalanceProvider.overrideWith((ref) async => 0),
+          walletUsdcProvider.overrideWith((ref) async => 0),
+        ],
+        child: const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: NetworkFeesCard())),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const ValueKey('no-usdc-warning')), findsOneWidget);
+    expect(
+      find.text('Your wallet has no USDC. Add USDC or switch fees to SOL.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('SOL'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('no-usdc-warning')), findsNothing);
+  });
+
   testWidgets('USDC is unavailable without a paymaster', (tester) async {
     final (api, prefs) = await _pump(
       tester,

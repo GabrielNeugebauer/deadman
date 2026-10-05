@@ -7,7 +7,8 @@ import '../../state/assets.dart';
 import '../../state/providers.dart';
 import '../../state/subscription.dart';
 import '../format.dart';
-import '../theme.dart';
+import '../theme/tokens.dart';
+import 'brand/surfaces.dart';
 import 'feedback.dart';
 
 /// A plan card's fee row: the release fee, or 0% while the owner's
@@ -26,17 +27,20 @@ class PlanFeeLine extends ConsumerWidget {
     final waived = feeWaivedFor(vault, sub, now);
     if (terms == null && !waived) return const SizedBox.shrink();
     final fees = ref.watch(feesProvider).value;
-    final color = waived ? DmColors.alive : DmColors.muted;
     return Padding(
-      padding: const EdgeInsets.only(top: 8, right: 10),
+      padding: const EdgeInsets.only(top: DMSpace.md),
       child: Row(
         children: [
-          Icon(Icons.receipt_long_outlined, size: 18, color: color),
-          const SizedBox(width: 10),
+          Icon(
+            Icons.receipt_long_outlined,
+            size: 16,
+            color: waived ? DM.signal : DM.mist,
+          ),
+          const SizedBox(width: DMSpace.sm),
           Expanded(
             child: Text(
               planFeeText(vault, sub, fees, now),
-              style: TextStyle(color: color, fontSize: 13, height: 1.35),
+              style: DMType.data(size: 12.5, color: waived ? DM.bone : DM.sub),
             ),
           ),
         ],
@@ -78,7 +82,6 @@ class _MonthlyPlanCardState extends ConsumerState<MonthlyPlanCard> {
     final periods = await showModalBottomSheet<int>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: DmColors.surface,
       showDragHandle: true,
       builder: (_) => SubscribeSheet(terms: terms, sub: sub),
     );
@@ -102,54 +105,60 @@ class _MonthlyPlanCardState extends ConsumerState<MonthlyPlanCard> {
     final now = nowSecs();
     final status = subscriptionStatus(sub, now);
     final active = status == SubscriptionStatus.active;
-    const muted = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.35);
+    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.4);
     final price =
         '${amountText(terms.pricePerPeriod, terms.mint)} '
         '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'}';
 
-    return Card(
-      margin: widget.margin,
-      child: Padding(
+    return Padding(
+      padding: widget.margin,
+      child: DMCard(
         padding: widget.compact
-            ? const EdgeInsets.fromLTRB(14, 8, 8, 8)
-            : const EdgeInsets.fromLTRB(16, 12, 10, 14),
+            ? const EdgeInsets.fromLTRB(DMSpace.lg, DMSpace.md, DMSpace.sm, 14)
+            : const EdgeInsets.fromLTRB(
+                DMSpace.cardPadding,
+                DMSpace.lg,
+                DMSpace.sm,
+                DMSpace.cardPadding,
+              ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.workspace_premium_outlined,
-                  color: active ? DmColors.alive : DmColors.muted,
+                IconTile(
+                  icon: Icons.workspace_premium_outlined,
+                  tone: active ? DM.signal : null,
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 14),
                 Expanded(
                   child: active
                       ? Text(
                           'Monthly plan · covers all your plans · paid '
                           'until ${dateText(sub!.paidUntil)}',
-                          style: const TextStyle(
-                            color: DmColors.alive,
-                            height: 1.35,
-                          ),
+                          style: DMType.outfit(size: 15, height: 1.4),
                         )
                       : Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
+                            Text(
                               'Monthly plan',
-                              style: TextStyle(fontWeight: FontWeight.w600),
+                              style: DMType.outfit(
+                                size: 16,
+                                weight: FontWeight.w600,
+                              ),
                             ),
+                            const SizedBox(height: 2),
                             Text(
                               status == SubscriptionStatus.lapsed
                                   ? 'Not subscribed · ended '
                                         '${dateText(sub!.paidUntil)}'
                                   : 'Not subscribed',
-                              style: muted,
+                              style: DMType.data(size: 12.5),
                             ),
                             Text(
                               '$price, no release fee on any plan',
-                              style: muted,
+                              style: DMType.data(size: 12.5),
                             ),
                           ],
                         ),
@@ -161,14 +170,24 @@ class _MonthlyPlanCardState extends ConsumerState<MonthlyPlanCard> {
               ],
             ),
             if (!widget.compact) ...[
-              const SizedBox(height: 6),
-              const Text(
-                'One subscription covers all your plans, present and '
-                'future.',
-                style: muted,
+              const SizedBox(height: DMSpace.md),
+              const Divider(height: 1),
+              const SizedBox(height: DMSpace.md),
+              Padding(
+                padding: const EdgeInsets.only(right: DMSpace.md),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'One subscription covers all your plans, present and '
+                      'future.',
+                      style: muted,
+                    ),
+                    const SizedBox(height: DMSpace.xxs),
+                    Text(subscriptionRulesText, style: muted),
+                  ],
+                ),
               ),
-              const SizedBox(height: 4),
-              const Text(subscriptionRulesText, style: muted),
             ],
           ],
         ),
@@ -213,7 +232,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
     final fees = ref.watch(feesProvider).value;
     final plans = ref.watch(vaultsProvider).value;
     final held = ref.watch(ownerPlanHoldingsProvider(mint)).value;
-    const muted = TextStyle(color: DmColors.muted, height: 1.4);
+    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.4);
     String n(int p) => '$p ${periodWord(terms, p)}';
 
     return SafeArea(
@@ -227,20 +246,20 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
               active ? 'Extend monthly plan' : 'Subscribe monthly',
               style: t.titleLarge,
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: DMSpace.sm),
             Text(
               '${amountText(terms.pricePerPeriod, mint)} / '
               '${terms.monthly ? 'month' : span(terms.periodSecs)}',
-              style: t.titleMedium?.copyWith(color: DmColors.alive),
+              style: DMType.stat(),
             ),
-            const SizedBox(height: 8),
-            const Text(
+            const SizedBox(height: DMSpace.lg),
+            Text(
               'One subscription covers all your plans, present and future.',
               style: muted,
             ),
-            const SizedBox(height: 8),
-            const Text(subscriptionRulesText, style: muted),
-            const SizedBox(height: 8),
+            const SizedBox(height: DMSpace.sm),
+            Text(subscriptionRulesText, style: muted),
+            const SizedBox(height: DMSpace.sm),
             Text(
               active
                   ? 'Paid until ${dateText(sub!.paidUntil)}. Extend by any '
@@ -252,7 +271,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
                         'skip the fee.',
               style: muted,
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: DMSpace.xl),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -265,28 +284,33 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
                   ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: DMSpace.xl),
+            const Divider(height: 1),
+            const SizedBox(height: DMSpace.lg),
             Text(
               'Total ${amountText(cost, mint)} · paid until '
               '${dateText(terms.paidUntilAfter(sub, _periods, _now))}',
-              style: const TextStyle(fontWeight: FontWeight.w600),
+              style: DMType.mono(size: 14, weight: FontWeight.w500),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: DMSpace.xxs),
             Text(
               'Your wallet: ${wallet == null ? '…' : amountText(wallet, mint)}',
-              style: TextStyle(color: short ? DmColors.warn : DmColors.muted),
+              style: DMType.data(color: short ? DM.attention : DM.sub),
             ),
             if (short)
-              Text(
-                'Not enough ${assetSymbol(mint)} for ${n(_periods)}.',
-                style: const TextStyle(color: DmColors.warn),
+              Padding(
+                padding: const EdgeInsets.only(top: DMSpace.xxs),
+                child: Text(
+                  'Not enough ${assetSymbol(mint)} for ${n(_periods)}.',
+                  style: DMType.outfit(size: 14, color: DM.attention),
+                ),
               ),
             if (fees != null && held != null && plans != null)
               ..._savings(plans, fees, held, cost, n(_periods), muted),
-            const SizedBox(height: 16),
+            const SizedBox(height: DMSpace.xxl),
             FilledButton(
               style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(48),
+                minimumSize: const Size.fromHeight(56),
               ),
               onPressed: short ? null : () => Navigator.pop(context, _periods),
               child: Text('Pay ${amountText(cost, mint)}'),
@@ -314,7 +338,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
     final solFee = plansReleaseFeeEstimate(plans, fees, null);
     final all = plans.length == 1 ? 'your plan' : 'all your plans';
     return [
-      const SizedBox(height: 12),
+      const SizedBox(height: DMSpace.md),
       Text(
         'At ${plansPendingFeeRates(plans, fees)}, releasing $all would cost '
         '~${amountText(fee, mint)}; $periods cost ${amountText(cost, mint)}.',
@@ -325,7 +349,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
           'SOL has no price in the app, so this compares '
           '${assetSymbol(mint)} only. The SOL in $all would add '
           '~${amountText(solFee, null)} in fees.',
-          style: style.copyWith(fontSize: 12),
+          style: style.copyWith(fontSize: 13, color: DM.mist),
         ),
     ];
   }

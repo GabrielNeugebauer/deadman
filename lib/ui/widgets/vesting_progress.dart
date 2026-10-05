@@ -5,7 +5,8 @@ import '../../state/assets.dart';
 import '../../state/vesting.dart';
 import '../format.dart';
 import '../rules_format.dart';
-import '../theme.dart';
+import '../theme/tokens.dart';
+import 'brand/labels.dart';
 
 /// "12 months", "10 minutes", "3 days".
 String durationLabel(int secs) {
@@ -69,9 +70,10 @@ String vestingAmounts(ScheduleProgress p, String? mint) =>
     'Vested ${amountNumber(p.vested, mint)} of ${amountText(p.total, mint)}'
     ' · released ${amountText(p.released, mint)}';
 
-/// Released (solid) over vested (tinted) over the total (track).
+/// Released (solid) over vested (tinted) over the total (track). Flat,
+/// like the pulse ring: the bar measures, it does not decorate.
 class VestingBar extends StatelessWidget {
-  const VestingBar({super.key, required this.progress, required this.color});
+  const VestingBar({super.key, required this.progress, this.color = DM.signal});
 
   final ScheduleProgress progress;
   final Color color;
@@ -81,24 +83,22 @@ class VestingBar extends StatelessWidget {
     Widget part(double f, Color c) => FractionallySizedBox(
       alignment: Alignment.centerLeft,
       widthFactor: f.clamp(0.0, 1.0),
-      child: Container(
-        decoration: BoxDecoration(
-          color: c,
-          borderRadius: BorderRadius.circular(99),
-        ),
-      ),
+      child: ColoredBox(color: c),
     );
     return Semantics(
       label: 'Vested ${percent(progress.vestedFraction)}',
-      child: SizedBox(
-        height: 8,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            part(1, DmColors.line),
-            part(progress.vestedFraction, color.withValues(alpha: 0.4)),
-            part(progress.releasedFraction, color),
-          ],
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: SizedBox(
+          height: 6,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              part(1, DM.track),
+              part(progress.vestedFraction, color.withValues(alpha: 0.35)),
+              part(progress.releasedFraction, color),
+            ],
+          ),
         ),
       ),
     );
@@ -124,35 +124,35 @@ class VestingScheduleView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const small = TextStyle(color: DmColors.muted, fontSize: 12, height: 1.35);
+    final data = DMType.data(size: 12.5);
+    final next = nextInstallmentText(progress, rule.mint);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
               child: Text(
                 showBeneficiary
                     ? '${scheduleLabel(rule)} → ${short(rule.beneficiary)}'
                     : scheduleLabel(rule),
+                style: DMType.outfit(size: 15, weight: FontWeight.w500),
               ),
             ),
-            const SizedBox(width: 8),
-            RailBadge(rule.rail),
+            const SizedBox(width: DMSpace.sm),
+            DMTag(label: rule.rail.label, icon: rule.rail.icon),
           ],
         ),
-        const SizedBox(height: 8),
-        VestingBar(progress: progress, color: rule.rail.color),
-        const SizedBox(height: 6),
-        Text(vestingAmounts(progress, rule.mint), style: small),
+        const SizedBox(height: DMSpace.md),
+        VestingBar(progress: progress),
+        const SizedBox(height: DMSpace.sm),
+        Text(vestingAmounts(progress, rule.mint), style: data),
         Text(
           vestingStatus(progress, rule.mint, now),
-          style: small.copyWith(
-            color: progress.revoked ? DmColors.warn : DmColors.muted,
-          ),
+          style: progress.revoked ? data.copyWith(color: DM.attention) : data,
         ),
-        if (nextInstallmentText(progress, rule.mint) case final next?)
-          Text(next, style: small),
+        if (next != null) Text(next, style: data),
       ],
     );
   }

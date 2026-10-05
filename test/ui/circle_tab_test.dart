@@ -9,6 +9,7 @@ import 'package:deadman/state/private_rails.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/format.dart';
 import 'package:deadman/ui/screens/circle_tab.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:deadman/wallet/wallet_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -117,6 +118,40 @@ class _EchoWallet implements WalletBridge {
   @override
   Future<void> deauthorize(String authToken) async {}
 }
+
+/// [v] with a guardian and a lockdown end.
+VaultState _with(VaultState v, {String? guardian, int lockedUntil = 0}) =>
+    VaultState(
+      address: v.address,
+      owner: v.owner,
+      planId: v.planId,
+      label: v.label,
+      guard: v.guard,
+      guardian: guardian,
+      intervalSecs: v.intervalSecs,
+      lockSecs: v.lockSecs,
+      skipGraceSecs: v.skipGraceSecs,
+      lastPulse: v.lastPulse,
+      ownerLastSeen: v.ownerLastSeen,
+      lockedUntil: lockedUntil,
+      guardianReadyAt: v.guardianReadyAt,
+      totalPulses: v.totalPulses,
+      streak: v.streak,
+      bestStreak: v.bestStreak,
+      rules: v.rules,
+      lamports: v.lamports,
+      withdrawableLamports: v.withdrawableLamports,
+      kind: v.kind,
+      startAt: v.startAt,
+      revocable: v.revocable,
+      revokedAt: v.revokedAt,
+    );
+
+/// The status chip whose label reads [label].
+Finder _chip(String label) => find.widgetWithText(StatusChip, label);
+
+Color? _color(WidgetTester tester, String text) =>
+    tester.widget<Text>(find.text(text)).style?.color;
 
 FilledButton _button(WidgetTester tester, String text) =>
     tester.widget<FilledButton>(find.widgetWithText(FilledButton, text));
@@ -490,6 +525,132 @@ void main() {
         v,
       ], fake: subscribed(_ClaimApi(null), nowSecs() - 86400));
       expect(find.textContaining('No protocol fee'), findsNothing);
+    });
+  });
+
+  group('standing', () {
+    int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    testWidgets('a due tier: DUE chip, due time label, signal button', (
+      tester,
+    ) async {
+      final v = vault(
+        label: 'Test',
+        withdrawableLamports: 1000000000,
+        rules: [rule()],
+      );
+      await _pump(tester, [v]);
+
+      expect(_chip('DUE'), findsOneWidget);
+      expect(find.text('Test · ${short(addr(1))}'), findsOneWidget);
+      expect(find.text('Silent past a release tier'), findsOneWidget);
+      expect(_color(tester, 'Due now'), DM.due);
+      expect(find.widgetWithText(DMTag, 'Solana'), findsOneWidget);
+      // Status color never fills the action: the theme's signal button.
+      expect(_button(tester, 'Release this tier').style, isNull);
+    });
+
+    testWidgets('checked in recently: ON TRACK, no status sentence', (
+      tester,
+    ) async {
+      final v = vault(lastPulse: now() - 60, rules: [rule()]);
+      await _pump(tester, [v]);
+
+      expect(_chip('ON TRACK'), findsOneWidget);
+      expect(find.textContaining('Last check-in 1m'), findsOneWidget);
+      expect(find.textContaining('-day streak'), findsOneWidget);
+      expect(find.textContaining('Releases after 9d'), findsOneWidget);
+      expect(
+        _color(
+          tester,
+          'Last check-in ${ago(v.lastPulse, now())} · '
+          '1-day streak',
+        ),
+        DM.sub,
+      );
+      expect(find.text('Silent past a release tier'), findsNothing);
+      expect(find.byType(FilledButton), findsNothing);
+    });
+
+    testWidgets('a missed check-in: attention chip with the silence', (
+      tester,
+    ) async {
+      final v = vault(lastPulse: now() - 8 * 86400 - 30, rules: [rule()]);
+      await _pump(tester, [v]);
+
+      expect(_chip('8D 0H SILENT'), findsOneWidget);
+      expect(find.text('Missed a check-in'), findsOneWidget);
+    });
+
+    testWidgets('a locked vault names the lock and that releases run; '
+        'the guardian role shows', (tester) async {
+      final v = _with(
+        vault(lastPulse: now() - 60, rules: [rule()]),
+        guardian: me,
+        lockedUntil: now() + 29 * 86400 + 30,
+      );
+      await _pump(tester, [v]);
+
+      expect(_chip('LOCKED'), findsOneWidget);
+      expect(
+        find.textContaining('Vault locked for 29d 0h · releases still run'),
+        findsOneWidget,
+      );
+      expect(find.text('GUARDIAN'), findsOneWidget);
+    });
+
+    testWidgets('a fully released plan: RELEASED chip and the payout', (
+      tester,
+    ) async {
+      final v = vault(rules: [rule(executedAt: now() - 3)]);
+      await _pump(tester, [v]);
+
+      expect(_chip('RELEASED'), findsOneWidget);
+      expect(find.text('Plan fully released'), findsOneWidget);
+      expect(
+        find.textContaining(RegExp(r'^Released \d+s ago · ')),
+        findsOneWidget,
+      );
+      expect(find.byType(FilledButton), findsNothing);
+    });
+
+    testWidgets('an active vesting plan: VESTING chip, schedule and rail', (
+      tester,
+    ) async {
+      final v = vestingVault(
+        withdrawableLamports: 1000000000,
+        schedules: [schedule(seed: 10)],
+      );
+      await _pump(tester, [v]);
+
+      expect(_chip('VESTING'), findsOneWidget);
+      expect(
+        find.text('Vesting plan · revocable by the owner'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(DMTag, 'Solana'), findsOneWidget);
+    });
+
+    testWidgets('a revoked vesting plan says what stays claimable', (
+      tester,
+    ) async {
+      final v = vestingVault(revokedAt: 2000, schedules: [schedule(seed: 10)]);
+      await _pump(tester, [v]);
+
+      expect(_chip('REVOKED'), findsOneWidget);
+      expect(
+        find.text('Vesting revoked; vested amounts stay claimable'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('nobody named you: the address to share', (tester) async {
+      await _pump(tester, const []);
+
+      expect(find.text('Family Circle'), findsOneWidget);
+      expect(find.text('Nobody has named you yet.'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, short(me)), findsOneWidget);
+      expect(find.byType(StatusChip), findsNothing);
     });
   });
 }

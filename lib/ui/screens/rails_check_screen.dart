@@ -6,7 +6,7 @@ import '../../solana/deadman_api.dart';
 import '../../state/private_rails.dart';
 import '../../state/providers.dart';
 import '../rules_format.dart';
-import '../theme.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 
 /// Diagnostics for the private rails that move no funds, so they run on
@@ -37,30 +37,39 @@ class _RailsCheckScreenState extends ConsumerState<RailsCheckScreen> {
   @override
   Widget build(BuildContext context) {
     final live = ref.watch(privateRailsLiveProvider);
+    final t = Theme.of(context).textTheme;
     return Scaffold(
       appBar: AppBar(title: const Text('Private rails check')),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.gutter,
+          DMSpace.md,
+          DMSpace.gutter,
+          DMSpace.xxxl,
+        ),
         children: [
           Text(
             'Runs the Cloak prover on this phone and asks NEAR Intents 1Click for a '
             'dry SOL → ZEC quote. Nothing is signed or sent.'
             '${live ? '' : ' Routing itself stays mainnet only; this build is on ${AppConfig.cluster}.'}',
-            style: const TextStyle(color: DmColors.muted, height: 1.4),
+            style: t.bodyMedium,
           ),
-          const SizedBox(height: 16),
-          _CheckCard(
-            rail: Rail.cloak,
-            title: 'Cloak zero-knowledge proof',
-            future: _cloak,
+          const SizedBox(height: DMSpace.xl),
+          DMListGroup(
+            children: [
+              _CheckRow(
+                rail: Rail.cloak,
+                title: 'Cloak zero-knowledge proof',
+                future: _cloak,
+              ),
+              _CheckRow(
+                rail: Rail.zcash,
+                title: 'Zcash quote (1Click)',
+                future: _zcash,
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          _CheckCard(
-            rail: Rail.zcash,
-            title: 'Zcash quote (1Click)',
-            future: _zcash,
-          ),
-          const SizedBox(height: 20),
+          const SizedBox(height: DMSpace.xl),
           OutlinedButton.icon(
             onPressed: () => setState(_start),
             icon: const Icon(Icons.refresh),
@@ -72,8 +81,10 @@ class _RailsCheckScreenState extends ConsumerState<RailsCheckScreen> {
   }
 }
 
-class _CheckCard extends StatelessWidget {
-  const _CheckCard({
+/// One check: the rail, its PASS / FAIL chip, and the measured detail or
+/// the error in mono.
+class _CheckRow extends StatelessWidget {
+  const _CheckRow({
     required this.rail,
     required this.title,
     required this.future,
@@ -84,38 +95,51 @@ class _CheckCard extends StatelessWidget {
   final Future<String>? future;
 
   @override
-  Widget build(BuildContext context) => Card(
-    child: FutureBuilder<String>(
-      future: future,
-      builder: (context, snap) {
-        final done = snap.connectionState == ConnectionState.done;
-        final (Widget icon, String status, Color color) = !done
-            ? (
-                const SizedBox.square(
-                  dimension: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+  Widget build(BuildContext context) => FutureBuilder<String>(
+    future: future,
+    builder: (context, snap) {
+      final done = snap.connectionState == ConnectionState.done;
+      final (Widget status, String detail) = !done
+          ? (
+              const SizedBox.square(
+                dimension: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              'Running…',
+            )
+          : snap.hasError
+          ? (
+              const StatusChip(DMStatus.due, label: 'Fail', dense: true),
+              errorText(snap.error!),
+            )
+          : (
+              const StatusChip(DMStatus.onTrack, label: 'Pass', dense: true),
+              snap.data ?? '',
+            );
+      return Padding(
+        padding: const EdgeInsets.all(DMSpace.lg),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                IconTile(icon: rail.icon),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: DMType.outfit(size: 16, weight: FontWeight.w600),
+                  ),
                 ),
-                'Running…',
-                DmColors.muted,
-              )
-            : snap.hasError
-            ? (
-                const Icon(Icons.cancel, color: DmColors.danger),
-                'Fail: ${errorText(snap.error!)}',
-                DmColors.danger,
-              )
-            : (
-                const Icon(Icons.check_circle, color: DmColors.alive),
-                'Pass: ${snap.data}',
-                DmColors.alive,
-              );
-        return ListTile(
-          leading: Icon(rail.icon, color: rail.color),
-          title: Text(title),
-          subtitle: Text(status, style: TextStyle(color: color, height: 1.35)),
-          trailing: icon,
-        );
-      },
-    ),
+                const SizedBox(width: DMSpace.md),
+                status,
+              ],
+            ),
+            const SizedBox(height: DMSpace.md),
+            Text(detail, style: DMType.data()),
+          ],
+        ),
+      );
+    },
   );
 }

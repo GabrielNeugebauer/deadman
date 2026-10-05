@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config.dart';
 import '../../state/providers.dart';
 import '../../wallet/web_wallet_bridge.dart';
-import '../theme.dart';
+import '../widgets/brand/brand.dart';
 import 'open_url_stub.dart' if (dart.library.js_interop) 'open_url_web.dart';
 
 /// Opens a link in a new browser tab. Overridden in tests.
@@ -19,11 +19,6 @@ extension WalletKindUi on WalletKind {
     WalletKind.phantom => 'https://phantom.app/download',
     WalletKind.solflare => 'https://solflare.com/download',
   };
-
-  Color get color => switch (this) {
-    WalletKind.phantom => const Color(0xFFAB9FF2),
-    WalletKind.solflare => const Color(0xFFFC7227),
-  };
 }
 
 /// Lets the user pick Phantom or Solflare. Returns the installed wallet
@@ -31,7 +26,6 @@ extension WalletKindUi on WalletKind {
 Future<WalletKind?> showWalletPicker(BuildContext context) =>
     showModalBottomSheet<WalletKind>(
       context: context,
-      backgroundColor: DmColors.surface,
       showDragHandle: true,
       isScrollControlled: true,
       builder: (_) => const WalletPickerSheet(),
@@ -53,34 +47,37 @@ class _WalletPickerSheetState extends ConsumerState<WalletPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final last = ref.read(webWalletProvider).lastKind;
+    final t = Theme.of(context).textTheme;
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.gutter,
+          0,
+          DMSpace.gutter,
+          DMSpace.lg,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            Text('Connect a wallet', style: t.titleLarge),
+            const SizedBox(height: DMSpace.xs),
             Text(
-              'Connect a wallet',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 4),
-            const Text(
               'Your wallet owns your plans and approves every change. Deadman never sees its keys.',
-              style: TextStyle(color: DmColors.muted, height: 1.35),
+              style: t.bodyMedium,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: DMSpace.xl),
             FutureBuilder<List<WebWallet>>(
               future: _found,
               builder: (context, snap) {
                 if (snap.connectionState != ConnectionState.done) {
                   return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
+                    padding: EdgeInsets.symmetric(vertical: DMSpace.xxl),
                     child: Center(child: CircularProgressIndicator()),
                   );
                 }
                 final found = snap.data ?? const <WebWallet>[];
-                return Column(
+                return DMListGroup(
                   children: [
                     for (final kind in WalletKind.values)
                       _WalletRow(
@@ -92,22 +89,21 @@ class _WalletPickerSheetState extends ConsumerState<WalletPickerSheet> {
                 );
               },
             ),
+            const SizedBox(height: DMSpace.sm),
             TextButton.icon(
               onPressed: () => setState(() => _found = _discover()),
               icon: const Icon(Icons.refresh, size: 18),
               label: const Text('Just installed one? Check again'),
             ),
-            if (!AppConfig.isMainnet)
-              const Text(
+            if (!AppConfig.isMainnet) ...[
+              const SizedBox(height: DMSpace.xs),
+              Text(
                 'This preview runs on Solana ${AppConfig.cluster}: switch your wallet to '
                 '${AppConfig.cluster} (testnet mode) before approving.',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: DmColors.muted,
-                  fontSize: 12,
-                  height: 1.35,
-                ),
+                style: t.bodySmall,
               ),
+            ],
           ],
         ),
       ),
@@ -132,35 +128,22 @@ class _WalletRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final installed = wallet != null;
     void install() => ref.read(openUrlProvider)(kind.downloadUrl);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Card(
-        color: DmColors.raised,
-        child: ListTile(
-          contentPadding: const EdgeInsets.fromLTRB(14, 6, 10, 6),
-          leading: _WalletIcon(kind: kind, dataUri: wallet?.icon),
-          title: Text(kind.label),
-          subtitle: Text(
-            !installed
-                ? 'Not installed in this browser'
-                : last
-                ? 'Last used'
-                : 'Detected',
-            style: TextStyle(
-              color: installed ? DmColors.alive : DmColors.muted,
-              fontSize: 13,
+    return DMListRow(
+      leading: _WalletIcon(kind: kind, dataUri: wallet?.icon),
+      title: kind.label,
+      subtitle: !installed
+          ? 'Not installed in this browser'
+          : last
+          ? 'Last used'
+          : 'Detected',
+      trailing: installed
+          ? const Icon(Icons.chevron_right, color: DM.sub)
+          : TextButton.icon(
+              onPressed: install,
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('Install'),
             ),
-          ),
-          trailing: installed
-              ? const Icon(Icons.chevron_right)
-              : TextButton.icon(
-                  onPressed: install,
-                  icon: const Icon(Icons.open_in_new, size: 16),
-                  label: const Text('Install'),
-                ),
-          onTap: installed ? () => Navigator.pop(context, kind) : install,
-        ),
-      ),
+      onTap: installed ? () => Navigator.pop(context, kind) : install,
     );
   }
 }
@@ -188,31 +171,28 @@ class _WalletIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Wallets' own brand colors stay out: purple means locked here.
     final letter = Container(
-      width: 40,
-      height: 40,
+      width: 36,
+      height: 36,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: kind.color.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(12),
+        color: DM.raise,
+        borderRadius: BorderRadius.circular(9),
       ),
       child: Text(
         kind.label[0],
-        style: TextStyle(
-          color: kind.color,
-          fontWeight: FontWeight.w700,
-          fontSize: 18,
-        ),
+        style: DMType.outfit(size: 17, weight: FontWeight.w700),
       ),
     );
     final bytes = _bitmap(dataUri);
     if (bytes == null) return letter;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(9),
       child: Image.memory(
         bytes,
-        width: 40,
-        height: 40,
+        width: 36,
+        height: 36,
         errorBuilder: (_, _, _) => letter,
       ),
     );
@@ -234,14 +214,12 @@ class WebFrame extends StatelessWidget {
       if (box.maxWidth <= maxWidth + 48) return child;
       final mq = MediaQuery.of(context);
       return ColoredBox(
-        color: DmColors.bg,
+        color: DM.void_,
         child: Center(
           child: Container(
             width: maxWidth,
             foregroundDecoration: const BoxDecoration(
-              border: Border.symmetric(
-                vertical: BorderSide(color: DmColors.line),
-              ),
+              border: Border.symmetric(vertical: BorderSide(color: DM.line)),
             ),
             child: ClipRect(
               child: MediaQuery(
@@ -261,28 +239,8 @@ class WebBadge extends StatelessWidget {
   const WebBadge({super.key});
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-    decoration: BoxDecoration(
-      color: DmColors.plus.withValues(alpha: 0.14),
-      borderRadius: BorderRadius.circular(20),
-    ),
-    child: const Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(Icons.language, size: 14, color: DmColors.plus),
-        SizedBox(width: 5),
-        Text(
-          'Web',
-          style: TextStyle(
-            color: DmColors.plus,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) =>
+      const DMTag(label: 'Web', icon: Icons.language);
 }
 
 /// What the browser build leaves to the Android app, with a link to it.
@@ -290,17 +248,17 @@ class AndroidAppCard extends ConsumerWidget {
   const AndroidAppCard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) => Card(
-    child: ListTile(
-      leading: const Icon(Icons.android, color: DmColors.alive),
-      title: const Text('Get the Android app'),
-      subtitle: const Text(
-        'Check-in reminders, one-tap check-ins without a wallet popup, the '
-        'biometric lock, and private routing through Cloak and Zcash run in '
-        'the Android app.',
-      ),
-      isThreeLine: true,
-      trailing: const Icon(Icons.open_in_new, size: 20),
+  Widget build(BuildContext context, WidgetRef ref) => DMCard(
+    padding: EdgeInsets.zero,
+    child: DMListRow(
+      leading: const IconTile(icon: Icons.android),
+      title: 'Get the Android app',
+      subtitle:
+          'Check-in reminders, one-tap check-ins without a wallet popup, the '
+          'biometric lock, and private routing through Cloak and Zcash run in '
+          'the Android app.',
+      monoSubtitle: false,
+      trailing: const Icon(Icons.open_in_new, size: 20, color: DM.sub),
       onTap: () => ref.read(openUrlProvider)(AppConfig.androidAppUrl),
     ),
   );

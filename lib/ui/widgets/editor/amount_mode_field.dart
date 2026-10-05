@@ -4,7 +4,8 @@ import 'package:flutter/services.dart';
 import '../../../solana/deadman_api.dart';
 import '../../../state/assets.dart';
 import '../../../state/plan_draft.dart';
-import '../../theme.dart';
+import '../brand/brand.dart';
+import 'plan_steps.dart' show pickChip;
 
 final _numberChars = FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'));
 
@@ -55,7 +56,7 @@ class AmountModeField extends StatelessWidget {
         selected: {mode},
         onSelectionChanged: (s) => onMode(s.first),
       ),
-      const SizedBox(height: 16),
+      const SizedBox(height: DMSpace.xl),
       if (mode == AmountMode.percent) _share(context) else _fixed(),
     ],
   );
@@ -64,7 +65,7 @@ class AmountModeField extends StatelessWidget {
     final asset = assetSymbol(mint);
     final bps = parseShareBps(share.text);
     final words = shareWords(bps, asset);
-    final big = Theme.of(context).textTheme.headlineMedium;
+    final big = DMType.mono(size: 34, weight: FontWeight.w500, spacing: -1);
     void pick(String v) {
       share.text = v;
       onChanged();
@@ -95,53 +96,63 @@ class AmountModeField extends StatelessWidget {
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
-                    decoration: const InputDecoration(hintText: '100'),
+                    decoration: InputDecoration(
+                      hintText: '100',
+                      hintStyle: big.copyWith(color: DM.mist),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: DMSpace.lg,
+                        vertical: DMSpace.md,
+                      ),
+                    ),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
-              Text('%', style: big),
+              Text('%', style: big.copyWith(color: DM.sub)),
             ],
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: DMSpace.md),
         Text(
           words ?? 'Enter a share from 0.01 to 100',
           textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            color: words == null ? DmColors.danger : DmColors.text,
+          style: DMType.outfit(
+            size: 16,
+            weight: FontWeight.w600,
+            color: words == null ? DM.due : DM.bone,
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: DMSpace.md),
         Wrap(
           alignment: WrapAlignment.center,
-          spacing: 8,
-          runSpacing: 4,
+          spacing: DMSpace.sm,
+          runSpacing: DMSpace.xxs,
           children: [
-            ChoiceChip(
-              label: const Text('25%'),
+            pickChip(
+              label: '25%',
+              mono: true,
               selected: bps == 2500,
               onSelected: (_) => pick('25'),
             ),
-            ChoiceChip(
-              label: const Text('50%'),
+            pickChip(
+              label: '50%',
+              mono: true,
               selected: bps == 5000,
               onSelected: (_) => pick('50'),
             ),
-            ChoiceChip(
-              label: const Text('Everything left'),
+            pickChip(
+              label: 'Everything left',
               selected: bps == 10000,
               onSelected: (_) => pick('100'),
             ),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: DMSpace.md),
         Text(
           'Shares are taken from what is left of this $asset when the payout '
           'runs, after earlier payouts.',
-          style: const TextStyle(color: DmColors.muted, fontSize: 13),
+          textAlign: TextAlign.center,
+          style: DMType.outfit(size: 13.5, color: DM.sub, height: 1.4),
         ),
       ],
     );
@@ -156,8 +167,10 @@ class AmountModeField extends StatelessWidget {
       onChanged: (_) => onChanged(),
       inputFormatters: [_numberChars],
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      style: DMType.mono(size: 18, weight: FontWeight.w500),
       decoration: InputDecoration(
         labelText: 'Amount',
+        suffixStyle: DMType.mono(size: 14, color: DM.sub),
         hintText: known ? '0.00' : '0',
         suffixText: unitLabel(mint),
         helperText:

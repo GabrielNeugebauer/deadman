@@ -7,7 +7,7 @@ import '../../../solana/deadman_api.dart';
 import '../../../state/assets.dart';
 import '../../../state/plan_draft.dart';
 import '../../../state/providers.dart';
-import '../../theme.dart';
+import '../../widgets/brand/brand.dart';
 import '../../widgets/editor/amount_mode_field.dart';
 import '../../widgets/editor/asset_chips.dart';
 import '../../widgets/editor/plan_steps.dart';
@@ -35,7 +35,6 @@ Future<bool> confirmDiscard(
     await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: Text(title),
         content: Text(body),
         actions: [
@@ -237,7 +236,6 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            backgroundColor: DmColors.surface,
             title: const Text('Remove this payout?'),
             actions: [
               TextButton(
@@ -323,7 +321,6 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
       },
       child: Scaffold(
         appBar: AppBar(
-          backgroundColor: DmColors.bg,
           leading: IconButton(
             tooltip: 'Cancel',
             icon: const Icon(Icons.close),
@@ -337,7 +334,12 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         ),
         body: SingleChildScrollView(
           controller: _scroll,
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          padding: const EdgeInsets.fromLTRB(
+            DMSpace.gutter,
+            DMSpace.sm,
+            DMSpace.gutter,
+            DMSpace.xxxl,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -351,20 +353,13 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                 loading: facts?.isLoading ?? false,
                 notice: b1,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: DMSpace.md),
               SectionCard(
                 key: _whatKey,
                 number: 2,
                 title: 'What they get',
                 children: [
-                  const Text(
-                    'Which money',
-                    style: TextStyle(
-                      color: DmColors.muted,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
+                  const FieldLabel('Which money'),
                   AssetChips(
                     mint: _mint,
                     onChanged: (m) => setState(() {
@@ -372,7 +367,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                       _dirty = true;
                     }),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: DMSpace.xl),
                   AmountModeField(
                     mode: _mode,
                     onMode: (m) => setState(() {
@@ -401,50 +396,44 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                     ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: DMSpace.md),
               _whenSection(draft),
             ],
           ),
         ),
-        bottomNavigationBar: SafeArea(
-          child: Container(
-            decoration: const BoxDecoration(
-              color: DmColors.surface,
-              border: Border(top: BorderSide(color: DmColors.line)),
-            ),
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                LivePreview(
-                  text: _previewText(
-                    draft,
-                    preview.amounts[index],
-                    widget.basis(_mint, all),
-                    fee,
-                  ),
-                  issue: top,
-                  onIssue: () => _reveal(
-                    top?.code == IssueCode.b1
-                        ? _whoKey
-                        : top?.code == IssueCode.d1
-                        ? _whenKey
-                        : _whatKey,
+        bottomNavigationBar: EditorBar(
+          color: DM.graphite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              LivePreview(
+                text: _previewText(
+                  draft,
+                  preview.amounts[index],
+                  widget.basis(_mint, all),
+                  fee,
+                ),
+                issue: top,
+                onIssue: () => _reveal(
+                  top?.code == IssueCode.b1
+                      ? _whoKey
+                      : top?.code == IssueCode.d1
+                      ? _whenKey
+                      : _whatKey,
+                ),
+              ),
+              if (fee.failed)
+                Padding(
+                  padding: const EdgeInsets.only(top: DMSpace.xxs),
+                  child: Text(
+                    "Couldn't load fees. Amounts shown before fees.",
+                    style: DMType.outfit(size: 13, color: DM.sub),
                   ),
                 ),
-                if (fee.failed)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 4),
-                    child: Text(
-                      "Couldn't load fees. Amounts shown before fees.",
-                      style: TextStyle(color: DmColors.muted, fontSize: 12),
-                    ),
-                  ),
-                const SizedBox(height: 10),
-                FilledButton(onPressed: _done, child: const Text('Done')),
-              ],
-            ),
+              const SizedBox(height: DMSpace.md),
+              FilledButton(onPressed: _done, child: const Text('Done')),
+            ],
           ),
         ),
       ),
@@ -474,7 +463,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         ),
         TextSpan(
           text: moneyText(net, d.mint),
-          style: const TextStyle(fontWeight: FontWeight.w700),
+          style: DMType.mono(size: 15, weight: FontWeight.w700),
         ),
         TextSpan(text: '$tail ${fee.note(d.rail)}'),
       ],
@@ -490,32 +479,29 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         if (p.mint == _mint && p.afterSecs < _after)
           'Payout $n (${p.who}, ${delayText(p.afterSecs)})',
     ];
-    const muted = TextStyle(color: DmColors.muted, height: 1.4);
+    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.45);
     return SectionCard(
       key: _whenKey,
       number: 3,
       title: 'When',
       children: [
-        const Text(
-          'Send it after this long without a check-in',
-          style: TextStyle(color: DmColors.muted, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 8),
+        const FieldLabel('Send it after this long without a check-in'),
         Wrap(
-          spacing: 8,
-          runSpacing: 4,
+          spacing: DMSpace.sm,
+          runSpacing: DMSpace.xxs,
           children: [
             for (final s in chips)
-              ChoiceChip(
-                label: Text(delayText(s)),
+              pickChip(
+                label: delayText(s),
+                mono: true,
                 selected: !_custom && _after == s,
                 onSelected: (_) {
                   _custom = false;
                   _setAfter(s);
                 },
               ),
-            ChoiceChip(
-              label: const Text('Custom'),
+            pickChip(
+              label: 'Custom',
               selected: _custom,
               onSelected: (_) => setState(() {
                 _custom = true;
@@ -525,7 +511,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
           ],
         ),
         if (_custom) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -534,6 +520,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                   controller: _customValue,
                   onChanged: _setCustom,
                   keyboardType: TextInputType.number,
+                  style: DMType.mono(size: 16),
                   decoration: const InputDecoration(labelText: 'Number'),
                 ),
               ),
@@ -566,7 +553,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                     _dirty = true;
                   }),
           ),
-        const SizedBox(height: 8),
+        const SizedBox(height: DMSpace.sm),
         DelayStrip(intervalSecs: interval, delaySecs: _after),
         Text(
           'You check in every ${delayText(interval)}. If you stop, this is sent '
@@ -574,13 +561,10 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
           '${_after > interval ? ' (${delayText(_after - interval)} after you miss one)' : ''}.',
           style: muted,
         ),
-        const SizedBox(height: 4),
-        const Text(
-          'Any check-in before then restarts the clock.',
-          style: muted,
-        ),
+        const SizedBox(height: DMSpace.xxs),
+        Text('Any check-in before then restarts the clock.', style: muted),
         if (earlier.isNotEmpty) ...[
-          const SizedBox(height: 4),
+          const SizedBox(height: DMSpace.xxs),
           Text('Runs after: ${earlier.join(', ')}.', style: muted),
         ],
       ],

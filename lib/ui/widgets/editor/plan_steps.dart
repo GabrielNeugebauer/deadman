@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import '../../../solana/deadman_api.dart';
 import '../../../state/plan_draft.dart';
 import '../../rules_format.dart';
-import '../../theme.dart';
+import '../brand/brand.dart';
 
-/// Labelled step dots. Done steps can be tapped to go back.
+/// Step progress: one track segment per step (signal up to the current
+/// one), the step number in mono and its name. Done steps can be tapped to
+/// go back.
 class StepHeader extends StatelessWidget {
   const StepHeader({
     super.key,
@@ -22,7 +24,12 @@ class StepHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final n = labels.length;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.gutter - DMSpace.xxs,
+        DMSpace.xxs,
+        DMSpace.gutter - DMSpace.xxs,
+        DMSpace.sm,
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -34,46 +41,20 @@ class StepHeader extends StatelessWidget {
                 button: i < current,
                 excludeSemantics: true,
                 child: InkWell(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(DMRadius.tile),
                   onTap: i < current && onTap != null ? () => onTap!(i) : null,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(minHeight: 48),
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              _Dot(index: i, current: current),
-                              if (i < n - 1)
-                                Expanded(
-                                  child: Container(
-                                    height: 2,
-                                    margin: const EdgeInsets.symmetric(
-                                      horizontal: 6,
-                                    ),
-                                    color: i < current
-                                        ? DmColors.alive
-                                        : DmColors.line,
-                                  ),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            labels[i],
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: i == current
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: i <= current
-                                  ? DmColors.text
-                                  : DmColors.muted,
-                            ),
-                          ),
-                        ],
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: DMSpace.xxs,
+                        vertical: DMSpace.sm,
+                      ),
+                      child: _StepCell(
+                        number: i + 1,
+                        label: labels[i],
+                        done: i < current,
+                        now: i == current,
                       ),
                     ),
                   ),
@@ -86,42 +67,103 @@ class StepHeader extends StatelessWidget {
   }
 }
 
-class _Dot extends StatelessWidget {
-  const _Dot({required this.index, required this.current});
+class _StepCell extends StatelessWidget {
+  const _StepCell({
+    required this.number,
+    required this.label,
+    required this.done,
+    required this.now,
+  });
 
-  final int index;
-  final int current;
+  final int number;
+  final String label;
+  final bool done;
+  final bool now;
 
   @override
   Widget build(BuildContext context) {
-    final done = index < current;
-    final now = index == current;
-    return Container(
-      width: 22,
-      height: 22,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: now ? DmColors.alive : Colors.transparent,
-        border: Border.all(
-          color: now || done ? DmColors.alive : DmColors.line,
-          width: 2,
+    final reached = done || now;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          height: 3,
+          width: double.infinity,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: reached ? DM.signal : DM.track,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
         ),
-      ),
-      child: done
-          ? const Icon(Icons.check, size: 13, color: DmColors.alive)
-          : Text(
-              '${index + 1}',
-              // Fixed-size dot; the step label next to it scales.
-              textScaler: TextScaler.noScaling,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: now ? DmColors.bg : DmColors.muted,
+        const SizedBox(height: DMSpace.sm),
+        Row(
+          children: [
+            SizedBox(
+              width: 16,
+              child: done
+                  ? const Icon(Icons.check, size: 14, color: DM.signal)
+                  : Text(
+                      '$number',
+                      // Fixed-size marker; the step name next to it scales.
+                      textScaler: TextScaler.noScaling,
+                      style: DMType.mono(
+                        size: 12,
+                        weight: FontWeight.w500,
+                        color: now ? DM.signal : DM.mist,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: DMSpace.xxs),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: DMType.outfit(
+                  size: 14,
+                  weight: now ? FontWeight.w600 : FontWeight.w500,
+                  color: now
+                      ? DM.bone
+                      : done
+                      ? DM.sub
+                      : DM.mist,
+                ),
               ),
             ),
+          ],
+        ),
+      ],
     );
   }
+}
+
+/// Bottom action bar of the editors: a 1px line above, void below.
+class EditorBar extends StatelessWidget {
+  const EditorBar({super.key, required this.child, this.color = DM.void_});
+
+  final Widget child;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: color,
+      border: const Border(top: BorderSide(color: DM.line)),
+    ),
+    child: SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.gutter,
+          DMSpace.md,
+          DMSpace.gutter,
+          DMSpace.lg,
+        ),
+        child: child,
+      ),
+    ),
+  );
 }
 
 /// AppBar, step header, scrollable body and a Back / primary bottom bar.
@@ -165,13 +207,7 @@ class StepScaffold extends StatelessWidget {
       if (!didPop && !busy) onPopBlocked();
     },
     child: Scaffold(
-      appBar: AppBar(
-        backgroundColor: DmColors.bg,
-        // The step header below stays flat; a tinted bar above it would
-        // split the header in two.
-        scrolledUnderElevation: 0,
-        title: Text(title),
-      ),
+      appBar: AppBar(title: Text(title)),
       body: Column(
         children: [
           StepHeader(
@@ -179,14 +215,19 @@ class StepScaffold extends StatelessWidget {
             current: step,
             onTap: busy ? null : onStepTap,
           ),
-          const Divider(height: 1, color: DmColors.line),
+          const Divider(height: 1),
           Expanded(
             // Not a lazy list: validation scrolls to fields and checkboxes
             // that may be far below the fold.
             child: SingleChildScrollView(
               key: ValueKey('step-$step'),
               controller: controller,
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              padding: const EdgeInsets.fromLTRB(
+                DMSpace.gutter,
+                DMSpace.xl,
+                DMSpace.gutter,
+                DMSpace.xxxl,
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: children,
@@ -195,46 +236,61 @@ class StepScaffold extends StatelessWidget {
           ),
         ],
       ),
-      bottomNavigationBar: SafeArea(
-        child: Container(
-          decoration: const BoxDecoration(
-            color: DmColors.bg,
-            border: Border(top: BorderSide(color: DmColors.line)),
-          ),
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              if (onBack != null) ...[
-                Expanded(
-                  flex: 2,
-                  child: OutlinedButton(
-                    onPressed: busy ? null : onBack,
-                    child: const Text('Back'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-              ],
+      bottomNavigationBar: EditorBar(
+        child: Row(
+          children: [
+            if (onBack != null) ...[
               Expanded(
-                flex: 3,
-                child: FilledButton(
-                  onPressed: busy ? null : onPrimary,
-                  child: busy
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(primaryLabel, textAlign: TextAlign.center),
+                flex: 2,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(56),
+                  ),
+                  onPressed: busy ? null : onBack,
+                  child: const Text('Back'),
                 ),
               ),
+              const SizedBox(width: DMSpace.md),
             ],
-          ),
+            Expanded(
+              flex: 3,
+              child: FilledButton(
+                onPressed: busy ? null : onPrimary,
+                child: busy
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: DM.signal,
+                        ),
+                      )
+                    : Text(primaryLabel, textAlign: TextAlign.center),
+              ),
+            ),
+          ],
         ),
       ),
     ),
   );
 }
 
-/// The first-run card of a list: a title, one line and an add button.
+/// The lead line under a step's header: one sentence in sub.
+class StepLead extends StatelessWidget {
+  const StepLead(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: DMSpace.lg),
+    child: Text(
+      text,
+      style: DMType.outfit(size: 15, color: DM.sub, height: 1.45),
+    ),
+  );
+}
+
+/// The first-run block of a list: a title, one line and an add button.
 class EmptyStateCard extends StatelessWidget {
   const EmptyStateCard({
     super.key,
@@ -250,28 +306,89 @@ class EmptyStateCard extends StatelessWidget {
   final VoidCallback onAdd;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(18),
-    decoration: BoxDecoration(
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: DmColors.muted.withValues(alpha: 0.5)),
-    ),
+  Widget build(BuildContext context) => DMCard(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          title,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18),
-        ),
-        const SizedBox(height: 6),
-        Text(body, style: const TextStyle(color: DmColors.muted, height: 1.4)),
-        const SizedBox(height: 14),
-        OutlinedButton.icon(
+        Text(title, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: DMSpace.xs),
+        Text(body, style: DMType.outfit(size: 15, color: DM.sub, height: 1.45)),
+        const SizedBox(height: DMSpace.lg),
+        FilledButton.icon(
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
           onPressed: onAdd,
           icon: const Icon(Icons.add),
           label: Text(addLabel),
         ),
       ],
+    ),
+  );
+}
+
+/// The "+ Add a payout" row under a list: a text action in signal.
+class AddRowButton extends StatelessWidget {
+  const AddRowButton({super.key, required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => OutlinedButton.icon(
+    onPressed: onTap,
+    style: OutlinedButton.styleFrom(
+      foregroundColor: DM.signal,
+      backgroundColor: Colors.transparent,
+    ),
+    icon: const Icon(Icons.add),
+    label: Text(label),
+  );
+}
+
+/// A small field-group label: "Which money", "How it arrives".
+class FieldLabel extends StatelessWidget {
+  const FieldLabel(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: DMSpace.sm),
+    child: Text(
+      text,
+      style: DMType.outfit(size: 14, weight: FontWeight.w600, color: DM.sub),
+    ),
+  );
+}
+
+/// The step number of a section or review row: mono digit on a raised
+/// square.
+class StepNumber extends StatelessWidget {
+  const StepNumber(this.number, {super.key, this.active = false});
+
+  final int number;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: SizedBox.square(
+      dimension: 26,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: active ? DM.deep : DM.raise,
+          borderRadius: BorderRadius.circular(DMRadius.chip),
+        ),
+        child: Center(
+          child: Text(
+            '$number',
+            textScaler: TextScaler.noScaling,
+            style: DMType.mono(
+              size: 12,
+              weight: FontWeight.w500,
+              color: active ? DM.signal : DM.sub,
+            ),
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -292,59 +409,42 @@ class SectionCard extends StatelessWidget {
   final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (title != null) ...[
-            Row(
-              children: [
-                if (number != null) ...[
-                  Container(
-                    width: 24,
-                    height: 24,
-                    alignment: Alignment.center,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0x333DF5A7),
-                    ),
-                    child: Text(
-                      '$number',
-                      textScaler: TextScaler.noScaling,
-                      style: const TextStyle(
-                        color: DmColors.alive,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                ],
-                Expanded(
+  Widget build(BuildContext context) => DMCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (title != null) ...[
+          Row(
+            children: [
+              if (number != null) ...[
+                StepNumber(number!),
+                const SizedBox(width: DMSpace.md),
+              ],
+              Expanded(
+                child: Semantics(
+                  header: true,
                   child: Text(
                     title!,
-                    style: Theme.of(context).textTheme.titleLarge
-                        ?.copyWith(fontSize: 18),
+                    style: Theme.of(context).textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w700),
                   ),
                 ),
-                ?trailing,
-              ],
-            ),
-            const SizedBox(height: 14),
-          ],
-          ...children,
+              ),
+              ?trailing,
+            ],
+          ),
+          const SizedBox(height: DMSpace.lg),
         ],
-      ),
+        ...children,
+      ],
     ),
   );
 }
 
 Color severityColor(Severity s) => switch (s) {
-  Severity.error || Severity.danger => DmColors.danger,
-  Severity.warn => DmColors.warn,
-  Severity.info => DmColors.muted,
+  Severity.error || Severity.danger => DM.due,
+  Severity.warn => DM.attention,
+  Severity.info => DM.sub,
 };
 
 IconData severityIcon(Severity s) => switch (s) {
@@ -353,7 +453,9 @@ IconData severityIcon(Severity s) => switch (s) {
   Severity.info => Icons.info_outline,
 };
 
-/// One warning: icon, title, body and an optional fix.
+/// One warning: a status icon, title, body and an optional fix. The block
+/// is a flat raised fill (no border, so it never reads as a nested card);
+/// only the icon and title carry the status color.
 class WarningTile extends StatelessWidget {
   const WarningTile({
     super.key,
@@ -383,50 +485,63 @@ class WarningTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = severityColor(severity);
+    final hasAction = actionLabel != null && onAction != null;
     return Semantics(
       liveRegion: true,
       child: Container(
         width: double.infinity,
-        margin: const EdgeInsets.only(top: 10),
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+        margin: const EdgeInsets.only(top: DMSpace.md),
+        padding: EdgeInsets.fromLTRB(
+          DMSpace.md,
+          DMSpace.md,
+          DMSpace.md,
+          hasAction ? DMSpace.xxs : DMSpace.md,
+        ),
         decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(14),
+          color: DM.raise,
+          borderRadius: BorderRadius.circular(DMRadius.tile),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(severityIcon(severity), color: color, size: 20),
-            const SizedBox(width: 10),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(severityIcon(severity), color: color, size: 18),
+            ),
+            const SizedBox(width: DMSpace.md),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (title.isNotEmpty)
+                  if (title.isNotEmpty) ...[
                     Text(
                       title,
-                      style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: severity == Severity.info
-                            ? DmColors.text
-                            : color,
+                      style: DMType.outfit(
+                        size: 15,
+                        weight: FontWeight.w600,
+                        color: severity == Severity.info ? DM.bone : color,
                       ),
                     ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2, bottom: 8),
-                    child: Text(
-                      body,
-                      style: const TextStyle(height: 1.35, fontSize: 13),
+                    const SizedBox(height: 2),
+                  ],
+                  Text(
+                    body,
+                    style: DMType.outfit(
+                      size: 14,
+                      color: title.isEmpty ? DM.bone : DM.sub,
+                      height: 1.4,
                     ),
                   ),
-                  if (actionLabel != null && onAction != null)
+                  if (hasAction)
                     TextButton(
                       style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        minimumSize: const Size(48, 40),
-                        foregroundColor: color == DmColors.muted
-                            ? DmColors.alive
-                            : color,
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(48, 44),
+                        tapTargetSize: MaterialTapTargetSize.padded,
+                        textStyle: DMType.outfit(
+                          size: 14,
+                          weight: FontWeight.w600,
+                        ),
                       ),
                       onPressed: onAction,
                       child: Text(actionLabel!),
@@ -441,7 +556,7 @@ class WarningTile extends StatelessWidget {
   }
 }
 
-/// A one-line warning: icon and title.
+/// A one-line warning: status icon and its headline.
 class IssueLine extends StatelessWidget {
   const IssueLine(this.issue, {super.key});
 
@@ -453,11 +568,15 @@ class IssueLine extends StatelessWidget {
     return Row(
       children: [
         Icon(severityIcon(issue.severity), size: 16, color: color),
-        const SizedBox(width: 6),
+        const SizedBox(width: DMSpace.sm),
         Expanded(
           child: Text(
             issue.headline,
-            style: TextStyle(color: color, fontSize: 13),
+            style: DMType.outfit(
+              size: 14,
+              weight: FontWeight.w500,
+              color: issue.severity == Severity.info ? DM.sub : color,
+            ),
           ),
         ),
       ],
@@ -485,7 +604,8 @@ String railShort(Rail r) => switch (r) {
   Rail.zcash => 'Zcash',
 };
 
-/// A radio card for a delivery rail.
+/// One row of the rail picker: icon tile, name, what it means, its fee in
+/// mono on the right. The selected row sits on deep with a signal radio.
 class RailOptionTile extends StatelessWidget {
   const RailOptionTile({
     super.key,
@@ -504,93 +624,106 @@ class RailOptionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.only(bottom: DMSpace.sm),
     child: Semantics(
       inMutuallyExclusiveGroup: true,
       checked: selected,
       button: true,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 64),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            color: selected
-                ? rail.color.withValues(alpha: 0.08)
-                : Colors.transparent,
-            border: Border.all(
-              color: selected ? rail.color : DmColors.line,
-              width: selected ? 1.5 : 1,
-            ),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                selected ? Icons.radio_button_checked : Icons.radio_button_off,
-                color: selected ? rail.color : DmColors.muted,
-                size: 22,
+      child: Material(
+        color: selected ? DM.deep : DM.graphite,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(DMRadius.button),
+          side: BorderSide(color: selected ? DM.tide : DM.line),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 64),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                DMSpace.md,
+                DMSpace.md,
+                DMSpace.md,
+                DMSpace.md,
               ),
-              const SizedBox(width: 10),
-              Icon(rail.icon, color: rail.color, size: 20),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  IconTile(icon: rail.icon, size: 34),
+                  const SizedBox(width: DMSpace.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          railTitle(rail),
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        if (badge != null)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: DmColors.raised,
-                              borderRadius: BorderRadius.circular(99),
-                            ),
-                            child: Text(
-                              badge!,
-                              style: const TextStyle(
-                                color: DmColors.muted,
-                                fontSize: 11,
+                        Wrap(
+                          spacing: DMSpace.sm,
+                          runSpacing: DMSpace.xxs,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              railTitle(rail),
+                              style: DMType.outfit(
+                                size: 16,
+                                weight: FontWeight.w600,
                               ),
                             ),
+                            if (badge != null)
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: DM.line),
+                                  borderRadius: BorderRadius.circular(
+                                    DMRadius.chip,
+                                  ),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: DMSpace.xs,
+                                    vertical: 2,
+                                  ),
+                                  child: Text(
+                                    badge!,
+                                    style: DMType.mono(
+                                      size: 11,
+                                      color: DM.sub,
+                                      spacing: 0.4,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: DMSpace.xxs),
+                        Text(
+                          railHelper(rail),
+                          style: DMType.outfit(
+                            size: 13.5,
+                            color: DM.sub,
+                            height: 1.35,
                           ),
+                        ),
+                        const SizedBox(height: DMSpace.xs),
+                        Text(
+                          feeLine,
+                          style: DMType.mono(
+                            size: 12,
+                            color: selected ? DM.bone : DM.sub,
+                          ),
+                        ),
                       ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      railHelper(rail),
-                      style: const TextStyle(
-                        color: DmColors.muted,
-                        fontSize: 13,
-                        height: 1.3,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      feeLine,
-                      style: const TextStyle(
-                        color: DmColors.muted,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: DMSpace.sm),
+                  Icon(
+                    selected
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    color: selected ? DM.signal : DM.mist,
+                    size: 22,
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -598,35 +731,15 @@ class RailOptionTile extends StatelessWidget {
   );
 }
 
-/// A small rail chip for cards: "⚡ Normal".
+/// A small outlined rail tag for cards: "⚡ Normal".
 class RailChip extends StatelessWidget {
   const RailChip(this.rail, {super.key});
 
   final Rail rail;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-    decoration: BoxDecoration(
-      color: rail.color.withValues(alpha: 0.14),
-      borderRadius: BorderRadius.circular(99),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(rail.icon, size: 13, color: rail.color),
-        const SizedBox(width: 4),
-        Text(
-          railShort(rail),
-          style: TextStyle(
-            color: rail.color,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) =>
+      DMTag(label: railShort(rail), icon: rail.icon);
 }
 
 /// A Review block: a title with an Edit button, then its content.
@@ -643,57 +756,77 @@ class ReviewSection extends StatelessWidget {
   final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+  Widget build(BuildContext context) => DMCard(
+    padding: const EdgeInsets.fromLTRB(
+      DMSpace.cardPadding,
+      DMSpace.md,
+      DMSpace.sm,
+      DMSpace.cardPadding,
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
+          child: Row(
             children: [
               Expanded(
-                child: Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleLarge
-                      ?.copyWith(fontSize: 18),
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
                 ),
               ),
               if (onEdit != null)
                 TextButton(onPressed: onEdit, child: const Text('Edit')),
             ],
           ),
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: children,
-            ),
+        ),
+        const SizedBox(height: DMSpace.xs),
+        Padding(
+          padding: const EdgeInsets.only(right: DMSpace.md),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: children,
           ),
-        ],
-      ),
+        ),
+      ],
     ),
   );
 }
 
 /// A label on the left, its value on the right; both wrap at large text.
+/// [mono] sets the value in JetBrains Mono (amounts and balances).
 class CostRow extends StatelessWidget {
-  const CostRow(this.label, this.value, {super.key});
+  const CostRow(this.label, this.value, {super.key, this.mono = false});
 
   final String label;
   final String value;
+  final bool mono;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
+    padding: const EdgeInsets.symmetric(vertical: DMSpace.sm),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(
           flex: 2,
-          child: Text(label, style: const TextStyle(color: DmColors.muted)),
+          child: Text(label, style: DMType.outfit(size: 14, color: DM.sub)),
         ),
-        const SizedBox(width: 12),
-        Expanded(flex: 3, child: Text(value, textAlign: TextAlign.end)),
+        const SizedBox(width: DMSpace.md),
+        Expanded(
+          flex: 3,
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            style: mono
+                ? DMType.mono(size: 13.5, height: 1.45)
+                : DMType.outfit(size: 14, height: 1.4),
+          ),
+        ),
       ],
     ),
   );
@@ -714,17 +847,18 @@ class LivePreview extends StatelessWidget {
     children: [
       Semantics(
         liveRegion: true,
-        child: Text.rich(text, style: const TextStyle(height: 1.35)),
+        child: Text.rich(text, style: DMType.outfit(size: 15, height: 1.4)),
       ),
       if (issue != null)
         InkWell(
+          borderRadius: BorderRadius.circular(DMRadius.chip),
           onTap: onIssue,
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 40),
+            constraints: const BoxConstraints(minHeight: 44),
             child: Row(
               children: [
                 Expanded(child: IssueLine(issue!)),
-                const Icon(Icons.chevron_right, color: DmColors.muted),
+                const Icon(Icons.chevron_right, color: DM.mist, size: 20),
               ],
             ),
           ),
@@ -767,27 +901,30 @@ class _StripPainter extends CustomPainter {
     const pad = 8.0;
     final span = (delay > interval ? delay : interval) * 1.1;
     double x(int secs) => pad + (size.width - 2 * pad) * secs / span;
-    final line = Paint()
-      ..color = DmColors.line
-      ..strokeWidth = 2;
-    canvas.drawLine(const Offset(pad, y), Offset(size.width - pad, y), line);
+    final stroke = Paint()
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(
+      const Offset(pad, y),
+      Offset(size.width - pad, y),
+      stroke..color = DM.track,
+    );
     canvas.drawLine(
       const Offset(pad, y),
       Offset(x(delay), y),
-      Paint()
-        ..color = DmColors.alive.withValues(alpha: 0.4)
-        ..strokeWidth = 2,
+      stroke..color = DM.tide,
     );
-    canvas.drawCircle(const Offset(pad, y), 5, Paint()..color = DmColors.muted);
+    canvas.drawCircle(const Offset(pad, y), 4, Paint()..color = DM.sub);
     final tick = x(interval);
     canvas.drawLine(
       Offset(tick, y - 7),
       Offset(tick, y + 7),
       Paint()
-        ..color = DmColors.warn
+        ..color = DM.attention
         ..strokeWidth = 2,
     );
-    canvas.drawCircle(Offset(x(delay), y), 7, Paint()..color = DmColors.alive);
+    canvas.drawCircle(Offset(x(delay), y), 6, Paint()..color = DM.signal);
+    canvas.drawCircle(Offset(x(delay), y), 2.5, Paint()..color = DM.void_);
   }
 
   @override
@@ -795,13 +932,14 @@ class _StripPainter extends CustomPainter {
       old.interval != interval || old.delay != delay;
 }
 
-/// One node of a vertical timeline.
+/// One node of a vertical timeline; [label] is a time ("After 10 days of
+/// silence") and reads in mono.
 class TimelineEntry extends StatelessWidget {
   const TimelineEntry({
     super.key,
     required this.label,
     this.child,
-    this.dot = DmColors.line,
+    this.dot = DM.line,
     this.last = false,
   });
 
@@ -815,40 +953,36 @@ class TimelineEntry extends StatelessWidget {
     clipBehavior: Clip.none,
     children: [
       Container(
-        margin: const EdgeInsets.only(left: 7),
-        padding: const EdgeInsets.fromLTRB(18, 0, 0, 16),
+        margin: const EdgeInsets.only(left: 5),
+        padding: const EdgeInsets.fromLTRB(DMSpace.lg + 2, 0, 0, DMSpace.lg),
         decoration: last
             ? null
             : const BoxDecoration(
-                border: Border(
-                  left: BorderSide(color: DmColors.line, width: 2),
-                ),
+                border: Border(left: BorderSide(color: DM.line)),
               ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (label.isNotEmpty)
-              Text(
-                label,
-                style: const TextStyle(
-                  color: DmColors.muted,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              Text(label, style: DMType.mono(size: 12.5, color: DM.sub)),
             if (child != null) ...[
-              if (label.isNotEmpty) const SizedBox(height: 8),
+              if (label.isNotEmpty) const SizedBox(height: DMSpace.sm),
               child!,
             ],
           ],
         ),
       ),
       Positioned(
-        left: 2,
-        top: 3,
-        child: Container(
-          width: 12,
-          height: 12,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: dot),
+        left: 1,
+        top: 4,
+        child: SizedBox.square(
+          dimension: 9,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: dot,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
         ),
       ),
     ],
@@ -889,16 +1023,49 @@ class AckBox extends StatelessWidget {
           onChanged: (v) => onChanged(v ?? false),
           controlAffinity: ListTileControlAffinity.leading,
           contentPadding: EdgeInsets.zero,
-          title: Text(label, style: const TextStyle(height: 1.35)),
+          title: Text(label, style: DMType.outfit(size: 15, height: 1.4)),
         ),
         if (error != null)
-          Text(
-            error!,
-            style: const TextStyle(color: DmColors.danger, fontSize: 13),
+          Padding(
+            padding: const EdgeInsets.only(left: DMSpace.xxs),
+            child: Text(
+              error!,
+              style: DMType.outfit(size: 13.5, color: DM.due),
+            ),
           ),
       ],
     ),
   );
 
   static double _wave(double t) => (t * 6).floor().isEven ? 1 : -1;
+}
+
+/// A [ChoiceChip] in the editor's language: the selected chip sits on deep
+/// with a signal label. [mono] sets durations and amounts in mono.
+ChoiceChip pickChip({
+  Key? key,
+  required String label,
+  required bool selected,
+  required ValueChanged<bool>? onSelected,
+  Widget? avatar,
+  bool mono = false,
+}) {
+  final color = onSelected == null
+      ? DM.mist
+      : selected
+      ? DM.signal
+      : DM.bone;
+  return ChoiceChip(
+    key: key,
+    label: Text(label),
+    selected: selected,
+    onSelected: onSelected,
+    avatar: avatar,
+    showCheckmark: false,
+    materialTapTargetSize: MaterialTapTargetSize.padded,
+    side: BorderSide(color: selected ? DM.tide : DM.line),
+    labelStyle: mono
+        ? DMType.mono(size: 13, weight: FontWeight.w500, color: color)
+        : DMType.outfit(size: 14, weight: FontWeight.w500, color: color),
+  );
 }

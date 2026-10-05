@@ -12,8 +12,8 @@ import '../../state/providers.dart';
 import '../../state/subscription.dart';
 import '../format.dart';
 import '../rules_format.dart';
-import '../theme.dart';
 import '../web/web_ui.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 import '../widgets/plan_pricing.dart';
 import 'rails_check_screen.dart';
@@ -28,7 +28,6 @@ Future<bool> _confirm(
     await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: Text(title),
         content: Text(body),
         actions: [
@@ -137,7 +136,6 @@ class SettingsTab extends ConsumerWidget {
       final choice = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-          backgroundColor: DmColors.surface,
           title: const Text('Keep receiving keys?'),
           content: const Text(
             'This phone holds the keys behind your claim codes. They are kept unless you '
@@ -151,7 +149,7 @@ class SettingsTab extends ConsumerWidget {
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
-              style: TextButton.styleFrom(foregroundColor: DmColors.danger),
+              style: TextButton.styleFrom(foregroundColor: DM.due),
               child: const Text('Also delete receiving keys'),
             ),
           ],
@@ -186,166 +184,199 @@ class SettingsTab extends ConsumerWidget {
     );
   }
 
+  Future<void> _confirmPanic(BuildContext context, WidgetRef ref) async {
+    final web = ref.read(isWebProvider);
+    if (await _confirm(
+          context,
+          'Lock down vault?',
+          'Withdrawals and policy changes freeze for your lock period. Inheritance keeps working.'
+              '${web ? ' Approve in your wallet.' : ''}',
+          'Lock down',
+        ) &&
+        context.mounted) {
+      await _panic(context, ref);
+    }
+  }
+
+  Future<void> _moveGuard(BuildContext context, WidgetRef ref) async {
+    if (await _confirm(
+          context,
+          'Move guard to this phone?',
+          'Every plan guarded by another key moves to this phone\'s guard key, and the old key '
+              'stops working. Approve in your wallet.',
+          'Move',
+        ) &&
+        context.mounted) {
+      await runGuarded(
+        context,
+        ref.read(actionsProvider).rotateGuard,
+        success: 'Guard moved to this phone',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final t = Theme.of(context).textTheme;
     final owner = ref.watch(sessionProvider.select((s) => s.owner)) ?? '';
     final guard = ref.watch(guardAddressProvider).value;
-    final actions = ref.read(actionsProvider);
     final web = ref.watch(isWebProvider);
+    final device = web ? 'this browser' : 'this phone';
     final walletName = web
         ? ref.read(webWalletProvider).lastKind?.label ?? 'Wallet'
-        : null;
+        : 'Seed Vault';
 
     return SafeArea(
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.gutter,
+          DMSpace.md,
+          DMSpace.gutter,
+          DMSpace.xxxl,
+        ),
         children: [
-          Row(
-            children: [
-              Text('Security', style: t.headlineMedium),
-              const Spacer(),
-              if (web) const WebBadge(),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Card(
-            child: Column(
+          PageHeader(
+            title: 'Security',
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                ListTile(
-                  leading: const Icon(Icons.account_balance_wallet_outlined),
-                  title: const Text('Owner wallet'),
-                  subtitle: Text(
-                    walletName == null
-                        ? short(owner)
-                        : '$walletName · ${short(owner)}',
-                  ),
-                  trailing: web
-                      ? TextButton(
-                          onPressed: () => _switchWallet(context, ref),
-                          child: const Text('Switch'),
-                        )
-                      : null,
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: owner));
-                    toast(context, 'Address copied');
-                  },
-                ),
-                const Divider(height: 1, color: DmColors.line),
-                ListTile(
-                  leading: const Icon(Icons.key_outlined),
-                  title: Text(
-                    web ? 'Guard key (this browser)' : 'Guard key (this phone)',
-                  ),
-                  subtitle: Text(guard == null ? 'Not created' : short(guard)),
-                ),
+                if (web) const WebBadge(),
+                if (web) const SizedBox(width: DMSpace.sm),
+                const _LockChip(),
               ],
             ),
           ),
-          if (web) ...[const SizedBox(height: 12), const AndroidAppCard()],
-          const SizedBox(height: 16),
-          Card(
-            child: ListTile(
-              leading: const Icon(
-                Icons.warning_amber_rounded,
-                color: DmColors.danger,
+          const SizedBox(height: DMSpace.xl),
+          DMListGroup(
+            children: [
+              DMListRow(
+                leading: const IconTile(
+                  icon: Icons.account_balance_wallet_outlined,
+                ),
+                title: 'Owner wallet',
+                subtitle: '${short(owner)} · $walletName',
+                trailing: web
+                    ? TextButton(
+                        onPressed: () => _switchWallet(context, ref),
+                        child: const Text('Switch'),
+                      )
+                    : null,
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: owner));
+                  toast(context, 'Address copied');
+                },
               ),
-              title: const Text('Panic lockdown'),
-              subtitle: const Text(
-                'Freeze withdrawals, policy changes and vesting revocation now',
+              DMListRow(
+                leading: const IconTile(icon: Icons.key_outlined),
+                title: 'Guard key',
+                subtitle:
+                    '${guard == null ? 'Not created' : short(guard)} · $device',
               ),
-              onTap: () async {
-                if (await _confirm(
-                      context,
-                      'Lock down vault?',
-                      'Withdrawals and policy changes freeze for your lock period. Inheritance keeps working.'
-                          '${web ? ' Approve in your wallet.' : ''}',
-                      'Lock down',
-                    ) &&
-                    context.mounted) {
-                  await _panic(context, ref);
-                }
-              },
+            ],
+          ),
+          if (web) ...[
+            const SizedBox(height: DMSpace.md),
+            const AndroidAppCard(),
+          ],
+          const SizedBox(height: DMSpace.md),
+          // The one card allowed a status border: the fill stays graphite.
+          DMCard(
+            key: const ValueKey('panic-card'),
+            padding: EdgeInsets.zero,
+            borderColor: DM.due.withValues(alpha: 0.35),
+            onTap: () => _confirmPanic(context, ref),
+            child: const DMListRow(
+              leading: IconTile(
+                icon: Icons.warning_amber_rounded,
+                tone: DM.due,
+              ),
+              title: 'Panic lockdown',
+              subtitle: 'Freeze withdrawals, policy changes and vesting revocation now',
             ),
           ),
           // Moving the guard to a browser would take it off the phone.
           if (!web) ...[
-            const SizedBox(height: 12),
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.autorenew),
-                title: const Text('Move guard to this phone'),
-                subtitle: const Text(
-                  'Use after a lost or replaced device, or after Forget this device',
-                ),
-                onTap: () async {
-                  if (await _confirm(
-                        context,
-                        'Move guard to this phone?',
-                        'Every plan guarded by another key moves to this phone\'s guard key, and the old key '
-                            'stops working. Approve in your wallet.',
-                        'Move',
-                      ) &&
-                      context.mounted) {
-                    await runGuarded(
-                      context,
-                      actions.rotateGuard,
-                      success: 'Guard moved to this phone',
-                    );
-                  }
-                },
+            const SizedBox(height: DMSpace.md),
+            DMCard(
+              padding: EdgeInsets.zero,
+              onTap: () => _moveGuard(context, ref),
+              child: const DMListRow(
+                leading: IconTile(icon: Icons.swap_horiz),
+                title: 'Move guard to this phone',
+                subtitle: 'After a lost or replaced device, or after Forget this device',
               ),
             ),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: DMSpace.md),
           const _ReceivePrivatelyCard(),
-          const SizedBox(height: 12),
-          const _RecoveryCard(),
-          // The Cloak prover runs in the Android app's WebView.
-          if (!web) ...[
-            const SizedBox(height: 12),
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.health_and_safety_outlined),
-                title: const Text('Private rails check'),
-                subtitle: const Text(
-                  'Test the Cloak prover and a Zcash quote. Moves no funds.',
-                ),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const RailsCheckScreen(),
+          const SizedBox(height: DMSpace.xxl),
+          const SectionHeader(title: 'Fees'),
+          const SizedBox(height: DMSpace.xs),
+          const PricingCard(),
+          const MonthlyPlanCard(margin: EdgeInsets.only(top: DMSpace.md)),
+          const SizedBox(height: DMSpace.md),
+          const NetworkFeesCard(),
+          const SizedBox(height: DMSpace.xxl),
+          SectionHeader(title: web ? 'This browser' : 'This phone'),
+          const SizedBox(height: DMSpace.xs),
+          DMListGroup(
+            children: [
+              // The Cloak prover runs in the Android app's WebView.
+              if (!web)
+                DMListRow(
+                  leading: const IconTile(
+                    icon: Icons.health_and_safety_outlined,
+                  ),
+                  title: 'Private rails check',
+                  subtitle: 'Test the Cloak prover and a Zcash quote. Moves no funds.',
+                  monoSubtitle: false,
+                  trailing: const Icon(Icons.chevron_right, color: DM.sub),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const RailsCheckScreen(),
+                    ),
                   ),
                 ),
+              DMListRow(
+                leading: const IconTile(icon: Icons.lock_outline),
+                title: 'Lock app',
+                subtitle: 'Asks for your PIN again',
+                monoSubtitle: false,
+                onTap: () => ref.read(sessionProvider.notifier).lock(),
               ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          const PricingCard(),
-          const MonthlyPlanCard(margin: EdgeInsets.only(top: 12)),
-          const SizedBox(height: 12),
-          const NetworkFeesCard(),
-          const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.lock_outline),
-              title: const Text('Lock app'),
-              onTap: () => ref.read(sessionProvider.notifier).lock(),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.logout, color: DmColors.muted),
-              title: Text(web ? 'Forget this browser' : 'Forget this device'),
-              subtitle: const Text(
-                'Deletes PINs and the guard key. Receiving keys stay unless you choose to delete them.',
+              DMListRow(
+                leading: const IconTile(icon: Icons.logout),
+                title: web ? 'Forget this browser' : 'Forget this device',
+                subtitle:
+                    'Deletes PINs and the guard key. Receiving keys stay unless '
+                    'you choose to delete them.',
+                monoSubtitle: false,
+                onTap: () => _forget(context, ref),
               ),
-              onTap: () => _forget(context, ref),
-            ),
+            ],
           ),
         ],
       ),
+    );
+  }
+}
+
+/// UNLOCKED, or LOCKED while any plan is in lockdown. A duress session
+/// always reads UNLOCKED: the lock it just sent must not show. Hidden with
+/// no plans, where there is nothing to lock.
+class _LockChip extends ConsumerWidget {
+  const _LockChip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final plans = ref.watch(vaultsProvider).value ?? const <VaultState>[];
+    if (plans.isEmpty) return const SizedBox.shrink();
+    final duress = ref.watch(sessionProvider.select((s) => s.duress));
+    final now = nowSecs();
+    final locked = !duress && plans.any((v) => v.isLocked(now));
+    return StatusChip(
+      locked ? DMStatus.locked : DMStatus.onTrack,
+      key: const ValueKey('security-lock-chip'),
+      label: locked ? 'Locked' : 'Unlocked',
     );
   }
 }
@@ -365,7 +396,6 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
     final dest = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: Text('Receive via ${rail.label}'),
         content: TextField(
           controller: controller,
@@ -432,72 +462,75 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = Theme.of(context).textTheme;
     final profiles = ref.watch(claimProfilesProvider).value ?? const [];
-    final device = ref.watch(isWebProvider) ? 'browser' : 'phone';
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 8, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Receive privately',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Get a claim code to give someone who is naming you in their plan. Payouts land on a '
-              'fresh key on this $device and are forwarded to your private address.',
-              style: TextStyle(
-                color: DmColors.muted,
-                fontSize: 13,
-                height: 1.35,
-              ),
-            ),
-            for (final rail in [Rail.cloak, Rail.zcash])
-              Builder(
-                builder: (context) {
-                  final p = profiles.where((p) => p.rail == rail).firstOrNull;
-                  return ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(rail.icon, color: rail.color),
-                    title: Text(rail.label),
-                    subtitle: Text(
-                      p == null
-                          ? 'Not set up'
-                          : p.destination.isEmpty
-                          ? 'Code ${short(p.key.address)} · restored, tap to set a destination'
-                          : 'Code ${short(p.key.address)} → ${short(p.destination)}'
-                                '${p.recoverable ? '' : '\nOlder key, not covered by your recovery phrase'}',
-                    ),
-                    isThreeLine: p != null && !p.recoverable,
-                    trailing: p == null
-                        ? const Icon(Icons.add)
-                        : IconButton(
-                            icon: const Icon(Icons.copy, size: 20),
-                            onPressed: () {
-                              Clipboard.setData(
-                                ClipboardData(text: p.claimCode),
-                              );
-                              toast(context, 'Claim code copied');
-                            },
-                          ),
-                    onTap: () => _edit(context, ref, rail, p?.destination),
-                  );
-                },
-              ),
-          ],
-        ),
+    final web = ref.watch(isWebProvider);
+    final device = web ? 'browser' : 'phone';
+    return DMListGroup(
+      header: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Semantics(
+            header: true,
+            child: Text('Receive privately', style: t.titleMedium),
+          ),
+          const SizedBox(height: DMSpace.xxs),
+          Text(
+            'Get a claim code to give someone who is naming you in their plan. Payouts land on a '
+            'fresh key on this $device and are forwarded to your private address.',
+            style: t.bodyMedium?.copyWith(fontSize: 14),
+          ),
+        ],
       ),
+      children: [
+        for (final rail in [Rail.cloak, Rail.zcash])
+          Builder(
+            builder: (context) {
+              final p = profiles.where((p) => p.rail == rail).firstOrNull;
+              return DMListRow(
+                key: ValueKey('receive-${rail.name}'),
+                leading: IconTile(icon: rail.icon),
+                title: rail.label,
+                subtitle: p == null
+                    ? 'Not set up'
+                    : p.destination.isEmpty
+                    ? 'Code ${short(p.key.address)} · restored, tap to set a destination'
+                    : 'Code ${short(p.key.address)} → ${short(p.destination)}'
+                          '${p.recoverable ? '' : '\nOlder key, not covered by your recovery phrase'}',
+                trailing: p == null
+                    ? const Icon(Icons.add, color: DM.signal)
+                    : IconButton(
+                        tooltip: 'Copy claim code',
+                        icon: const Icon(Icons.copy, size: 20, color: DM.sub),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: p.claimCode));
+                          toast(context, 'Claim code copied');
+                        },
+                      ),
+                onTap: () => _edit(context, ref, rail, p?.destination),
+              );
+            },
+          ),
+        DMListRow(
+          leading: const IconTile(icon: Icons.key),
+          title: 'Show recovery phrase',
+          subtitle: 'Backs up the keys behind your claim codes',
+          onTap: () => _showPhrase(context, ref),
+        ),
+        DMListRow(
+          leading: const IconTile(icon: Icons.restore),
+          title: 'Restore receiving profiles from phrase',
+          subtitle: web
+              ? 'On a new browser or after clearing site data'
+              : 'On a new or reset phone',
+          onTap: () => _restore(context, ref),
+        ),
+      ],
     );
   }
-}
 
-/// Backup of the receiving keys: show or restore the recovery phrase.
-class _RecoveryCard extends ConsumerWidget {
-  const _RecoveryCard();
-
-  Future<void> _show(BuildContext context, WidgetRef ref) async {
+  /// Backup of the receiving keys: show the recovery phrase.
+  Future<void> _showPhrase(BuildContext context, WidgetRef ref) async {
     String? phrase;
     final ok = await runGuarded(
       context,
@@ -512,7 +545,6 @@ class _RecoveryCard extends ConsumerWidget {
     final phrase = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: DmColors.surface,
         title: const Text('Restore receiving profiles'),
         content: TextField(
           controller: controller,
@@ -550,31 +582,6 @@ class _RecoveryCard extends ConsumerWidget {
     });
     if (ok && context.mounted) toast(context, message!);
   }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) => Card(
-    child: Column(
-      children: [
-        ListTile(
-          leading: const Icon(Icons.key),
-          title: const Text('Show recovery phrase'),
-          subtitle: const Text('Backs up the keys behind your claim codes'),
-          onTap: () => _show(context, ref),
-        ),
-        const Divider(height: 1, color: DmColors.line),
-        ListTile(
-          leading: const Icon(Icons.restore),
-          title: const Text('Restore receiving profiles from phrase'),
-          subtitle: Text(
-            ref.watch(isWebProvider)
-                ? 'On a new browser or after clearing site data'
-                : 'On a new or reset phone',
-          ),
-          onTap: () => _restore(context, ref),
-        ),
-      ],
-    ),
-  );
 }
 
 /// How Deadman charges: a percentage of each release, or, when offered, a
@@ -584,50 +591,76 @@ class PricingCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = Theme.of(context).textTheme;
+    final small = t.bodyMedium?.copyWith(fontSize: 14);
     final fees = ref.watch(feesProvider).value;
     final terms = ref.watch(subscriptionTermsProvider).value;
-    const small = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.4);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Row(
-              children: [
-                Icon(Icons.receipt_long_outlined),
-                SizedBox(width: 12),
-                Text('Pricing', style: TextStyle(fontWeight: FontWeight.w600)),
-              ],
+    return DMCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Pricing', style: t.titleMedium),
+          const SizedBox(height: DMSpace.xs),
+          Text(
+            fees == null
+                ? 'Free to use. A fee applies only when a tier releases funds.'
+                : 'Free to use. A fee is taken from each release:',
+            style: small,
+          ),
+          if (fees != null) ...[
+            const SizedBox(height: DMSpace.sm),
+            _RateRow(
+              rail: 'Via Solana',
+              rate: percentText(fees.feeBpsPublic / 10000),
             ),
-            const SizedBox(height: 6),
+            const Divider(),
+            _RateRow(
+              rail: 'Via Cloak or Zcash',
+              rate: percentText(fees.feeBpsPrivate / 10000),
+            ),
+          ],
+          if (terms != null) ...[
+            const SizedBox(height: DMSpace.md),
             Text(
-              fees == null
-                  ? 'Free to use. A fee applies only when a tier releases funds.'
-                  : 'Free to use. A fee is taken from each release: '
-                        '${percentText(fees.feeBpsPublic / 10000)} via Solana, '
-                        '${percentText(fees.feeBpsPrivate / 10000)} via Cloak or Zcash.',
+              'Or pay ${amountText(terms.pricePerPeriod, terms.mint)} '
+              '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} and '
+              'releases carry no fee: one subscription covers all your plans, '
+              'present and future. Better for larger holdings. A new or lapsed '
+              'subscription starts with ${terms.minPeriods} '
+              '${periodWord(terms, terms.minPeriods)} paid at once (up to '
+              '${SubscriptionTerms.maxPeriods} per payment); while it runs, '
+              'extend by any amount.',
               style: small,
             ),
-            if (terms != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Or pay ${amountText(terms.pricePerPeriod, terms.mint)} '
-                '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} and '
-                'releases carry no fee: one subscription covers all your plans, '
-                'present and future. Better for larger holdings. A new or lapsed '
-                'subscription starts with ${terms.minPeriods} '
-                '${periodWord(terms, terms.minPeriods)} paid at once (up to '
-                '${SubscriptionTerms.maxPeriods} per payment); while it runs, '
-                'extend by any amount.',
-                style: small,
-              ),
-            ],
           ],
-        ),
+        ],
       ),
     );
   }
+}
+
+/// "Via Solana ......... 2%": the rate right-aligned in mono, as on the
+/// rail picker.
+class _RateRow extends StatelessWidget {
+  const _RateRow({required this.rail, required this.rate});
+
+  final String rail;
+  final String rate;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: '$rail: $rate',
+    excludeSemantics: true,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: DMSpace.sm),
+      child: Row(
+        children: [
+          Expanded(child: Text(rail, style: DMType.outfit(size: 15))),
+          Text(rate, style: DMType.mono(size: 13)),
+        ],
+      ),
+    ),
+  );
 }
 
 /// Wallet balances and who pays network fees on owner transactions: SOL
@@ -639,85 +672,106 @@ class NetworkFeesCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     const sponsored = AppConfig.koraSponsorUrl != '';
+    final t = Theme.of(context).textTheme;
+    final small = t.bodyMedium?.copyWith(fontSize: 14);
     final lamports = ref.watch(walletBalanceProvider).value;
     final usdc = ref.watch(walletUsdcProvider).value;
     final mode = ref.watch(feeModeProvider);
     final paymaster = ref.watch(paymasterAvailableProvider);
     final web = ref.watch(isWebProvider);
-    const small = TextStyle(color: DmColors.muted, fontSize: 13, height: 1.35);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Row(
-              children: [
-                Icon(Icons.local_gas_station_outlined),
-                SizedBox(width: 12),
-                Text(
-                  'Network fees',
-                  style: TextStyle(fontWeight: FontWeight.w600),
+    return DMCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Network fees', style: t.titleMedium),
+          const SizedBox(height: DMSpace.sm),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              const MonoLabel('Wallet'),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: Text(
+                  '${lamports == null ? '…' : sol(lamports)} SOL · '
+                  '${usdc == null ? '…' : amountNumber(usdc, AppConfig.usdcMint)} USDC',
+                  style: DMType.data(color: DM.bone),
+                ),
+              ),
+            ],
+          ),
+          // The browser build only offers USDC fees when a paymaster is set.
+          if (paymaster || !web) ...[
+            const SizedBox(height: DMSpace.lg),
+            Text(
+              'Pay network fees with',
+              style: DMType.outfit(weight: FontWeight.w500),
+            ),
+            const SizedBox(height: DMSpace.sm),
+            SegmentedButton<FeeMode>(
+              showSelectedIcon: false,
+              segments: [
+                const ButtonSegment(value: FeeMode.sol, label: Text('SOL')),
+                ButtonSegment(
+                  value: FeeMode.usdc,
+                  label: const Text('USDC'),
+                  enabled: paymaster,
                 ),
               ],
+              selected: {mode},
+              onSelectionChanged: (s) =>
+                  ref.read(feeModeProvider.notifier).set(s.first),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: DMSpace.sm),
             Text(
-              'Wallet: ${lamports == null ? '…' : sol(lamports)} SOL · '
-              '${usdc == null ? '…' : amountNumber(usdc, AppConfig.usdcMint)} USDC',
+              !paymaster
+                  ? 'Your wallet pays its fees in SOL. Paying in USDC needs a Kora '
+                        'paymaster, which this build does not have configured.'
+                  : mode == FeeMode.usdc
+                  ? 'A Kora paymaster pays the SOL fee and account rent for your wallet '
+                        'transactions and charges you the equivalent in USDC.'
+                  : 'Your wallet pays its fees in SOL. Switch to USDC to need no SOL at all.',
               style: small,
             ),
-            // The browser build only offers USDC fees when a paymaster is set.
-            if (paymaster || !web) ...[
-              const SizedBox(height: 12),
-              const Text('Pay network fees with'),
-              const SizedBox(height: 8),
-              SegmentedButton<FeeMode>(
-                showSelectedIcon: false,
-                segments: [
-                  const ButtonSegment(value: FeeMode.sol, label: Text('SOL')),
-                  ButtonSegment(
-                    value: FeeMode.usdc,
-                    label: const Text('USDC'),
-                    enabled: paymaster,
+            if (mode == FeeMode.usdc && usdc == 0) ...[
+              const SizedBox(height: DMSpace.sm),
+              Row(
+                key: const ValueKey('no-usdc-warning'),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.error_outline,
+                      size: 16,
+                      color: DM.attention,
+                    ),
+                  ),
+                  const SizedBox(width: DMSpace.sm),
+                  Expanded(
+                    child: Text(
+                      'Your wallet has no USDC. Add USDC or switch fees to SOL.',
+                      style: DMType.outfit(size: 14),
+                    ),
                   ),
                 ],
-                selected: {mode},
-                onSelectionChanged: (s) =>
-                    ref.read(feeModeProvider.notifier).set(s.first),
               ),
-              const SizedBox(height: 8),
-              Text(
-                !paymaster
-                    ? 'Your wallet pays its fees in SOL. Paying in USDC needs a Kora '
-                          'paymaster, which this build does not have configured.'
-                    : mode == FeeMode.usdc
-                    ? 'A Kora paymaster pays the SOL fee and account rent for your wallet '
-                          'transactions and charges you the equivalent in USDC.'
-                    : 'Your wallet pays its fees in SOL. Switch to USDC to need no SOL at all.',
-                style: small,
-              ),
-              if (mode == FeeMode.usdc && usdc == 0)
-                const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Text(
-                    'Your wallet has no USDC. Add USDC or switch fees to SOL.',
-                    style: TextStyle(color: DmColors.warn, fontSize: 13),
-                  ),
-                ),
             ],
-            const SizedBox(height: 6),
-            Text(
-              web
-                  ? 'Check-ins and panic locks are approved in your wallet like any '
-                        'other transaction.'
-                  : sponsored
-                  ? 'Check-ins and duress locks are free; this phone needs no SOL.'
-                  : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).',
-              style: small,
-            ),
           ],
-        ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: DMSpace.md),
+            child: Divider(),
+          ),
+          Text(
+            web
+                ? 'Check-ins and panic locks are approved in your wallet like any '
+                      'other transaction.'
+                : sponsored
+                ? 'Check-ins and duress locks are free; this phone needs no SOL.'
+                : 'Check-ins are paid by this phone\'s guard key (0.01 SOL at setup).',
+            style: small,
+          ),
+        ],
       ),
     );
   }

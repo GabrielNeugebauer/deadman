@@ -69,21 +69,28 @@ class _ShellState extends State<_Shell> {
       index: _index,
       children: const [PulseTab(), CircleTab(), SettingsTab()],
     ),
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: _index,
-      onDestinationSelected: (i) => setState(() => _index = i),
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.monitor_heart_outlined),
-          label: 'Pulse',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.diversity_3_outlined),
-          label: 'Circle',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.shield_outlined),
-          label: 'Security',
+    // The mockups draw a 1px line above the bar; the theme leaves it off.
+    bottomNavigationBar: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Divider(height: 1, thickness: 1, color: DM.line),
+        NavigationBar(
+          selectedIndex: _index,
+          onDestinationSelected: (i) => setState(() => _index = i),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.radio_button_unchecked),
+              label: 'Pulse',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.people_outline),
+              label: 'Circle',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.shield_outlined),
+              label: 'Security',
+            ),
+          ],
         ),
       ],
     ),

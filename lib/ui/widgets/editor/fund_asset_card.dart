@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/assets.dart';
 import '../../../state/plan_draft.dart';
-import '../../theme.dart';
+import '../brand/brand.dart';
 import 'plan_steps.dart';
 
 /// One line of a Fund breakdown.
@@ -72,111 +72,126 @@ class FundAssetCard extends StatelessWidget {
       AsyncError() => "Couldn't read your wallet balance.",
       _ => 'Checking your wallet…',
     };
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              assetSymbol(mint),
-              style: Theme.of(context).textTheme.titleLarge,
+    return DMCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    assetSymbol(mint),
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+              ),
+              const SizedBox(width: DMSpace.md),
+              ActionChip(
+                label: const Text('Use all'),
+                materialTapTargetSize: MaterialTapTargetSize.padded,
+                labelStyle: DMType.outfit(
+                  size: 14,
+                  weight: FontWeight.w600,
+                  color: useAll == null ? DM.mist : DM.signal,
+                ),
+                onPressed: useAll == null ? null : () => onUseAll(useAll!),
+              ),
+            ],
+          ),
+          Text(
+            needs,
+            style: DMType.outfit(size: 14, color: DM.sub, height: 1.4),
+          ),
+          const SizedBox(height: DMSpace.lg),
+          TextField(
+            key: fieldKey,
+            controller: controller,
+            focusNode: focusNode,
+            onChanged: (_) => onChanged(),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+            ],
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            style: DMType.mono(size: 18, weight: FontWeight.w500),
+            decoration: InputDecoration(
+              labelText: 'Put in this plan',
+              hintText: '0',
+              suffixText: symbol,
+              suffixStyle: DMType.mono(size: 14, color: DM.sub),
+              helperText: helper,
+              helperStyle: DMType.mono(size: 12, color: DM.sub),
+              helperMaxLines: 2,
+              errorText: errorText,
+              errorMaxLines: 3,
             ),
-            const SizedBox(height: 2),
-            Text(needs, style: const TextStyle(color: DmColors.muted)),
-            const SizedBox(height: 14),
-            Row(
+          ),
+          if (lines.isNotEmpty) ...[
+            const SizedBox(height: DMSpace.lg),
+            const Divider(height: 1),
+            const SizedBox(height: DMSpace.lg),
+            Text(
+              breakdownTitle,
+              style: DMType.outfit(size: 15, weight: FontWeight.w600),
+            ),
+            for (final l in lines) _FundLineRow(l),
+          ],
+          if (leftover != null)
+            Padding(
+              padding: const EdgeInsets.only(top: DMSpace.md),
+              child: Text(
+                leftover!,
+                style: DMType.data(
+                  size: 12.5,
+                  color: leftoverWarn ? DM.attention : DM.sub,
+                ),
+              ),
+            ),
+          ...issues,
+        ],
+      ),
+    );
+  }
+}
+
+class _FundLineRow extends StatelessWidget {
+  const _FundLineRow(this.line);
+
+  final FundLine line;
+
+  @override
+  Widget build(BuildContext context) {
+    final issue = line.issue;
+    return Padding(
+      padding: const EdgeInsets.only(top: DMSpace.md),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: TextField(
-                    key: fieldKey,
-                    controller: controller,
-                    focusNode: focusNode,
-                    onChanged: (_) => onChanged(),
-                    inputFormatters: [
-                      FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
-                    ],
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: 'Put in this plan',
-                      hintText: '0',
-                      suffixText: symbol,
-                      helperText: helper,
-                      helperMaxLines: 2,
-                      errorText: errorText,
-                      errorMaxLines: 3,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: ActionChip(
-                    label: const Text('Use all'),
-                    onPressed: useAll == null ? null : () => onUseAll(useAll!),
-                  ),
-                ),
+                Text(line.title, style: DMType.outfit(size: 14, height: 1.35)),
+                const SizedBox(height: 2),
+                Text(line.detail, style: DMType.data(size: 12.5)),
               ],
             ),
-            if (lines.isNotEmpty) ...[
-              const SizedBox(height: 18),
-              Text(
-                breakdownTitle,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              for (final l in lines)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(l.title, style: const TextStyle(fontSize: 13)),
-                      Padding(
-                        padding: const EdgeInsets.only(left: 12, top: 2),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                l.detail,
-                                style: const TextStyle(
-                                  color: DmColors.muted,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                            if (l.issue != null)
-                              Tooltip(
-                                message: l.issue!.headline,
-                                child: Icon(
-                                  severityIcon(l.issue!.severity),
-                                  size: 18,
-                                  color: severityColor(l.issue!.severity),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-            if (leftover != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: Text(
-                  leftover!,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: leftoverWarn ? DmColors.warn : DmColors.muted,
-                  ),
+          ),
+          if (issue != null)
+            Padding(
+              padding: const EdgeInsets.only(left: DMSpace.sm, top: 2),
+              child: Tooltip(
+                message: issue.headline,
+                child: Icon(
+                  severityIcon(issue.severity),
+                  size: 18,
+                  color: severityColor(issue.severity),
                 ),
               ),
-            ...issues,
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }

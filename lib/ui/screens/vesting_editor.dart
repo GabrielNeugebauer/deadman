@@ -13,8 +13,7 @@ import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../../state/vesting.dart';
 import '../format.dart' show installmentDate;
-import '../rules_format.dart';
-import '../theme.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/editor/fund_asset_card.dart';
 import '../widgets/editor/plan_steps.dart';
 import '../widgets/feedback.dart';
@@ -394,15 +393,13 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   }
 
   List<Widget> _schedulesStep() {
-    const muted = TextStyle(color: DmColors.muted, height: 1.4);
+    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.45);
     final start = _startAt(nowSecs());
     return [
-      const Text(
+      const StepLead(
         'Each schedule unlocks money for someone in installments from the '
         'start date, whether or not you check in.',
-        style: muted,
       ),
-      const SizedBox(height: 12),
       SectionCard(
         title: 'Plan',
         children: [
@@ -417,35 +414,34 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
               errorText: _check ? labelError(_label.text)?.body : null,
             ),
           ),
-          const Text('Starts', style: TextStyle(color: DmColors.muted)),
-          const SizedBox(height: 8),
+          const SizedBox(height: DMSpace.xs),
+          const FieldLabel('Starts'),
           Wrap(
-            spacing: 8,
-            runSpacing: 4,
+            spacing: DMSpace.sm,
+            runSpacing: DMSpace.xxs,
             children: [
-              ChoiceChip(
-                label: const Text('Today'),
+              pickChip(
+                label: 'Today',
                 selected: _startDate == null,
                 onSelected: (_) => setState(() => _startDate = null),
               ),
-              ChoiceChip(
-                avatar: const Icon(Icons.event, size: 16),
-                label: Text(
-                  _startDate == null
-                      ? 'Pick a date'
-                      : DateFormat.yMMMd().format(_startDate!),
+              pickChip(
+                avatar: Icon(
+                  Icons.event,
+                  size: 16,
+                  color: _startDate != null ? DM.signal : DM.sub,
                 ),
+                label: _startDate == null
+                    ? 'Pick a date'
+                    : DateFormat.yMMMd().format(_startDate!),
+                mono: _startDate != null,
                 selected: _startDate != null,
                 onSelected: (_) => _pickStart(),
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Can you stop it later?',
-            style: TextStyle(color: DmColors.muted),
-          ),
-          const SizedBox(height: 8),
+          const SizedBox(height: DMSpace.xl),
+          const FieldLabel('Can you stop it later?'),
           SizedBox(
             width: double.infinity,
             child: SegmentedButton<bool>(
@@ -470,7 +466,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
               onSelectionChanged: (v) => setState(() => _revocable = v.first),
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: DMSpace.sm),
           Text(
             _revocable
                 ? 'You can stop future vesting at any time. Whatever has '
@@ -479,20 +475,15 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                       'take back what they owe.',
             style: muted,
           ),
-          const SizedBox(height: 16),
-          Text(
-            'Release every',
-            key: _periodKey,
-            style: const TextStyle(color: DmColors.muted),
-          ),
-          const SizedBox(height: 8),
+          const SizedBox(height: DMSpace.xl),
+          FieldLabel('Release every', key: _periodKey),
           Wrap(
-            spacing: 8,
-            runSpacing: 4,
+            spacing: DMSpace.sm,
+            runSpacing: DMSpace.xxs,
             children: [
               for (final (secs, text) in periodChoices(demo: _demo))
-                ChoiceChip(
-                  label: Text(text),
+                pickChip(
+                  label: text,
                   selected: _period == secs,
                   onSelected: (_) => setState(() {
                     _period = secs;
@@ -501,9 +492,9 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                 ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: DMSpace.sm),
           if (_periodError case final error?)
-            Text(error, style: const TextStyle(color: DmColors.danger))
+            Text(error, style: DMType.outfit(size: 14, color: DM.due))
           else
             Text(
               _period == 0
@@ -516,7 +507,9 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
             ),
         ],
       ),
-      const SizedBox(height: 16),
+      const SizedBox(height: DMSpace.xxl),
+      const SectionHeader(title: 'Schedules'),
+      const SizedBox(height: DMSpace.sm),
       for (final (i, s) in _schedules.indexed) ...[
         _ScheduleSummaryCard(
           number: i + 1,
@@ -525,7 +518,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           periodSecs: _period,
           onTap: () => _edit(i),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: DMSpace.md),
       ],
       KeyedSubtree(
         key: _schedulesKey,
@@ -542,43 +535,45 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                 onAdd: () => _edit(null),
               )
             else if (_schedules.length < maxSchedules)
-              OutlinedButton.icon(
-                onPressed: () => _edit(null),
-                icon: const Icon(Icons.add),
-                label: const Text('Add a schedule'),
-              ),
+              AddRowButton(label: 'Add a schedule', onTap: () => _edit(null)),
             if (_check && _schedules.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
+              Padding(
+                padding: const EdgeInsets.only(top: DMSpace.sm),
                 child: Text(
                   'Add at least one schedule.',
-                  style: TextStyle(color: DmColors.danger),
+                  style: DMType.outfit(size: 14, color: DM.due),
                 ),
               ),
           ],
         ),
       ),
-      const SizedBox(height: 12),
-      Card(
-        clipBehavior: Clip.antiAlias,
+      const SizedBox(height: DMSpace.lg),
+      DMCard(
+        padding: EdgeInsets.zero,
         child: ExpansionTile(
-          shape: const Border(),
-          collapsedShape: const Border(),
-          title: const Text('Advanced'),
+          tilePadding: const EdgeInsets.symmetric(
+            horizontal: DMSpace.cardPadding,
+          ),
+          title: Text(
+            'Advanced',
+            style: DMType.outfit(size: 16, weight: FontWeight.w600),
+          ),
           subtitle: _demo
-              ? const Text(
-                  'Demo timings',
-                  style: TextStyle(color: DmColors.muted, fontSize: 13),
-                )
+              ? Text('Demo timings', style: DMType.data(size: 12))
               : null,
-          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          childrenPadding: const EdgeInsets.fromLTRB(
+            DMSpace.cardPadding,
+            0,
+            DMSpace.cardPadding,
+            DMSpace.sm,
+          ),
           children: [
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               value: _demo,
               onChanged: _setDemo,
               title: const Text('Demo timings'),
-              subtitle: const Text(
+              subtitle: Text(
                 'Adds a 2-minute cliff, 10-minute vesting and one-minute '
                 'installments so it can be shown live.',
                 style: muted,
@@ -593,15 +588,13 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   List<Widget> _fundStep(FeeInfo fee, int reserve) {
     final totals = _totals;
     return [
-      const Text(
+      const StepLead(
         'How much goes into the plan now. You can add more later from the '
         'plan card.',
-        style: TextStyle(color: DmColors.muted),
       ),
-      const SizedBox(height: 12),
       for (final mint in _assets) ...[
         _fundCard(mint, totals[mint] ?? 0, fee, reserve),
-        const SizedBox(height: 12),
+        const SizedBox(height: DMSpace.md),
       ],
     ];
   }
@@ -670,44 +663,61 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         children: [
           Text(
             'Starts $start. You ${_revocable ? 'can stop future unlocking at any time' : 'can never stop these schedules or take back what they owe'}.',
+            style: DMType.outfit(size: 15, color: DM.sub, height: 1.45),
           ),
         ],
       ),
-      const SizedBox(height: 20),
-      Text('What happens', style: t.titleLarge),
-      const SizedBox(height: 8),
+      const SizedBox(height: DMSpace.xxl),
+      Semantics(header: true, child: Text('What happens', style: t.titleLarge)),
+      const SizedBox(height: DMSpace.md),
       for (final (i, s) in _schedules.indexed)
         Padding(
-          padding: const EdgeInsets.only(bottom: 14),
-          child: Column(
+          padding: const EdgeInsets.only(bottom: DMSpace.lg),
+          child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Schedule ${i + 1}',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                vestingSentence(
-                  s,
-                  start: start,
-                  duration: durationLabel,
-                  periodSecs: _period,
-                  startAt: startAt,
-                  date: (at) => installmentDate(at, _period),
+              StepNumber(i + 1),
+              const SizedBox(width: DMSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Schedule ${i + 1}',
+                        style: DMType.outfit(size: 15, weight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(height: DMSpace.xxs),
+                    Text(
+                      vestingSentence(
+                        s,
+                        start: start,
+                        duration: durationLabel,
+                        periodSecs: _period,
+                        startAt: startAt,
+                        date: (at) => installmentDate(at, _period),
+                      ),
+                      style: DMType.outfit(size: 15.5, height: 1.45),
+                    ),
+                    if (!_busy)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(48, 44),
+                          ),
+                          onPressed: () => _edit(i),
+                          child: Text('Edit schedule ${i + 1}'),
+                        ),
+                      ),
+                    for (final issue in _scheduleIssues(i, fee))
+                      WarningTile.of(issue),
+                  ],
                 ),
-                style: const TextStyle(height: 1.4),
               ),
-              if (!_busy)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () => _edit(i),
-                    child: Text('Edit schedule ${i + 1}'),
-                  ),
-                ),
-              for (final issue in _scheduleIssues(i, fee))
-                WarningTile.of(issue),
             ],
           ),
         ),
@@ -715,13 +725,14 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         for (final issue in _fundIssues(m, reserve))
           if (issue.severity != Severity.error)
             WarningTile.of(issue, onAction: () => _fix(issue, reserve)),
-      const SizedBox(height: 20),
+      const SizedBox(height: DMSpace.xxl),
       ReviewSection(
         title: 'Costs',
         children: [
           CostRow(
             'Put in now',
             deposits.isEmpty ? 'Nothing' : deposits.join(' · '),
+            mono: deposits.isNotEmpty,
           ),
           CostRow(
             'Release fee',
@@ -742,7 +753,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           ),
         ],
       ),
-      const SizedBox(height: 12),
+      const SizedBox(height: DMSpace.md),
       KeyedSubtree(
         key: _ackKey,
         child: Column(
@@ -775,12 +786,12 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           ],
         ),
       ),
-      const SizedBox(height: 12),
-      const Text(
+      const SizedBox(height: DMSpace.lg),
+      Text(
         'One wallet approval creates the plan and makes your deposits. Anyone '
         'can trigger a release once an amount has unlocked; it always goes to '
         "the schedule's beneficiary.",
-        style: TextStyle(color: DmColors.muted, fontSize: 13, height: 1.4),
+        style: DMType.outfit(size: 13.5, color: DM.sub, height: 1.4),
       ),
     ];
   }
@@ -806,89 +817,101 @@ class _ScheduleSummaryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = schedule;
     final cliffAt = s.durationSecs == 0 ? 0.0 : s.cliffSecs / s.durationSecs;
-    const small = TextStyle(color: DmColors.muted, fontSize: 12);
+    final small = DMType.mono(size: 11, color: DM.mist, spacing: 0.4);
     return Semantics(
       button: true,
       label: 'Schedule $number, edit',
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 8, 14),
-            child: Row(
+      child: DMCard(
+        onTap: onTap,
+        padding: const EdgeInsets.fromLTRB(
+          DMSpace.lg,
+          DMSpace.md,
+          DMSpace.sm,
+          DMSpace.lg,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Schedule $number', style: small),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              '${s.who} · ${moneyText(s.total, s.mint)}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          RailChip(s.rail),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'over ${durationLabel(s.durationSecs)}'
-                        '${s.cliffSecs == 0 ? '' : ', nothing for the first ${durationLabel(s.cliffSecs)}'}',
-                      ),
-                      if (installmentsText(
-                            s,
-                            periodSecs: periodSecs,
-                            startAt: startAt,
-                            date: (at) => installmentDate(at, periodSecs),
-                          )
-                          case final text?)
-                        Text(
-                          '${text[0].toUpperCase()}${text.substring(1)}.',
-                          style: const TextStyle(
-                            color: DmColors.muted,
-                            fontSize: 13,
-                          ),
-                        ),
-                      const SizedBox(height: 10),
-                      VestingBar(
-                        color: s.rail.color,
-                        progress: previewProgress(
-                          total: s.total,
-                          vested: 0,
-                          startAt: startAt,
-                          cliffSecs: s.cliffSecs,
-                          durationSecs: s.durationSecs,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          const Text('Start', style: small),
-                          Expanded(
-                            child: s.cliffSecs == 0
-                                ? const SizedBox.shrink()
-                                : Align(
-                                    alignment: Alignment(cliffAt * 2 - 1, 0),
-                                    child: const Text('Cliff', style: small),
-                                  ),
-                          ),
-                          const Text('End', style: small),
-                        ],
-                      ),
-                    ],
+                  child: Text(
+                    'Schedule $number',
+                    style: DMType.outfit(size: 17, weight: FontWeight.w700),
                   ),
                 ),
-                const Icon(Icons.chevron_right, color: DmColors.muted),
+                RailChip(s.rail),
+                const Icon(Icons.chevron_right, color: DM.mist),
               ],
             ),
-          ),
+            const SizedBox(height: DMSpace.xs),
+            Padding(
+              padding: const EdgeInsets.only(right: DMSpace.sm),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(text: '${s.who} · '),
+                        TextSpan(
+                          text: moneyText(s.total, s.mint),
+                          style: DMType.mono(
+                            size: 14.5,
+                            weight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    style: DMType.outfit(size: 15, weight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'over ${durationLabel(s.durationSecs)}'
+                    '${s.cliffSecs == 0 ? '' : ', nothing for the first ${durationLabel(s.cliffSecs)}'}',
+                    style: DMType.outfit(size: 14, color: DM.sub),
+                  ),
+                  if (installmentsText(
+                        s,
+                        periodSecs: periodSecs,
+                        startAt: startAt,
+                        date: (at) => installmentDate(at, periodSecs),
+                      )
+                      case final text?)
+                    Text(
+                      '${text[0].toUpperCase()}${text.substring(1)}.',
+                      style: DMType.data(size: 12.5),
+                    ),
+                  const SizedBox(height: DMSpace.md),
+                  VestingBar(
+                    color: DM.signal,
+                    progress: previewProgress(
+                      total: s.total,
+                      vested: 0,
+                      startAt: startAt,
+                      cliffSecs: s.cliffSecs,
+                      durationSecs: s.durationSecs,
+                    ),
+                  ),
+                  const SizedBox(height: DMSpace.xs),
+                  Row(
+                    children: [
+                      Text('START', style: small),
+                      Expanded(
+                        child: s.cliffSecs == 0
+                            ? const SizedBox.shrink()
+                            : Align(
+                                alignment: Alignment(cliffAt * 2 - 1, 0),
+                                child: Text('CLIFF', style: small),
+                              ),
+                      ),
+                      Text('END', style: small),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

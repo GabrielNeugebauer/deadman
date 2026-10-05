@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/actions.dart';
 import '../../state/providers.dart';
-import '../theme.dart';
 import '../web/web_ui.dart';
+import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 
 class WelcomeScreen extends ConsumerStatefulWidget {
@@ -51,124 +51,87 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
   }
 
   Widget _content(TextTheme t, bool web) => Padding(
-    padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
+    padding: const EdgeInsets.fromLTRB(
+      DMSpace.gutter,
+      DMSpace.xxl,
+      DMSpace.gutter,
+      DMSpace.xxl,
+    ),
     child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
-            const Icon(
-              Icons.monitor_heart_outlined,
-              color: DmColors.alive,
-              size: 40,
-            ),
+            const DeadmanLockup(height: 28),
             const Spacer(),
             if (web) const WebBadge(),
           ],
         ),
-        const SizedBox(height: 28),
-        Text('Deadman', style: t.displayLarge),
-        const SizedBox(height: 12),
+        const SizedBox(height: 56),
+        Semantics(
+          header: true,
+          child: Text(
+            'The safety net for your self-custody.',
+            style: t.displaySmall,
+          ),
+        ),
+        const SizedBox(height: DMSpace.md),
         Text(
-          'The safety net for your self-custody. If you go silent, get coerced, or lose your phone, your crypto still ends up where you decided.',
-          style: t.bodyLarge?.copyWith(color: DmColors.muted, height: 1.45),
+          'If you go silent, get coerced, or lose your phone, your crypto '
+          'still ends up where you decided.',
+          style: t.bodyLarge?.copyWith(color: DM.sub),
         ),
-        const SizedBox(height: 36),
-        const _Threat(
-          icon: Icons.hourglass_bottom,
-          title: 'Silence',
-          body: 'Miss your check-ins and your vault passes to your heirs.',
-          color: DmColors.alive,
-        ),
-        const _Threat(
-          icon: Icons.front_hand_outlined,
-          title: 'Coercion',
-          body: 'A duress PIN silently freezes your vault while the app looks normal.',
-          color: DmColors.warn,
-        ),
-        const _Threat(
-          icon: Icons.phonelink_erase,
-          title: 'Loss',
-          body: 'Your device key can only check in or lock. It can never move funds.',
-          color: DmColors.plus,
+        const SizedBox(height: DMSpace.xxxl),
+        const DMListGroup(
+          children: [
+            DMListRow(
+              leading: IconTile(icon: Icons.hourglass_bottom),
+              title: 'Silence',
+              monoSubtitle: false,
+              subtitle:
+                  'Miss your check-ins and your vault passes to your heirs.',
+            ),
+            DMListRow(
+              leading: IconTile(icon: Icons.front_hand_outlined),
+              title: 'Coercion',
+              monoSubtitle: false,
+              subtitle: 'A duress PIN silently freezes your vault while the app looks normal.',
+            ),
+            DMListRow(
+              leading: IconTile(icon: Icons.phonelink_erase),
+              title: 'Loss',
+              monoSubtitle: false,
+              subtitle: 'Your device key can only check in or lock. It can never move funds.',
+            ),
+          ],
         ),
         const Spacer(),
-        FilledButton.icon(
+        const SizedBox(height: DMSpace.xxl),
+        FilledButton(
           onPressed: _busy ? null : _connect,
-          icon: _busy
+          child: _busy
               ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                  key: ValueKey('connect-busy'),
+                  dimension: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: DM.sub,
+                  ),
                 )
-              : const Icon(Icons.lock_outline),
-          label: Text(
-            web ? 'Connect Phantom or Solflare' : 'Connect Seed Vault wallet',
-          ),
+              : Text(
+                  web
+                      ? 'Connect Phantom or Solflare'
+                      : 'Connect Seed Vault wallet',
+                ),
         ),
-        const SizedBox(height: 12),
-        Center(
-          child: Text(
-            web
-                ? 'Web preview · devnet · unaudited'
-                : 'Devnet preview · unaudited',
-            style: t.bodySmall?.copyWith(color: DmColors.muted),
-          ),
+        const SizedBox(height: DMSpace.md),
+        MonoLabel(
+          web
+              ? 'Web preview · devnet · unaudited'
+              : 'Devnet preview · unaudited',
+          textAlign: TextAlign.center,
         ),
       ],
     ),
   );
-}
-
-class _Threat extends StatelessWidget {
-  const _Threat({
-    required this.icon,
-    required this.title,
-    required this.body,
-    required this.color,
-  });
-
-  final IconData icon;
-  final String title;
-  final String body;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: color, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  body,
-                  style: const TextStyle(color: DmColors.muted, height: 1.35),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
