@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/tokens.dart';
 
-/// Screen title row: "Pulse" + the mark, "Security" + a status chip, with
+/// Screen title row: "Pulse" + the skull button, "Security" + a sticker, with
 /// an optional lead paragraph below ("People who named you in…").
 class PageHeader extends StatelessWidget {
   const PageHeader({
@@ -45,8 +45,9 @@ class PageHeader extends StatelessWidget {
   }
 }
 
-/// Section title with an optional trailing action: "Release plans
-/// + New plan".
+/// Section title with an optional pixel figure before it (the heart on
+/// the payout editor's "Who gets it") and an optional trailing action
+/// ("+ New plan").
 class SectionHeader extends StatelessWidget {
   const SectionHeader({
     super.key,
@@ -56,9 +57,13 @@ class SectionHeader extends StatelessWidget {
     this.actionIcon = Icons.add,
     this.actionKey,
     this.trailing,
+    this.leading,
   });
 
   final String title;
+
+  /// Usually `PixelArt(PixelSprites.heart, size: 20, color: DM.pulse)`.
+  final Widget? leading;
   final String? actionLabel;
   final VoidCallback? onAction;
   final IconData? actionIcon;
@@ -86,6 +91,7 @@ class SectionHeader extends StatelessWidget {
       constraints: const BoxConstraints(minHeight: 48),
       child: Row(
         children: [
+          if (leading != null) ...[leading!, const SizedBox(width: 12)],
           Expanded(
             child: Semantics(
               header: true,

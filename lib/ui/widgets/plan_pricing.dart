@@ -8,6 +8,7 @@ import '../../state/providers.dart';
 import '../../state/subscription.dart';
 import '../format.dart';
 import '../theme/tokens.dart';
+import 'brand/dm_icon.dart';
 import 'brand/surfaces.dart';
 import 'feedback.dart';
 
@@ -34,13 +35,13 @@ class PlanFeeLine extends ConsumerWidget {
           Icon(
             Icons.receipt_long_outlined,
             size: 16,
-            color: waived ? DM.signal : DM.mist,
+            color: waived ? DM.pulse : DM.ash,
           ),
           const SizedBox(width: DMSpace.sm),
           Expanded(
             child: Text(
               planFeeText(vault, sub, fees, now),
-              style: DMType.data(size: 12.5, color: waived ? DM.bone : DM.sub),
+              style: DMType.data(size: 12.5, color: waived ? DM.bone : DM.dust),
             ),
           ),
         ],
@@ -105,7 +106,7 @@ class _MonthlyPlanCardState extends ConsumerState<MonthlyPlanCard> {
     final now = nowSecs();
     final status = subscriptionStatus(sub, now);
     final active = status == SubscriptionStatus.active;
-    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.4);
+    final muted = DMType.outfit(size: 14, color: DM.dust, height: 1.4);
     final price =
         '${amountText(terms.pricePerPeriod, terms.mint)} '
         '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'}';
@@ -127,8 +128,11 @@ class _MonthlyPlanCardState extends ConsumerState<MonthlyPlanCard> {
             Row(
               children: [
                 IconTile(
-                  icon: Icons.workspace_premium_outlined,
-                  tone: active ? DM.signal : null,
+                  tone: active ? DM.pulse : null,
+                  child: DMIcon(
+                    DMIcons.calendar,
+                    color: active ? DM.pulse : DM.bone,
+                  ),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -232,7 +236,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
     final fees = ref.watch(feesProvider).value;
     final plans = ref.watch(vaultsProvider).value;
     final held = ref.watch(ownerPlanHoldingsProvider(mint)).value;
-    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.4);
+    final muted = DMType.outfit(size: 14, color: DM.dust, height: 1.4);
     String n(int p) => '$p ${periodWord(terms, p)}';
 
     return SafeArea(
@@ -295,14 +299,14 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
             const SizedBox(height: DMSpace.xxs),
             Text(
               'Your wallet: ${wallet == null ? '…' : amountText(wallet, mint)}',
-              style: DMType.data(color: short ? DM.attention : DM.sub),
+              style: DMType.data(color: short ? DM.flatline : DM.dust),
             ),
             if (short)
               Padding(
                 padding: const EdgeInsets.only(top: DMSpace.xxs),
                 child: Text(
                   'Not enough ${assetSymbol(mint)} for ${n(_periods)}.',
-                  style: DMType.outfit(size: 14, color: DM.attention),
+                  style: DMType.outfit(size: 14, color: DM.flatline),
                 ),
               ),
             if (fees != null && held != null && plans != null)
@@ -349,7 +353,7 @@ class _SubscribeSheetState extends ConsumerState<SubscribeSheet> {
           'SOL has no price in the app, so this compares '
           '${assetSymbol(mint)} only. The SOL in $all would add '
           '~${amountText(solFee, null)} in fees.',
-          style: style.copyWith(fontSize: 13, color: DM.mist),
+          style: style.copyWith(fontSize: 13, color: DM.ash),
         ),
     ];
   }

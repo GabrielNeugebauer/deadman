@@ -15,6 +15,7 @@ import '../rules_format.dart';
 import '../web/web_ui.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
+import '../widgets/pack_icons.dart';
 import '../widgets/plan_pricing.dart';
 import 'rails_check_screen.dart';
 import 'recovery_phrase_screen.dart';
@@ -149,7 +150,7 @@ class SettingsTab extends ConsumerWidget {
             ),
             TextButton(
               onPressed: () => Navigator.pop(context, true),
-              style: TextButton.styleFrom(foregroundColor: DM.due),
+              style: TextButton.styleFrom(foregroundColor: DM.flatline),
               child: const Text('Also delete receiving keys'),
             ),
           ],
@@ -249,9 +250,7 @@ class SettingsTab extends ConsumerWidget {
           DMListGroup(
             children: [
               DMListRow(
-                leading: const IconTile(
-                  icon: Icons.account_balance_wallet_outlined,
-                ),
+                leading: const DMIconTile(DMIcons.wallet),
                 title: 'Owner wallet',
                 subtitle: '${short(owner)} · $walletName',
                 trailing: web
@@ -266,7 +265,7 @@ class SettingsTab extends ConsumerWidget {
                 },
               ),
               DMListRow(
-                leading: const IconTile(icon: Icons.key_outlined),
+                leading: const DMIconTile(DMIcons.key),
                 title: 'Guard key',
                 subtitle:
                     '${guard == null ? 'Not created' : short(guard)} · $device',
@@ -278,19 +277,17 @@ class SettingsTab extends ConsumerWidget {
             const AndroidAppCard(),
           ],
           const SizedBox(height: DMSpace.md),
-          // The one card allowed a status border: the fill stays graphite.
+          // The one card allowed a status border: the fill stays grave.
           DMCard(
             key: const ValueKey('panic-card'),
             padding: EdgeInsets.zero,
-            borderColor: DM.due.withValues(alpha: 0.35),
+            borderColor: DM.flatline.withValues(alpha: 0.35),
             onTap: () => _confirmPanic(context, ref),
             child: const DMListRow(
-              leading: IconTile(
-                icon: Icons.warning_amber_rounded,
-                tone: DM.due,
-              ),
+              leading: DMIconTile(DMIcons.warning, tone: DM.flatline),
               title: 'Panic lockdown',
               subtitle: 'Freeze withdrawals, policy changes and vesting revocation now',
+              monoSubtitle: false,
             ),
           ),
           // Moving the guard to a browser would take it off the phone.
@@ -300,9 +297,10 @@ class SettingsTab extends ConsumerWidget {
               padding: EdgeInsets.zero,
               onTap: () => _moveGuard(context, ref),
               child: const DMListRow(
-                leading: IconTile(icon: Icons.swap_horiz),
+                leading: DMIconTile(DMIcons.swap),
                 title: 'Move guard to this phone',
                 subtitle: 'After a lost or replaced device, or after Forget this device',
+                monoSubtitle: false,
               ),
             ),
           ],
@@ -323,13 +321,11 @@ class SettingsTab extends ConsumerWidget {
               // The Cloak prover runs in the Android app's WebView.
               if (!web)
                 DMListRow(
-                  leading: const IconTile(
-                    icon: Icons.health_and_safety_outlined,
-                  ),
+                  leading: const DMIconTile(DMIcons.shieldPlus),
                   title: 'Private rails check',
                   subtitle: 'Test the Cloak prover and a Zcash quote. Moves no funds.',
                   monoSubtitle: false,
-                  trailing: const Icon(Icons.chevron_right, color: DM.sub),
+                  trailing: const DMIcon(DMIcons.chevronRight, color: DM.ash),
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => const RailsCheckScreen(),
@@ -337,14 +333,14 @@ class SettingsTab extends ConsumerWidget {
                   ),
                 ),
               DMListRow(
-                leading: const IconTile(icon: Icons.lock_outline),
+                leading: const DMIconTile(DMIcons.lock),
                 title: 'Lock app',
                 subtitle: 'Asks for your PIN again',
                 monoSubtitle: false,
                 onTap: () => ref.read(sessionProvider.notifier).lock(),
               ),
               DMListRow(
-                leading: const IconTile(icon: Icons.logout),
+                leading: const DMIconTile(DMIcons.logout),
                 title: web ? 'Forget this browser' : 'Forget this device',
                 subtitle:
                     'Deletes PINs and the guard key. Receiving keys stay unless '
@@ -360,9 +356,10 @@ class SettingsTab extends ConsumerWidget {
   }
 }
 
-/// UNLOCKED, or LOCKED while any plan is in lockdown. A duress session
-/// always reads UNLOCKED: the lock it just sent must not show. Hidden with
-/// no plans, where there is nothing to lock.
+/// UNLOCKED, or LOCKED (bone, with the pixel lock) while any plan is in
+/// lockdown. A duress session always reads UNLOCKED: the lock it just sent
+/// must not show. Hidden with no plans, where there is nothing to lock.
+/// UNLOCKED carries no figure: the alive skull belongs to check-ins.
 class _LockChip extends ConsumerWidget {
   const _LockChip();
 
@@ -373,10 +370,11 @@ class _LockChip extends ConsumerWidget {
     final duress = ref.watch(sessionProvider.select((s) => s.duress));
     final now = nowSecs();
     final locked = !duress && plans.any((v) => v.isLocked(now));
-    return StatusChip(
-      locked ? DMStatus.locked : DMStatus.onTrack,
+    return StatusSticker(
+      locked ? DMStatus.locked : DMStatus.alive,
       key: const ValueKey('security-lock-chip'),
       label: locked ? 'Locked' : 'Unlocked',
+      showSprite: locked,
     );
   }
 }
@@ -489,7 +487,7 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
               final p = profiles.where((p) => p.rail == rail).firstOrNull;
               return DMListRow(
                 key: ValueKey('receive-${rail.name}'),
-                leading: IconTile(icon: rail.icon),
+                leading: RailTile(rail),
                 title: rail.label,
                 subtitle: p == null
                     ? 'Not set up'
@@ -498,10 +496,10 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
                     : 'Code ${short(p.key.address)} → ${short(p.destination)}'
                           '${p.recoverable ? '' : '\nOlder key, not covered by your recovery phrase'}',
                 trailing: p == null
-                    ? const Icon(Icons.add, color: DM.signal)
+                    ? const DMIcon(DMIcons.plus, color: DM.pulse)
                     : IconButton(
                         tooltip: 'Copy claim code',
-                        icon: const Icon(Icons.copy, size: 20, color: DM.sub),
+                        icon: const Icon(Icons.copy, size: 20, color: DM.dust),
                         onPressed: () {
                           Clipboard.setData(ClipboardData(text: p.claimCode));
                           toast(context, 'Claim code copied');
@@ -512,17 +510,19 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
             },
           ),
         DMListRow(
-          leading: const IconTile(icon: Icons.key),
+          leading: const DMIconTile(DMIcons.key),
           title: 'Show recovery phrase',
           subtitle: 'Backs up the keys behind your claim codes',
+          monoSubtitle: false,
           onTap: () => _showPhrase(context, ref),
         ),
         DMListRow(
-          leading: const IconTile(icon: Icons.restore),
+          leading: const DMIconTile(DMIcons.history),
           title: 'Restore receiving profiles from phrase',
           subtitle: web
               ? 'On a new browser or after clearing site data'
               : 'On a new or reset phone',
+          monoSubtitle: false,
           onTap: () => _restore(context, ref),
         ),
       ],
@@ -744,7 +744,7 @@ class NetworkFeesCard extends ConsumerWidget {
                     child: Icon(
                       Icons.error_outline,
                       size: 16,
-                      color: DM.attention,
+                      color: DM.flatline,
                     ),
                   ),
                   const SizedBox(width: DMSpace.sm),

@@ -299,7 +299,6 @@ void main() {
         planId: planId,
         label: label,
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: grace,
         rules: [rule(to: alice)],
@@ -327,7 +326,6 @@ void main() {
         planId: 0,
         label: 'Kids',
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: grace,
         rules: [rule(to: alice)],
@@ -350,11 +348,12 @@ void main() {
       expect(ixs, hasLength(2));
       expect(ixs[0].programId.toBase58(), AppConfig.programId);
       expect(ixs[0].accounts[2].pubKey.toBase58(), vaultPda(owner, 7).address);
+      expect(ixs[0].data.toList().sublist(0, 8), Disc.createPlan);
       expect(ixs[0].data.toList().sublist(8, 14), [7, 0, 4, 0, 0, 0]);
-      expect(
-        ixs[0].data.toList().sublist(14 + 4 + 32 + 16, 14 + 4 + 32 + 24),
-        le(8, grace),
-      );
+      expect(ixs[0].data.toList().sublist(14 + 4 + 32, 14 + 4 + 32 + 16), [
+        ...le(8, 3600),
+        ...le(8, grace),
+      ]);
       expect(ixs[1].accounts[1].pubKey.toBase58(), vaultPda(owner, 7).address);
     });
 
@@ -368,7 +367,6 @@ void main() {
           planId: 0,
           label: 'Kids',
           guard: guard,
-          intervalSecs: 86400,
           lockSecs: 3600,
           skipGraceSecs: grace,
           rules: [rule(to: alice, mint: usdc)],
@@ -377,7 +375,7 @@ void main() {
         ),
       );
       expect(ixs, hasLength(7));
-      expect(ixs[1].data.toList().sublist(0, 8), Disc.createVault);
+      expect(ixs[1].data.toList().sublist(0, 8), Disc.createPlan);
       expect(ixs[2].programId.toBase58(), systemProgramId);
       expect(ixs[2].accounts[1].pubKey.toBase58(), vault);
       for (final (i, mint, amount, decimals) in [
@@ -410,7 +408,6 @@ void main() {
             planId: 0,
             label: 'Kids',
             guard: guard,
-            intervalSecs: 86400,
             lockSecs: 3600,
             skipGraceSecs: grace,
             rules: [rule(to: alice, mint: usdc)],
@@ -440,7 +437,6 @@ void main() {
           owner: owner,
           planId: 0,
           label: 'x' * 33,
-          intervalSecs: 86400,
           lockSecs: 3600,
           skipGraceSecs: grace,
           rules: [rule(to: alice)],
@@ -593,7 +589,7 @@ void main() {
     final fees = await client.fetchFees();
     expect(fees.treasury, treasury);
     expect(fees.feeBpsPublic, 200);
-    expect(fees.feeBpsPrivate, 500);
+    expect(fees.feeBpsPrivate, 300);
   });
 
   test('fetchWatchedVaults matches beneficiaries and the guardian', () async {
@@ -781,7 +777,6 @@ void main() {
         planId: 0,
         label: '',
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: grace,
         rules: [rule(to: guard)],
@@ -792,7 +787,6 @@ void main() {
       owner: owner,
       planId: 0,
       label: 'Kids',
-      intervalSecs: 86400,
       lockSecs: 3600,
       skipGraceSecs: grace,
       rules: [rule(to: alice)],
@@ -810,7 +804,6 @@ void main() {
       owner: owner,
       planId: planId,
       label: 'Kids',
-      intervalSecs: 86400,
       lockSecs: 3600,
       skipGraceSecs: skipGraceSecs,
       rules: rules,
@@ -825,17 +818,18 @@ void main() {
     test('encodes the grace period after the lock duration', () async {
       final ix = instructions(await update([rule(to: bob)])).single;
       final data = ix.data.toList();
-      expect(data.sublist(8, 8 + 4 + 4 + 24), [
+      expect(data.sublist(0, 8), Disc.updatePlan);
+      expect(data.sublist(8, 8 + 4 + 4 + 16), [
         ...le(4, 4),
         ...'Kids'.codeUnits,
-        ...le(8, 86400),
         ...le(8, 3600),
         ...le(8, grace),
       ]);
       expect(ix.accounts.map((a) => a.pubKey.toBase58()), [owner, vault]);
     });
 
-    test('released tiers count toward the cap until all have run', () async {
+    test('released tiers count toward the cap; a fully released plan is '
+        'final', () async {
       addPlan(4, [
         for (var i = 0; i < 6; i++) rule(to: alice, executedAt: 1790172801),
         rule(to: bob),
@@ -850,10 +844,10 @@ void main() {
       );
 
       addPlan(5, List.filled(8, rule(to: alice, executedAt: 1790172801)));
-      expect(
-        instructions(await update(List.filled(8, rule(to: bob)), planId: 5)),
-        hasLength(1),
-        reason: 'a fully released plan starts fresh',
+      await expectLater(
+        update([rule(to: bob)], planId: 5),
+        fails(6015),
+        reason: 'the program refuses any change to a released plan',
       );
     });
 
@@ -1321,7 +1315,7 @@ void main() {
       expect(sponsorNode.calls, isEmpty);
     });
 
-    test('create_vault with a sponsor: owner pays rent and still funds an '
+    test('create_plan with a sponsor: owner pays rent and still funds an '
         'underfunded guard for the fallback', () async {
       final wallet = await Ed25519HDKeyPair.random();
       rpc.accounts[guard] = FakeAccount(
@@ -1334,7 +1328,6 @@ void main() {
         planId: 0,
         label: 'Kids',
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: grace,
         rules: [rule(to: alice)],
@@ -1642,11 +1635,15 @@ void main() {
       addVesting(5, [schedule(to: alice)], revocable: false);
       addVesting(6, [schedule(to: alice)], revokedAt: now - day);
       addVesting(7, [schedule(to: alice)], lockedUntil: now + 60);
+      addVesting(8, [
+        schedule(to: alice, released: 1000000000, executedAt: now - day),
+      ]);
       for (final (id, name) in [
         (0, 'WrongPlanKind'),
         (5, 'NotRevocable'),
         (6, 'AlreadyRevoked'),
         (7, 'VaultLocked'),
+        (8, 'PlanCompleted'),
       ]) {
         await expectLater(
           client.buildRevokeVesting(owner: owner, planId: id),
@@ -1890,7 +1887,6 @@ void main() {
           owner: owner,
           planId: 4,
           label: '',
-          intervalSecs: 86400,
           lockSecs: 3600,
           skipGraceSecs: grace,
           rules: [rule(to: alice)],
@@ -1948,6 +1944,32 @@ void main() {
       await expectLater(
         client.buildCloseVault(owner: owner, planId: 9),
         throwsA(isA<DeadmanException>()),
+      );
+    });
+
+    test('buildCloseVault sweeps every token the plan holds first, in the '
+        'same transaction', () async {
+      addPlan(4, [rule(to: alice), rule(to: bob, mint: usdc)]);
+      final v = vaultPda(owner, 4).address;
+      addTokens(v, usdc, 1200);
+      final ixs = instructions(
+        await client.buildCloseVault(owner: owner, planId: 4),
+      );
+      expect(ixs, hasLength(3), reason: 'owner ATA, withdraw, close');
+      expect(ixs[1].data.toList().sublist(0, 8), Disc.withdrawToken);
+      expect(ixs[1].data.toList().sublist(8), le(8, 1200));
+      expect(addrs(ixs[1]).sublist(3, 5), [
+        ataAddress(v, usdc),
+        ataAddress(owner, usdc),
+      ]);
+      expect(ixs.last.data.toList(), Disc.closeVault);
+
+      // The app's USDC, deposited into an all-SOL plan, is swept too.
+      addPlan(5, [rule(to: alice)]);
+      addTokens(vaultPda(owner, 5).address, AppConfig.usdcMint, 7);
+      expect(
+        instructions(await client.buildCloseVault(owner: owner, planId: 5)),
+        hasLength(3),
       );
     });
 
@@ -2053,7 +2075,6 @@ void main() {
       planId: 0,
       label: 'Kids',
       guard: guard,
-      intervalSecs: 86400,
       lockSecs: 3600,
       skipGraceSecs: grace,
       rules: [rule(to: alice)],
@@ -2077,7 +2098,7 @@ void main() {
       expect(pay.data.toList(), [12, ...le(8, node.feeInToken!), 6]);
     }
 
-    test('create_vault: Kora pays fee and rent, the wallet pays USDC last; '
+    test('create_plan: Kora pays fee and rent, the wallet pays USDC last; '
         'sent through Kora once', () async {
       final tx = await createVault();
       expectPaidByKora(tx);
@@ -2089,7 +2110,7 @@ void main() {
         vaultPda(wallet.address, 0).address,
         systemProgramId,
       ]);
-      expect(ixs[0].data.toList().sublist(0, 8), Disc.createVault);
+      expect(ixs[0].data.toList().sublist(0, 8), Disc.createPlan);
 
       final est = node.paramsOf('estimateTransactionFee').single;
       expect(est['fee_token'], usdc);
@@ -2165,14 +2186,13 @@ void main() {
       expect(node.paramsOf('signAndSendTransaction'), isEmpty);
     });
 
-    test('create_vault with a token deposit: the deposit counts against '
+    test('create_plan with a token deposit: the deposit counts against '
         'the USDC fee', () async {
       Future<Uint8List> create(int amount) => c.buildCreateVault(
         owner: wallet.address,
         planId: 0,
         label: 'Kids',
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: grace,
         rules: [rule(to: alice, mint: usdc)],
@@ -2183,7 +2203,7 @@ void main() {
       final tx = await create(999);
       expectPaidByKora(tx);
       final ixs = instructions(tx);
-      expect(ixs[0].data.toList().sublist(0, 8), Disc.createVault);
+      expect(ixs[0].data.toList().sublist(0, 8), Disc.createPlan);
       expect(metas(ixs[1]).first, (
         node.signer,
         true,

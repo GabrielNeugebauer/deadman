@@ -116,7 +116,6 @@ class VaultActions {
   Future<List<VaultState>> createVault({
     required String label,
     required List<RuleSpec> rules,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required int depositLamports,
@@ -132,7 +131,6 @@ class VaultActions {
         planId: planId,
         label: label,
         guard: guard.address,
-        intervalSecs: intervalSecs,
         lockSecs: lockSecs,
         skipGraceSecs: clampGrace(skipGraceSecs),
         rules: rules,
@@ -185,6 +183,14 @@ class VaultActions {
   Future<void> revokeVesting(int planId) => _decoy(
     () async => _signAndSend([
       await _api.buildRevokeVesting(owner: _owner, planId: planId),
+    ]),
+  );
+
+  /// Closes a plan and returns everything it holds to the owner's wallet:
+  /// cancelling an inheritance plan, or clearing out a released one.
+  Future<void> closePlan(int planId) => _decoy(
+    () async => _signAndSend([
+      await _api.buildCloseVault(owner: _owner, planId: planId),
     ]),
   );
 
@@ -388,7 +394,6 @@ class VaultActions {
   Future<void> updatePolicy({
     required int planId,
     required String label,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -399,7 +404,6 @@ class VaultActions {
         owner: _owner,
         planId: planId,
         label: label,
-        intervalSecs: intervalSecs,
         lockSecs: lockSecs,
         skipGraceSecs: clampGrace(skipGraceSecs),
         rules: rules,

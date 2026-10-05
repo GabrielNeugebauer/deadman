@@ -3,7 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../theme.dart';
+import '../theme/tokens.dart';
 
 class PinPad extends StatefulWidget {
   const PinPad({super.key, required this.onComplete, this.length = 6});
@@ -76,7 +76,7 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
               mainAxisAlignment: MainAxisAlignment.center,
               children: List.generate(widget.length, (i) {
                 final filled = i < _pin.length;
-                // Square cells, like the status dots on chips.
+                // Square cells: one pixel of the skull per digit.
                 return AnimatedContainer(
                   key: ValueKey('pin-cell-$i'),
                   duration: const Duration(milliseconds: 120),
@@ -85,10 +85,9 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
                   width: 12,
                   height: 12,
                   decoration: BoxDecoration(
-                    color: filled ? DM.signal : Colors.transparent,
-                    borderRadius: BorderRadius.circular(2),
+                    color: filled ? DM.pulse : Colors.transparent,
                     border: Border.all(
-                      color: filled ? DM.signal : DM.mist,
+                      color: filled ? DM.pulse : DM.ash,
                       width: 1.5,
                     ),
                   ),
@@ -121,14 +120,14 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
                             style: IconButton.styleFrom(
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(
-                                  DMRadius.card,
+                                  DMRadius.button,
                                 ),
                               ),
                             ),
                             onPressed: _back,
                             icon: const Icon(
                               Icons.backspace_outlined,
-                              color: DM.sub,
+                              color: DM.dust,
                             ),
                           )
                         : _Key(digit: k, onTap: () => _tap(k)),
@@ -141,7 +140,7 @@ class _PinPadState extends State<PinPad> with SingleTickerProviderStateMixin {
   }
 }
 
-/// A graphite key with a 1px line, digit in mono.
+/// A grave key with a 1px line, digit in mono.
 class _Key extends StatelessWidget {
   const _Key({required this.digit, required this.onTap});
 
@@ -151,11 +150,11 @@ class _Key extends StatelessWidget {
   @override
   Widget build(BuildContext context) => TextButton(
     style: TextButton.styleFrom(
-      backgroundColor: DM.graphite,
+      backgroundColor: DM.grave,
       foregroundColor: DM.bone,
-      overlayColor: DM.signal,
+      overlayColor: DM.pulse,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(DMRadius.card),
+        borderRadius: BorderRadius.circular(DMRadius.button),
         side: const BorderSide(color: DM.line),
       ),
     ),

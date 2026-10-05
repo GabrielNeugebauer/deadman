@@ -5,9 +5,9 @@ import '../../core/config.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/private_rails.dart';
 import '../../state/providers.dart';
-import '../rules_format.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
+import '../widgets/pack_icons.dart';
 
 /// Diagnostics for the private rails that move no funds, so they run on
 /// devnet builds too: a Cloak proof on this phone and a dry 1Click quote.
@@ -81,8 +81,9 @@ class _RailsCheckScreenState extends ConsumerState<RailsCheckScreen> {
   }
 }
 
-/// One check: the rail, its PASS / FAIL chip, and the measured detail or
-/// the error in mono.
+/// One check: the rail, its PASS / FAIL sticker, and the measured detail
+/// or the error in mono. The stickers carry no skull: a diagnostic result
+/// is not a plan's state.
 class _CheckRow extends StatelessWidget {
   const _CheckRow({
     required this.rail,
@@ -109,11 +110,23 @@ class _CheckRow extends StatelessWidget {
             )
           : snap.hasError
           ? (
-              const StatusChip(DMStatus.due, label: 'Fail', dense: true),
+              const StatusSticker(
+                DMStatus.due,
+                key: ValueKey('check-fail'),
+                label: 'Fail',
+                dense: true,
+                showSprite: false,
+              ),
               errorText(snap.error!),
             )
           : (
-              const StatusChip(DMStatus.onTrack, label: 'Pass', dense: true),
+              const StatusSticker(
+                DMStatus.alive,
+                key: ValueKey('check-pass'),
+                label: 'Pass',
+                dense: true,
+                showSprite: false,
+              ),
               snap.data ?? '',
             );
       return Padding(
@@ -123,7 +136,7 @@ class _CheckRow extends StatelessWidget {
           children: [
             Row(
               children: [
-                IconTile(icon: rail.icon),
+                RailTile(rail),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Text(

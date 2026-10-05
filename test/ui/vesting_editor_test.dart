@@ -5,6 +5,8 @@ import 'package:deadman/state/providers.dart';
 import 'package:deadman/state/vesting.dart';
 import 'package:deadman/ui/screens/vesting_editor.dart';
 import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
+import 'package:deadman/ui/widgets/editor/plan_steps.dart';
 import 'package:deadman/ui/widgets/vesting_progress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -80,7 +82,7 @@ Future<List<_Created>> _pump(
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
-            feeBpsPrivate: 500,
+            feeBpsPrivate: 300,
           ),
         ),
         walletBalanceProvider.overrideWith((ref) async => 5000000000),
@@ -114,7 +116,11 @@ Future<List<_Created>> _pump(
   return created;
 }
 
-Finder _field(String label) => find.widgetWithText(TextField, label);
+/// The input under the label [label] (labels sit above their fields).
+Finder _field(String label) => find.descendant(
+  of: find.widgetWithText(LabeledField, label),
+  matching: find.byType(TextField),
+);
 
 final _list = find
     .byWidgetPredicate(
@@ -142,10 +148,7 @@ Future<void> _schedule(
 }) async {
   await _tap(tester, 'Add a schedule');
   expect(find.text('New schedule'), findsOneWidget);
-  await tester.enterText(
-    _field('Their wallet address or claim code'),
-    addr(who),
-  );
+  await tester.enterText(_field('Wallet address or claim code'), addr(who));
   if (sol) await _tap(tester, 'SOL');
   await tester.enterText(find.byKey(const ValueKey('vest-total')), total);
   await tester.pump(const Duration(milliseconds: 500));
@@ -245,10 +248,7 @@ void main() {
     await _tap(tester, 'Demo timings');
     await _tap(tester, "No, it's locked in");
     await _tap(tester, 'Add a schedule');
-    await tester.enterText(
-      _field('Their wallet address or claim code'),
-      addr(30),
-    );
+    await tester.enterText(_field('Wallet address or claim code'), addr(30));
     await _tap(tester, 'SOL');
     await tester.enterText(find.byKey(const ValueKey('vest-total')), '0.5');
     await _tap(tester, '10 minutes');
@@ -401,10 +401,7 @@ void main() {
     );
     expect(tester.takeException(), isNull);
     await _tap(tester, 'Add a schedule');
-    await tester.enterText(
-      _field('Their wallet address or claim code'),
-      addr(30),
-    );
+    await tester.enterText(_field('Wallet address or claim code'), addr(30));
     final total = find.byKey(const ValueKey('vest-total'));
     while (total.evaluate().isEmpty) {
       await tester.drag(_list, const Offset(0, -200));
@@ -423,7 +420,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('brand: schedule editor and card use the signal accent', (
+  testWidgets('brand: schedule editor and card use the pulse accent', (
     tester,
   ) async {
     await _pump(tester, api: heldUsdc, theme: buildTheme());
@@ -436,22 +433,62 @@ void main() {
     expect(spans.first.style?.fontFamily, contains('JetBrains'));
     expect(spans.first.text, endsWith(':'));
     for (final bar in tester.widgetList<VestingBar>(find.byType(VestingBar))) {
-      expect(bar.color, DM.signal);
+      expect(bar.color, DM.pulse);
     }
     await _tap(tester, 'Done');
     final card = tester.widget<VestingBar>(find.byType(VestingBar));
-    expect(card.color, DM.signal);
+    expect(card.color, DM.pulse);
     expect(find.text('START'), findsOneWidget);
     expect(find.text('END'), findsOneWidget);
-    // Selected chips (Today, Yes, Month) read in signal, never purple.
+    // Selected chips (Today, Yes, Month) read in pulse, never purple.
     final today = tester.widget<ChoiceChip>(
       find.widgetWithText(ChoiceChip, 'Today'),
     );
-    expect(today.labelStyle?.color, DM.signal);
+    expect(today.labelStyle?.color, DM.pulse);
     for (final w in tester.allWidgets) {
-      if (w is Text) expect(w.style?.color, isNot(DM.locked));
-      if (w is Icon) expect(w.color, isNot(DM.locked));
+      if (w is Text) expect(w.style?.color, isNot(const Color(0xFFA493FF)));
+      if (w is Icon) expect(w.color, isNot(const Color(0xFFA493FF)));
     }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('brand: the schedule editor speaks the payout mockup', (
+    tester,
+  ) async {
+    await _pump(tester, api: heldUsdc, theme: buildTheme());
+    // The empty state leads with a pixel figure; its add button is
+    // outlined so Next stays the screen's one filled button.
+    expect(
+      tester
+          .widget<PixelArt>(
+            find
+                .descendant(
+                  of: find.byType(EmptyStateCard),
+                  matching: find.byType(PixelArt),
+                )
+                .first,
+          )
+          .sprite,
+      EditorSprites.coin,
+    );
+    expect(find.widgetWithText(OutlinedButton, 'Add a schedule'), findsOne);
+    expect(find.text('STEP 1/3'), findsOneWidget);
+
+    await _tap(tester, 'Add a schedule');
+    expect(find.text('New schedule'), findsOneWidget);
+    expect(find.text('STEP 1/3'), findsOneWidget);
+    final figures = [
+      for (final a in tester.widgetList<PixelArt>(find.byType(PixelArt)))
+        a.sprite,
+    ];
+    expect(figures, [
+      PixelSprites.heart,
+      EditorSprites.coin,
+      EditorSprites.hourglass,
+    ]);
+    expect(find.text('How it unlocks'), findsOneWidget);
+    expect(find.text('2% fee'), findsOneWidget);
+    expect(find.text('3% fee'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
   });
 

@@ -29,8 +29,8 @@ import 'package:solana/encoder.dart' show SignedTx;
 import 'package:solana/solana.dart';
 
 const solTier = 10000000; // 0.01 SOL, above a new account's rent minimum
-const intervalSecs = 60;
-const afterSecs = 120; // the program's minimum: interval + 60 s margin
+// Program minimum is 60 s; 120 s leaves room for the setup transactions.
+const afterSecs = 120;
 
 /// One plan under test: whose, which beneficiary, and the payout expected.
 typedef _Plan = ({
@@ -184,7 +184,6 @@ Future<void> main(List<String> argv) async {
       planId: p.planId,
       label: 'E2E subscription ${p.planId}',
       guard: guard.address,
-      intervalSecs: intervalSecs,
       lockSecs: 60,
       skipGraceSecs: 60,
       rules: [
@@ -207,7 +206,7 @@ Future<void> main(List<String> argv) async {
       at,
     );
     stdout.writeln(
-      'create_vault ${p.owner.address == owner.address ? 'subscribed' : 'other'}'
+      'create_plan ${p.owner.address == owner.address ? 'subscribed' : 'other'}'
       ' plan ${p.planId} $sig\n'
       '  vault ${vault.address}, heir ${p.heir.address} (0 SOL)',
     );

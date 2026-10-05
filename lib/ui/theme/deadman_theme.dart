@@ -15,8 +15,8 @@ abstract final class DeadmanTheme {
 
   static bool _fontsReady = false;
 
-  /// Outfit and JetBrains Mono ship in assets/brand/fonts. A security app
-  /// makes no request to Google to draw its own text.
+  /// Outfit, JetBrains Mono and Silkscreen ship in assets/brand/fonts. A
+  /// security app makes no request to Google to draw its own text.
   static void _useBundledFonts() {
     if (_fontsReady) return;
     _fontsReady = true;
@@ -25,6 +25,7 @@ abstract final class DeadmanTheme {
       for (final (family, file) in const [
         ('Outfit', 'OFL-Outfit.txt'),
         ('JetBrains Mono', 'OFL-JetBrainsMono.txt'),
+        ('Silkscreen', 'OFL-Silkscreen.txt'),
       ]) {
         final text = await rootBundle.loadString('assets/brand/fonts/$file');
         yield LicenseEntryWithLineBreaks([family], text);
@@ -33,40 +34,40 @@ abstract final class DeadmanTheme {
   }
 
   static const _scheme = ColorScheme.dark(
-    primary: DM.signal,
+    primary: DM.pulse,
     onPrimary: DM.void_,
     primaryContainer: DM.deep,
-    onPrimaryContainer: DM.signal,
-    secondary: DM.tide,
+    onPrimaryContainer: DM.pulse,
+    secondary: DM.pulse,
     onSecondary: DM.void_,
     secondaryContainer: DM.deep,
-    onSecondaryContainer: DM.signal,
-    tertiary: DM.tide,
+    onSecondaryContainer: DM.pulse,
+    tertiary: DM.missed,
     onTertiary: DM.void_,
-    tertiaryContainer: DM.deep,
-    onTertiaryContainer: DM.signal,
-    error: DM.due,
+    tertiaryContainer: Color(0xFF2A2112),
+    onTertiaryContainer: DM.missed,
+    error: DM.flatline,
     onError: DM.void_,
-    errorContainer: Color(0xFF3A1820),
-    onErrorContainer: DM.due,
-    surface: DM.graphite,
+    errorContainer: Color(0xFF2A1417),
+    onErrorContainer: DM.flatline,
+    surface: DM.grave,
     onSurface: DM.bone,
-    onSurfaceVariant: DM.sub,
+    onSurfaceVariant: DM.dust,
     surfaceDim: DM.void_,
     surfaceBright: DM.raise,
     surfaceContainerLowest: DM.void_,
-    surfaceContainerLow: DM.graphite,
-    surfaceContainer: DM.graphite,
+    surfaceContainerLow: DM.pit,
+    surfaceContainer: DM.grave,
     surfaceContainerHigh: DM.raise,
     surfaceContainerHighest: DM.raise,
-    outline: DM.line,
+    outline: DM.seam,
     outlineVariant: DM.line,
     inverseSurface: DM.bone,
     onInverseSurface: DM.void_,
     inversePrimary: DM.deep,
     surfaceTint: Colors.transparent,
     shadow: Colors.black,
-    scrim: Color(0xCC050707),
+    scrim: Color(0xCC0A0B0D),
   );
 
   static ThemeData dark() {
@@ -76,8 +77,11 @@ abstract final class DeadmanTheme {
       brightness: Brightness.dark,
       colorScheme: _scheme,
     );
-    final outfit = GoogleFonts.outfitTextTheme(base.textTheme)
-        .apply(bodyColor: DM.bone, displayColor: DM.bone);
+    final outfit = GoogleFonts.outfitTextTheme(base.textTheme).apply(
+      bodyColor: DM.bone,
+      displayColor: DM.bone,
+      fontFamilyFallback: DMType.symbolFallback,
+    );
     final text = outfit.copyWith(
       displayLarge: outfit.displayLarge?.copyWith(
         fontSize: 44,
@@ -140,13 +144,13 @@ abstract final class DeadmanTheme {
       ),
       bodyMedium: outfit.bodyMedium?.copyWith(
         fontSize: 15,
-        color: DM.sub,
+        color: DM.dust,
         letterSpacing: 0,
         height: 1.45,
       ),
       bodySmall: outfit.bodySmall?.copyWith(
         fontSize: 13,
-        color: DM.mist,
+        color: DM.ash,
         letterSpacing: 0,
         height: 1.4,
       ),
@@ -163,7 +167,7 @@ abstract final class DeadmanTheme {
       labelSmall: outfit.labelSmall?.copyWith(
         fontSize: 12,
         fontWeight: FontWeight.w500,
-        color: DM.mist,
+        color: DM.ash,
         letterSpacing: 0.2,
       ),
     );
@@ -191,9 +195,9 @@ abstract final class DeadmanTheme {
       primaryTextTheme: text,
       iconTheme: const IconThemeData(color: DM.bone, size: 22),
       textSelectionTheme: TextSelectionThemeData(
-        cursorColor: DM.signal,
-        selectionColor: DM.signal.withValues(alpha: 0.28),
-        selectionHandleColor: DM.signal,
+        cursorColor: DM.pulse,
+        selectionColor: DM.pulse.withValues(alpha: 0.28),
+        selectionHandleColor: DM.pulse,
       ),
       appBarTheme: AppBarTheme(
         backgroundColor: DM.void_,
@@ -211,7 +215,7 @@ abstract final class DeadmanTheme {
         ),
       ),
       cardTheme: CardThemeData(
-        color: DM.graphite,
+        color: DM.grave,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         margin: EdgeInsets.zero,
@@ -236,14 +240,14 @@ abstract final class DeadmanTheme {
           ),
           elevation: const WidgetStatePropertyAll(0),
           textStyle: WidgetStatePropertyAll(
-            DMType.outfit(size: 17, weight: FontWeight.w700),
+            DMType.outfit(size: 17, weight: FontWeight.w600),
           ),
-          iconSize: const WidgetStatePropertyAll(20),
+          iconSize: const WidgetStatePropertyAll(22),
           backgroundColor: WidgetStateProperty.resolveWith(
-            (s) => disabled(s) ? DM.raise : DM.signal,
+            (s) => disabled(s) ? DM.raise : DM.pulse,
           ),
           foregroundColor: WidgetStateProperty.resolveWith(
-            (s) => disabled(s) ? DM.mist : DM.void_,
+            (s) => disabled(s) ? DM.ash : DM.void_,
           ),
           overlayColor: WidgetStateProperty.resolveWith(
             (s) => s.contains(WidgetState.pressed)
@@ -268,17 +272,17 @@ abstract final class DeadmanTheme {
             DMType.outfit(size: 15, weight: FontWeight.w600),
           ),
           iconSize: const WidgetStatePropertyAll(18),
-          backgroundColor: const WidgetStatePropertyAll(DM.graphite),
+          backgroundColor: const WidgetStatePropertyAll(DM.grave),
           foregroundColor: WidgetStateProperty.resolveWith(
-            (s) => disabled(s) ? DM.mist : DM.bone,
+            (s) => disabled(s) ? DM.ash : DM.bone,
           ),
           overlayColor: WidgetStatePropertyAll(DM.bone.withValues(alpha: 0.06)),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          foregroundColor: DM.signal,
-          disabledForegroundColor: DM.mist,
+          foregroundColor: DM.pulse,
+          disabledForegroundColor: DM.ash,
           textStyle: DMType.outfit(size: 15, weight: FontWeight.w500),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(DMRadius.tile),
@@ -288,11 +292,11 @@ abstract final class DeadmanTheme {
       iconButtonTheme: IconButtonThemeData(
         style: IconButton.styleFrom(
           foregroundColor: DM.bone,
-          disabledForegroundColor: DM.mist,
+          disabledForegroundColor: DM.ash,
         ),
       ),
       floatingActionButtonTheme: FloatingActionButtonThemeData(
-        backgroundColor: DM.signal,
+        backgroundColor: DM.pulse,
         foregroundColor: DM.void_,
         elevation: 0,
         focusElevation: 0,
@@ -308,62 +312,60 @@ abstract final class DeadmanTheme {
         elevation: 0,
         height: 72,
         indicatorColor: DM.deep,
-        indicatorShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(DMRadius.tile),
-        ),
+        indicatorShape: const StadiumBorder(),
         iconTheme: WidgetStateProperty.resolveWith(
-          (s) => IconThemeData(color: selected(s) ? DM.signal : DM.mist),
+          (s) => IconThemeData(color: selected(s) ? DM.pulse : DM.ash),
         ),
         labelTextStyle: WidgetStateProperty.resolveWith(
           (s) => DMType.outfit(
             size: 12.5,
-            weight: FontWeight.w500,
-            color: selected(s) ? DM.bone : DM.mist,
+            weight: selected(s) ? FontWeight.w600 : FontWeight.w500,
+            color: selected(s) ? DM.bone : DM.ash,
           ),
         ),
       ),
       navigationRailTheme: NavigationRailThemeData(
         backgroundColor: DM.void_,
         indicatorColor: DM.deep,
-        selectedIconTheme: const IconThemeData(color: DM.signal),
-        unselectedIconTheme: const IconThemeData(color: DM.mist),
+        selectedIconTheme: const IconThemeData(color: DM.pulse),
+        unselectedIconTheme: const IconThemeData(color: DM.ash),
         selectedLabelTextStyle: DMType.outfit(size: 12.5, color: DM.bone),
-        unselectedLabelTextStyle: DMType.outfit(size: 12.5, color: DM.mist),
+        unselectedLabelTextStyle: DMType.outfit(size: 12.5, color: DM.ash),
       ),
       tabBarTheme: TabBarThemeData(
-        indicatorColor: DM.signal,
+        indicatorColor: DM.pulse,
         dividerColor: DM.line,
         labelColor: DM.bone,
-        unselectedLabelColor: DM.mist,
+        unselectedLabelColor: DM.ash,
         labelStyle: DMType.outfit(size: 15, weight: FontWeight.w600),
         unselectedLabelStyle: DMType.outfit(size: 15, weight: FontWeight.w500),
       ),
       chipTheme: ChipThemeData(
         backgroundColor: DM.raise,
         selectedColor: DM.deep,
-        disabledColor: DM.graphite,
-        checkmarkColor: DM.signal,
+        disabledColor: DM.grave,
+        checkmarkColor: DM.pulse,
         side: lineSide,
         shape: rounded(DMRadius.chip),
         labelStyle: DMType.outfit(size: 13, weight: FontWeight.w500),
-        secondaryLabelStyle: DMType.outfit(size: 13, color: DM.signal),
+        secondaryLabelStyle: DMType.outfit(size: 13, color: DM.pulse),
         iconTheme: const IconThemeData(color: DM.bone, size: 16),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStateProperty.resolveWith(
-            (s) => selected(s) ? DM.deep : DM.graphite,
+            (s) => selected(s) ? DM.deep : DM.grave,
           ),
           foregroundColor: WidgetStateProperty.resolveWith(
             (s) => disabled(s)
-                ? DM.mist
+                ? DM.ash
                 : selected(s)
-                ? DM.signal
-                : DM.sub,
+                ? DM.pulse
+                : DM.dust,
           ),
           iconColor: WidgetStateProperty.resolveWith(
-            (s) => selected(s) ? DM.signal : DM.sub,
+            (s) => selected(s) ? DM.pulse : DM.dust,
           ),
           side: const WidgetStatePropertyAll(lineSide),
           shape: WidgetStatePropertyAll(
@@ -375,7 +377,7 @@ abstract final class DeadmanTheme {
             DMType.outfit(size: 14, weight: FontWeight.w600),
           ),
           overlayColor: WidgetStatePropertyAll(
-            DM.signal.withValues(alpha: 0.06),
+            DM.pulse.withValues(alpha: 0.06),
           ),
         ),
       ),
@@ -385,10 +387,10 @@ abstract final class DeadmanTheme {
               ? DM.line
               : selected(s)
               ? DM.void_
-              : DM.mist,
+              : DM.ash,
         ),
         trackColor: WidgetStateProperty.resolveWith(
-          (s) => selected(s) ? (disabled(s) ? DM.deep : DM.signal) : DM.raise,
+          (s) => selected(s) ? (disabled(s) ? DM.deep : DM.pulse) : DM.raise,
         ),
         trackOutlineColor: WidgetStateProperty.resolveWith(
           (s) => selected(s) ? Colors.transparent : DM.line,
@@ -397,14 +399,14 @@ abstract final class DeadmanTheme {
       checkboxTheme: CheckboxThemeData(
         fillColor: WidgetStateProperty.resolveWith(
           (s) => selected(s)
-              ? (disabled(s) ? DM.deep : DM.signal)
+              ? (disabled(s) ? DM.deep : DM.pulse)
               : Colors.transparent,
         ),
         checkColor: const WidgetStatePropertyAll(DM.void_),
         side: WidgetStateBorderSide.resolveWith(
           (s) => selected(s)
               ? BorderSide.none
-              : BorderSide(color: disabled(s) ? DM.line : DM.sub, width: 1.5),
+              : BorderSide(color: disabled(s) ? DM.line : DM.dust, width: 1.5),
         ),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
       ),
@@ -413,71 +415,71 @@ abstract final class DeadmanTheme {
           (s) => disabled(s)
               ? DM.line
               : selected(s)
-              ? DM.signal
-              : DM.sub,
+              ? DM.pulse
+              : DM.dust,
         ),
       ),
       sliderTheme: SliderThemeData(
-        activeTrackColor: DM.signal,
-        inactiveTrackColor: DM.track,
-        thumbColor: DM.signal,
-        overlayColor: DM.signal.withValues(alpha: 0.12),
+        activeTrackColor: DM.pulse,
+        inactiveTrackColor: DM.line,
+        thumbColor: DM.pulse,
+        overlayColor: DM.pulse.withValues(alpha: 0.12),
         valueIndicatorColor: DM.raise,
         valueIndicatorTextStyle: DMType.mono(size: 13),
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(
-        color: DM.signal,
-        linearTrackColor: DM.track,
+        color: DM.pulse,
+        linearTrackColor: DM.line,
         circularTrackColor: Colors.transparent,
         linearMinHeight: 4,
       ),
       inputDecorationTheme: InputDecorationThemeData(
         filled: true,
-        fillColor: DM.raise,
+        fillColor: DM.pit,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 16,
           vertical: 16,
         ),
-        border: inputBorder(DM.line),
-        enabledBorder: inputBorder(DM.line),
+        border: inputBorder(DM.seam),
+        enabledBorder: inputBorder(DM.seam),
         disabledBorder: inputBorder(DM.line),
-        focusedBorder: inputBorder(DM.signal, 1.5),
-        errorBorder: inputBorder(DM.due),
-        focusedErrorBorder: inputBorder(DM.due, 1.5),
-        labelStyle: DMType.outfit(size: 15, color: DM.sub),
+        focusedBorder: inputBorder(DM.pulse, 1.5),
+        errorBorder: inputBorder(DM.flatline),
+        focusedErrorBorder: inputBorder(DM.flatline, 1.5),
+        labelStyle: DMType.outfit(size: 15, color: DM.dust),
         floatingLabelStyle: WidgetStateTextStyle.resolveWith(
           (s) => DMType.outfit(
             size: 14,
             color: s.contains(WidgetState.error)
-                ? DM.due
+                ? DM.flatline
                 : s.contains(WidgetState.focused)
-                ? DM.signal
-                : DM.sub,
+                ? DM.pulse
+                : DM.dust,
           ),
         ),
-        hintStyle: DMType.outfit(size: 15, color: DM.sub),
-        helperStyle: DMType.outfit(size: 13, color: DM.mist),
-        errorStyle: DMType.outfit(size: 13, color: DM.due),
-        prefixIconColor: DM.sub,
-        suffixIconColor: DM.sub,
+        hintStyle: DMType.outfit(size: 15, color: DM.ash),
+        helperStyle: DMType.outfit(size: 13, color: DM.ash),
+        errorStyle: DMType.outfit(size: 13, color: DM.flatline),
+        prefixIconColor: DM.dust,
+        suffixIconColor: DM.dust,
       ),
       dialogTheme: DialogThemeData(
-        backgroundColor: DM.graphite,
+        backgroundColor: DM.grave,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         shape: rounded(DMRadius.dialog),
         titleTextStyle: text.titleLarge,
         contentTextStyle: text.bodyMedium,
-        barrierColor: const Color(0xCC050707),
+        barrierColor: const Color(0xCC0A0B0D),
       ),
       bottomSheetTheme: const BottomSheetThemeData(
-        backgroundColor: DM.graphite,
-        modalBackgroundColor: DM.graphite,
+        backgroundColor: DM.grave,
+        modalBackgroundColor: DM.grave,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         modalElevation: 0,
         dragHandleColor: DM.line,
-        modalBarrierColor: Color(0xCC050707),
+        modalBarrierColor: Color(0xCC0A0B0D),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(
             top: Radius.circular(DMRadius.sheet),
@@ -490,29 +492,29 @@ abstract final class DeadmanTheme {
         backgroundColor: DM.raise,
         elevation: 0,
         contentTextStyle: DMType.outfit(size: 14, color: DM.bone),
-        actionTextColor: DM.signal,
-        closeIconColor: DM.sub,
+        actionTextColor: DM.pulse,
+        closeIconColor: DM.dust,
         shape: rounded(DMRadius.button),
       ),
       listTileTheme: ListTileThemeData(
-        iconColor: DM.sub,
+        iconColor: DM.dust,
         textColor: DM.bone,
         titleTextStyle: DMType.outfit(size: 16, weight: FontWeight.w600),
-        subtitleTextStyle: DMType.outfit(size: 14, color: DM.sub),
-        leadingAndTrailingTextStyle: DMType.mono(size: 13, color: DM.sub),
+        subtitleTextStyle: DMType.outfit(size: 14, color: DM.dust),
+        leadingAndTrailingTextStyle: DMType.mono(size: 13, color: DM.dust),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16),
         minVerticalPadding: 12,
       ),
       expansionTileTheme: const ExpansionTileThemeData(
-        iconColor: DM.sub,
-        collapsedIconColor: DM.sub,
+        iconColor: DM.dust,
+        collapsedIconColor: DM.dust,
         textColor: DM.bone,
         collapsedTextColor: DM.bone,
         shape: Border(),
         collapsedShape: Border(),
       ),
       popupMenuTheme: PopupMenuThemeData(
-        color: DM.graphite,
+        color: DM.grave,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         shape: rounded(DMRadius.button),
@@ -520,7 +522,7 @@ abstract final class DeadmanTheme {
       ),
       menuTheme: const MenuThemeData(
         style: MenuStyle(
-          backgroundColor: WidgetStatePropertyAll(DM.graphite),
+          backgroundColor: WidgetStatePropertyAll(DM.grave),
           surfaceTintColor: WidgetStatePropertyAll(Colors.transparent),
           elevation: WidgetStatePropertyAll(0),
           side: WidgetStatePropertyAll(lineSide),
@@ -535,29 +537,30 @@ abstract final class DeadmanTheme {
         textStyle: DMType.outfit(size: 13),
       ),
       datePickerTheme: DatePickerThemeData(
-        backgroundColor: DM.graphite,
+        backgroundColor: DM.grave,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         shape: rounded(DMRadius.dialog),
-        headerBackgroundColor: DM.graphite,
+        headerBackgroundColor: DM.grave,
         headerForegroundColor: DM.bone,
         dividerColor: DM.line,
-        todayBorder: const BorderSide(color: DM.signal),
+        todayBorder: const BorderSide(color: DM.pulse),
       ),
       timePickerTheme: TimePickerThemeData(
-        backgroundColor: DM.graphite,
+        backgroundColor: DM.grave,
         elevation: 0,
         shape: rounded(DMRadius.dialog),
         dialBackgroundColor: DM.raise,
         hourMinuteColor: DM.raise,
         dayPeriodBorderSide: lineSide,
       ),
-      badgeTheme: const BadgeThemeData(
-        backgroundColor: DM.signal,
+      badgeTheme: BadgeThemeData(
+        backgroundColor: DM.pulse,
         textColor: DM.void_,
+        textStyle: DMType.mono(size: 10.5, weight: FontWeight.w700),
       ),
       scrollbarTheme: ScrollbarThemeData(
-        thumbColor: WidgetStatePropertyAll(DM.sub.withValues(alpha: 0.4)),
+        thumbColor: WidgetStatePropertyAll(DM.dust.withValues(alpha: 0.4)),
         radius: const Radius.circular(4),
       ),
     );

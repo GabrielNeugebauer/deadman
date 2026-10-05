@@ -51,7 +51,7 @@ This is a working outline for the founder. Rewrite it in your own words before r
 
 **On slide:** One vault, a release plan, and a 3-second habit.
 
-- **Pulse:** fingerprint, about 3 s, no wallet prompt. It keeps an on-chain streak.
+- **Pulse:** fingerprint, about 3 s, no wallet prompt. It restarts every pending tier's clock.
 - **Release plan:** up to 8 tiers. "After 10 days of silence, 1 SOL to my partner. After 30 days, the rest to my brother." Tiers fire in order; one Pulse stops the rest.
 - **Private delivery:** any tier can pay out through Cloak or as shielded ZEC instead of a public Solana transfer.
 - **Duress PIN:** looks like a normal unlock and silently locks the vault on-chain.
@@ -99,16 +99,16 @@ This is a working outline for the founder. Rewrite it in your own words before r
 **On slide:**
 
 - **Free to use.** No subscription, no sign-up fee.
-- **Payout fee, on-chain, only when a tier releases funds:** 2% on the Solana rail, 5% on private rails. Both are admin-configurable under a 5% hard cap in the program (`MAX_FEE_BPS = 500`).
+- **Payout fee, on-chain, only when a tier releases funds:** 2% on the Solana rail, 3% on private rails. Both are admin-configurable under a 5% hard cap in the program (`MAX_FEE_BPS = 500`).
 - **Integrator fees (optional):** a Jupiter referral fee on Earn swaps (minimum 50 bps, Jupiter keeps 20%), and NEAR Intents `appFees` on Zcash routing (split 50/50 with 1Click).
 - **Estimates:**
 
 | Line                      | Assumption                                          | Estimate (illustrative) |
 | ------------------------- | --------------------------------------------------- | ----------------------- |
 | Payout fee, Solana rail   | $5M TVL (1,000 × $5k) × ~1%/yr released × 2%        | ~$1k/yr                 |
-| Payout fee, private rails | same base, released privately, × 5%                 | ~$2.5k/yr               |
+| Payout fee, private rails | same base, released privately, × 3%                 | ~$1.5k/yr               |
 | Earn referral             | 30% of TVL swapped once ($1.5M) × 50 bps × 80% kept | ~$6k, one-time          |
-| Same model at $100M TVL   | ~1%/yr released × 2–5%, plus Earn on new deposits   | ~$20k–50k/yr + Earn     |
+| Same model at $100M TVL   | ~1%/yr released × 2–3%, plus Earn on new deposits   | ~$20k–30k/yr + Earn     |
 
 _TVL and release-rate assumptions come from docs/JUDGING.md (DeFi judge). Earn figures use the fee table in docs/research/earn-jupiter-jito.md. None of this is traction._
 
@@ -138,7 +138,7 @@ _TVL and release-rate assumptions come from docs/JUDGING.md (DeFi judge). Earn f
 
 - Be candid. The basic mechanism is solved, and SolGuard's design overlaps ours heavily. Do not claim to be the first dead-man switch.
 - Our claim is narrower and testable. Those projects shipped a contract plus a form, and the winners in this lane shipped something people touch: Unruggable's hardware wallet, and One-Time Action Codes demoed on Saga/Seeker.
-- The retention answer is a real differentiator. Most proof-of-life apps die because nothing happens. Pulse streaks and Family Circle give the owner and the beneficiaries a reason to open the app.
+- The retention answer is a real differentiator. Most proof-of-life apps die because nothing happens. The Pulse and Family Circle give the owner and the beneficiaries a reason to open the app.
 
 ## 9. Go-to-market
 

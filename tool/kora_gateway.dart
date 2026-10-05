@@ -579,8 +579,8 @@ typedef DeadmanIxSpec = ({
 /// Discriminators from onchain/target/idl/deadman.json.
 const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
   // payer (slot 1) = Kora: Anchor `init` CPIs System create_account from Kora.
-  'create_vault': (
-    disc: [29, 237, 247, 208, 193, 82, 54, 135],
+  'create_plan': (
+    disc: [77, 43, 141, 254, 212, 118, 41, 186],
     accounts: 4,
     extra: false,
     koraSlot: 1,
@@ -591,8 +591,8 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
     extra: false,
     koraSlot: 1,
   ),
-  'update_policy': (
-    disc: [212, 245, 246, 7, 163, 151, 18, 57],
+  'update_plan': (
+    disc: [119, 112, 58, 60, 76, 205, 1, 100],
     accounts: 2,
     extra: false,
     koraSlot: null,
@@ -748,10 +748,10 @@ class PaymasterRequest {
   /// The one non-Kora signer (vault owner, executor or depositor).
   final String signer;
 
-  /// Instruction names, e.g. `deadman.create_vault`, `token.transfer_checked`.
+  /// Instruction names, e.g. `deadman.create_plan`, `token.transfer_checked`.
   final List<String> instructions;
 
-  /// Whether Kora is the `payer` of a create_vault / create_vesting /
+  /// Whether Kora is the `payer` of a create_plan / create_vesting /
   /// subscribe (one account per transaction).
   final bool koraFundsRent;
 
@@ -945,7 +945,7 @@ PaymasterRequest validatePaymasterTx(
       for (var j = 1; j < a.length; j++) {
         if (a[j] == kora && j != spec.koraSlot) {
           _reject(
-            'The paymaster may only be the payer of create_vault / '
+            'The paymaster may only be the payer of create_plan / '
             'create_vesting / subscribe or the rent_payer of close_vault',
           );
         }

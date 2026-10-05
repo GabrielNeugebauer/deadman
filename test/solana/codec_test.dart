@@ -104,8 +104,8 @@ void main() {
             )['discriminator']
             as List,
       );
-      expect(Disc.createVault, ix('create_vault'));
-      expect(Disc.updatePolicy, ix('update_policy'));
+      expect(Disc.createPlan, ix('create_plan'));
+      expect(Disc.updatePlan, ix('update_plan'));
       expect(Disc.setGuard, ix('set_guard'));
       expect(Disc.pulse, ix('pulse'));
       expect(Disc.lockdown, ix('lockdown'));
@@ -120,7 +120,7 @@ void main() {
       expect(Disc.configAccount, acc('Config'));
     });
 
-    test('create_vault and update_policy arg order matches the IDL', () {
+    test('create_plan and update_plan arg order matches the IDL', () {
       List<String> args(String name) => [
         for (final a
             in (loadIdl()['instructions'] as List).firstWhere(
@@ -129,18 +129,16 @@ void main() {
                 as List)
           a['name'] as String,
       ];
-      expect(args('create_vault'), [
+      expect(args('create_plan'), [
         'plan_id',
         'label',
         'guard',
-        'interval_secs',
         'lock_secs',
         'skip_grace_secs',
         'rules',
       ]);
-      expect(args('update_policy'), [
+      expect(args('update_plan'), [
         'label',
-        'interval_secs',
         'lock_secs',
         'skip_grace_secs',
         'rules',
@@ -219,36 +217,33 @@ void main() {
       ...le(8, 5000),
     ];
 
-    test('create_vault with a Fixed SOL rule and a Percent token rule', () {
-      final data = encodeCreateVault(
+    test('create_plan with a Fixed SOL rule and a Percent token rule', () {
+      final data = encodeCreatePlan(
         planId: 0x0107,
         label: 'Kids',
         guard: guard,
-        intervalSecs: 86400,
         lockSecs: 3600,
         skipGraceSecs: 604800,
         rules: [solFixed, tokenPercent],
       );
       expect(data, [
-        29, 237, 247, 208, 193, 82, 54, 135, //
+        77, 43, 141, 254, 212, 118, 41, 186, //
         7, 1,
         ...le(4, 4),
         ...utf8.encode('Kids'),
         ...keyBytes(guard),
-        ...le(8, 86400),
         ...le(8, 3600),
         ...le(8, 604800),
         ...le(4, 2),
         ...fixedSolBytes,
         ...percentMintBytes,
       ]);
-      expect(data.length, 8 + 2 + 4 + 4 + 32 + 24 + 4 + 51 + 83);
+      expect(data.length, 8 + 2 + 4 + 4 + 32 + 16 + 4 + 51 + 83);
     });
 
-    test('update_policy with guardian Some', () {
-      final data = encodeUpdatePolicy(
+    test('update_plan with guardian Some', () {
+      final data = encodeUpdatePlan(
         label: 'Fundo de emergência',
-        intervalSecs: 60,
         lockSecs: 180,
         skipGraceSecs: 120,
         rules: [solFixed, tokenPercent],
@@ -257,10 +252,9 @@ void main() {
       final label = utf8.encode('Fundo de emergência');
       expect(label, hasLength(20), reason: 'ê is 2 bytes');
       expect(data, [
-        212, 245, 246, 7, 163, 151, 18, 57, //
+        119, 112, 58, 60, 76, 205, 1, 100, //
         ...le(4, label.length),
         ...label,
-        ...le(8, 60),
         ...le(8, 180),
         ...le(8, 120),
         ...le(4, 2),
@@ -271,18 +265,16 @@ void main() {
       ]);
     });
 
-    test('update_policy with guardian None', () {
-      final data = encodeUpdatePolicy(
+    test('update_plan with guardian None', () {
+      final data = encodeUpdatePlan(
         label: '',
-        intervalSecs: 60,
         lockSecs: 180,
         skipGraceSecs: 366 * 86400,
         rules: [tokenPercent],
       );
       expect(data, [
-        ...Disc.updatePolicy,
+        ...Disc.updatePlan,
         ...le(4, 0),
-        ...le(8, 60),
         ...le(8, 180),
         ...le(8, 366 * 86400),
         ...le(4, 1),
@@ -321,7 +313,6 @@ void main() {
     final vault = vaultPda(owner, 0).address;
     int? check(
       List<RuleSpec> rules, {
-      int interval = 86400,
       int grace = 30 * 86400,
       int history = 0,
       String? g,
@@ -329,7 +320,6 @@ void main() {
       owner: owner,
       vault: vault,
       guard: guard,
-      intervalSecs: interval,
       lockSecs: 3600,
       skipGraceSecs: grace,
       rules: rules,
@@ -354,11 +344,13 @@ void main() {
     });
 
     test('rejects bad durations, rules and guardians', () {
-      expect(check([solFixed], interval: 59), 6002);
       expect(check([]), 6003);
       expect(check(List.filled(9, solFixed)), 6003);
-      expect(check([rule(after: 86400 + 59)]), 6003);
-      expect(check([rule(after: 86400 + 60)]), isNull);
+      expect(check([rule(after: 59)]), 6003);
+      expect(check([rule(after: Limits.minRuleDelaySecs)]), isNull);
+      expect(check([rule(after: Limits.maxRuleDelaySecs)]), isNull);
+      expect(check([rule(after: Limits.maxRuleDelaySecs + 1)]), 6003);
+      expect(check([rule(after: 120), rule(after: 120)]), isNull);
       expect(check([rule(after: 300000), rule(after: 200000)]), 6003);
       expect(check([rule(amount: 0)]), 6003);
       expect(check([rule(mode: AmountMode.percent, amount: 10001)]), 6003);
@@ -382,8 +374,7 @@ void main() {
       expect(check([], history: 2), 6003, reason: 'new rules are required');
     });
 
-    test('policyHistoryCount: paid or skipped tiers, or none once all '
-        'paid', () {
+    test('policyHistoryCount: paid or skipped tiers', () {
       RuleState r({bool done = false, bool skipped = false}) => RuleState(
         beneficiary: alice,
         rail: Rail.solana,
@@ -401,14 +392,16 @@ void main() {
         rentExemptMinimum: 0,
       );
       expect(policyHistoryCount(v([r(done: true), r(), r(done: true)])), 2);
-      expect(policyHistoryCount(v([r(done: true), r(done: true)])), 0);
+      // Fully released plans are final (the client refuses to update them);
+      // the count stays plain history.
+      expect(policyHistoryCount(v([r(done: true), r(done: true)])), 2);
       expect(policyHistoryCount(v([r()])), 0);
       // A skipped, unclaimed tier stays as history and keeps the plan open.
       expect(policyHistoryCount(v([r(done: true), r(skipped: true), r()])), 2);
       expect(policyHistoryCount(v([r(done: true), r(skipped: true)])), 2);
       expect(
         policyHistoryCount(v([r(done: true, skipped: true), r(done: true)])),
-        0,
+        2,
       );
     });
   });
@@ -470,7 +463,6 @@ void main() {
         expect(v.label, 'Crianças');
         expect(v.guard, guard);
         expect(v.guardian, guardian);
-        expect(v.intervalSecs, 86400);
         expect(v.lockSecs, 3600);
         expect(v.skipGraceSecs, 604800);
         expect(v.lastPulse, 1790000000);
@@ -528,11 +520,33 @@ void main() {
       expect(v.guardian, isNull);
       expect(v.planId, 0);
       expect(v.label, '');
-      expect(v.intervalSecs, 86400);
       expect(v.rules.map((r) => r.beneficiary), [alice, bob, guardian]);
       expect(v.skipGraceSecs, 30 * 86400);
       expect(v.ownerLastSeen, v.lastPulse);
       expect(v.withdrawableLamports, 0);
+    });
+
+    test('ignores the reserved legacy interval bytes', () {
+      VaultState decode(int legacy) => decodeVault(
+        vaultBytes(
+          owner: owner,
+          guard: guard,
+          guardian: guardian,
+          legacyInterval: legacy,
+          rules: rules,
+        ),
+        address: 'vault',
+        lamports: 100,
+        rentExemptMinimum: 200,
+      );
+      final fresh = decode(0);
+      final legacy = decode(86400);
+      expect(fresh.lockSecs, 3600);
+      expect(legacy.lockSecs, fresh.lockSecs);
+      expect(legacy.skipGraceSecs, fresh.skipGraceSecs);
+      expect(legacy.lastPulse, fresh.lastPulse);
+      expect(legacy.nextReleaseAt, fresh.nextReleaseAt);
+      expect(legacy.rules.length, fresh.rules.length);
     });
 
     test('rejects wrong discriminator, truncated data and bad enums', () {
@@ -603,10 +617,10 @@ void main() {
       expect(c.admin, owner);
       expect(c.fees.treasury, guardian);
       expect(c.fees.feeBpsPublic, 200);
-      expect(c.fees.feeBpsPrivate, 500);
+      expect(c.fees.feeBpsPrivate, 300);
       expect(c.fees.bpsFor(Rail.solana), 200);
-      expect(c.fees.bpsFor(Rail.cloak), 500);
-      expect(c.fees.bpsFor(Rail.zcash), 500);
+      expect(c.fees.bpsFor(Rail.cloak), 300);
+      expect(c.fees.bpsFor(Rail.zcash), 300);
       expect(decodeMintDecimals(mintBytes(6)), 6);
       expect(
         decodeTokenAmount(
@@ -642,7 +656,6 @@ void main() {
       label: '',
       guard: guard,
       guardian: null,
-      intervalSecs: 60,
       lockSecs: 60,
       skipGraceSecs: 100,
       lastPulse: 1000,
@@ -662,6 +675,13 @@ void main() {
     test('nextRuleDue skips executed rules', () {
       expect(v.nextRuleDue, 1250);
       expect(vault([r(200, done: true)]).nextRuleDue, isNull);
+    });
+
+    test('nextReleaseAt is the earliest pending tier due', () {
+      expect(v.nextReleaseAt, 1250);
+      expect(v.nextReleaseAt, v.nextRuleDue);
+      expect(vault([r(200, done: true)]).nextReleaseAt, isNull);
+      expect(vault([r(300, skippedAt: 1500), r(400)]).nextReleaseAt, 1400);
     });
 
     test('canExecute: strictly after the deadline, per-asset order', () {
@@ -899,7 +919,7 @@ void main() {
         planId: planId,
         data: const [],
       );
-      expect(create.accounts.map(f), flags('create_vault'));
+      expect(create.accounts.map(f), flags('create_plan'));
       expect(sol.accounts.map(f), flags('execute_sol_rule'));
       expect(token.accounts.map(f), flags('execute_token_rule'));
       expect(withdraw.accounts.map(f), flags('withdraw_token'));
@@ -942,13 +962,13 @@ void main() {
       expect(ixs[1].data.toList(), [12, ...le(8, 2500000), 6]);
     });
 
-    test('create_vault: read-only owner, separate rent payer', () {
+    test('create_plan: read-only owner, separate rent payer', () {
       final kora = key(9);
       final ix = createVaultIx(
         owner: owner,
         payer: kora,
         planId: planId,
-        data: Disc.createVault,
+        data: Disc.createPlan,
       );
       expect(ix.programId.toBase58(), AppConfig.programId);
       expect(metas(ix), [
@@ -1239,7 +1259,7 @@ void main() {
         'plan_id',
         'guard',
         'guardian',
-        'interval_secs',
+        '_reserved_interval',
         'lock_secs',
         'skip_grace_secs',
         'last_pulse',
@@ -2131,7 +2151,7 @@ void main() {
       const fees = FeeSchedule(
         treasury: '11111111111111111111111111111111',
         feeBpsPublic: 200,
-        feeBpsPrivate: 500,
+        feeBpsPrivate: 300,
       );
       final v = plan();
       // Inheritance: covered while the last check-in fell in a paid period,
@@ -2153,7 +2173,7 @@ void main() {
       expect(feeWaivedFor(vesting, sub(0), 0), isFalse, reason: 'never paid');
 
       expect(payoutFeeBps(fees, v, null, Rail.solana, now), 200);
-      expect(payoutFeeBps(fees, v, sub(lastPulse - 1), Rail.cloak, now), 500);
+      expect(payoutFeeBps(fees, v, sub(lastPulse - 1), Rail.cloak, now), 300);
       expect(payoutFeeBps(fees, v, sub(now), Rail.zcash, now), 0);
     });
 

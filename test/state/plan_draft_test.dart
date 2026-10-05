@@ -10,7 +10,7 @@ const usdc = AppConfig.usdcMint;
 final _fees = FeeSchedule(
   treasury: addr(9),
   feeBpsPublic: 200,
-  feeBpsPrivate: 500,
+  feeBpsPrivate: 300,
 );
 
 PayoutDraft _share(
@@ -119,9 +119,9 @@ void main() {
   });
 
   group('keeperAutoDeliverMin', () {
-    test('USDC at 2% and 5%', () {
+    test('USDC at 2% and 3%', () {
       expect(keeperAutoDeliverMin(usdc, 200), 16994000);
-      expect(keeperAutoDeliverMin(usdc, 500), 6797600);
+      expect(keeperAutoDeliverMin(usdc, 300), 11329334);
     });
 
     test('never with the fee waived or an unpriced token', () {
@@ -304,9 +304,9 @@ void main() {
             fixedAmount: 1500000000,
             afterSecs: 86400,
           ),
-          net: 1425000000,
+          net: 1455000000,
         ),
-        '$shortA gets 1.5 SOL (≈\u00a01.425 SOL) privately as Zcash, using '
+        '$shortA gets 1.5 SOL (≈\u00a01.455 SOL) privately as Zcash, using '
         'their claim code.',
       );
       expect(
@@ -330,10 +330,9 @@ void main() {
         'Ana gets everything left of your USDC as a normal transfer to '
         '$shortA.',
       );
-      expect(
-        payoutWhen(10 * 86400, 7 * 86400),
-        'After 10 days of silence (3 days after a missed check-in)',
-      );
+      expect(payoutWhen(10 * 86400), 'Sent 10 days after your last check-in');
+      expect(delayText(365 * 86400), '1 year');
+      expect(delayText(120), '2 minutes');
     });
 
     test('leftover sentences', () {
@@ -375,22 +374,45 @@ void main() {
     });
 
     test('validate reports each field', () {
-      expect(_share(10000).validate(intervalSecs: 7 * 86400), isEmpty);
+      expect(_share(10000).validate(), isEmpty);
       expect(
         PayoutDraft(
           beneficiary: 'nope',
           mode: AmountMode.fixed,
           fixedAmount: 1000,
-          afterSecs: 7 * 86400,
-        ).validate(intervalSecs: 7 * 86400).map((i) => i.code),
+          afterSecs: 59,
+        ).validate().map((i) => i.code),
         [IssueCode.b2, IssueCode.a2, IssueCode.d1],
       );
-      expect(delayError(10 * 86400, 30 * 86400)!.action, 'Move to 37 days');
     });
 
-    test('delay choices hide anything not past the interval', () {
-      expect(delayChoices(120), [180, 300, 600, 1800]);
-      expect(delayChoices(7 * 86400).first, 10 * 86400);
+    test('a wait is between a minute and 3 years', () {
+      expect(delayError(59)!.body, 'Must be at least 1 minute.');
+      expect(delayError(60), isNull);
+      expect(delayError(3 * 366 * 86400), isNull);
+      expect(delayError(3 * 366 * 86400 + 1)!.body, 'Must be 3 years or less.');
+    });
+
+    test('delay presets: days to a year, minutes with demo timings', () {
+      expect(delayChoices(demo: false).map(delayText), [
+        '1 day',
+        '3 days',
+        '7 days',
+        '14 days',
+        '30 days',
+        '90 days',
+        '180 days',
+        '1 year',
+      ]);
+      expect(delayChoices(demo: true), [60, 120, 300, 600]);
+      expect(defaultDelay(demo: false), 30 * 86400);
+      expect(defaultDelay(demo: true), 120);
+      for (final s in [
+        ...delayChoices(demo: false),
+        ...delayChoices(demo: true),
+      ]) {
+        expect(delayError(s), isNull);
+      }
     });
   });
 

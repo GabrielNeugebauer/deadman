@@ -135,7 +135,7 @@ int plansReleaseFeeEstimate(
   return fee;
 }
 
-/// "2%", "5%" or "2% / 5%": the rates [v]'s unsettled tiers pay.
+/// "2%", "3%" or "2% / 3%": the rates [v]'s unsettled tiers pay.
 String pendingFeeRates(VaultState v, FeeSchedule fees) =>
     plansPendingFeeRates([v], fees);
 
@@ -151,7 +151,7 @@ String plansPendingFeeRates(Iterable<VaultState> plans, FeeSchedule fees) {
   return bps.map((b) => percentText(b / 10000)).join(' / ');
 }
 
-/// "Release fee: 2% (5% private rails)".
+/// "Release fee: 2% (3% private rails)".
 String releaseFeeText(FeeSchedule fees) =>
     'Release fee: ${percentText(fees.feeBpsPublic / 10000)} '
     '(${percentText(fees.feeBpsPrivate / 10000)} private rails)';

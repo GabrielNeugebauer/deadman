@@ -98,7 +98,7 @@ A direct `DepositSol` into the stake pool is cheaper for the user (0% deposit fe
 | `/build` (not built) | 25 bps | $2,500 | ~$2,500 |
 | `DepositSol` | 0 | $0 | $0 |
 
-Volume that is both staked and unstaked pays twice. The program's 2–5% payout fee is separate, and it applies to a vault balance that grows by about 4.8% a year.
+Volume that is both staked and unstaked pays twice. The program's 2–3% payout fee is separate, and it applies to a vault balance that grows by about 4.8% a year.
 
 ## Decisions for you
 

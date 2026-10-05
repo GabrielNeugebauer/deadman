@@ -78,6 +78,11 @@ Future<void> _openDialog(WidgetTester tester) async {
   await tester.pump(const Duration(seconds: 1));
 }
 
+/// The sticker reading [word].
+Sticker _sticker(WidgetTester tester, String word) => tester.widget<Sticker>(
+  find.ancestor(of: find.text(word), matching: find.byType(Sticker)),
+);
+
 Future<ClaimProfile> _profile(Rail rail, String destination) async =>
     ClaimProfile(rail: rail, key: await keyPair(5), destination: destination);
 
@@ -120,7 +125,10 @@ void main() {
     expect(find.text('Private transfers'), findsOneWidget);
     expect(find.text('12.5 USDC → 0.0034 ZEC'), findsOneWidget);
     expect(find.textContaining('Delivered as shielded ZEC'), findsOneWidget);
-    expect(find.widgetWithText(StatusChip, 'DONE'), findsOneWidget);
+    expect(find.widgetWithText(StatusSticker, 'DONE'), findsOneWidget);
+    // An outcome, not a plan state: pulse word, no figure.
+    expect(_sticker(tester, 'DONE').color, DM.pulse);
+    expect(_sticker(tester, 'DONE').sprite, isNull);
     expect(r.container.read(transferHistoryProvider).single.status, 'SUCCESS');
   });
 
@@ -150,8 +158,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('Interrupted before delivery'), findsOneWidget);
     // Resumable, so attention rather than failure.
-    expect(find.widgetWithText(StatusChip, 'INTERRUPTED'), findsOneWidget);
-    expect(find.widgetWithText(StatusChip, 'FAILED'), findsNothing);
+    expect(find.widgetWithText(StatusSticker, 'INTERRUPTED'), findsOneWidget);
+    expect(_sticker(tester, 'INTERRUPTED').color, DM.missed);
+    expect(_sticker(tester, 'INTERRUPTED').sprite, isNull);
+    expect(find.widgetWithText(StatusSticker, 'FAILED'), findsNothing);
 
     await tester.tap(find.text('Resume'));
     await _openDialog(tester);
@@ -159,7 +169,7 @@ void main() {
     await tester.tap(find.text('Send'));
     await tester.pumpAndSettle();
     expect(r.cloak.executed.single.amountIn, 20000000);
-    expect(find.widgetWithText(StatusChip, 'INTERRUPTED'), findsNothing);
+    expect(find.widgetWithText(StatusSticker, 'INTERRUPTED'), findsNothing);
     final t = r.container.read(transferHistoryProvider).single;
     expect(t.id, 'stuck');
     expect(t.trackingId, 'cloakSig');
@@ -201,6 +211,28 @@ void main() {
     );
     expect(button, findsOneWidget);
     expect(tester.widget<OutlinedButton>(button).onPressed, isNull);
+    final why = find.textContaining('run on Solana mainnet only');
+    expect(why, findsOneWidget);
+    expect(tester.widget<Text>(why).style?.color, DM.ash);
+  });
+
+  testWidgets('no destination yet: say where to set one, in bone', (
+    tester,
+  ) async {
+    final p = await _profile(Rail.zcash, '');
+    await _pump(
+      tester,
+      const CircleTab(),
+      profiles: [p],
+      setup: (api, zcash, _) {
+        api.balances[p.key.address] = 500000000;
+        zcash.spendableBy[null] = 499995000;
+      },
+    );
+    const text = 'Set a destination first: Security → Receive privately.';
+    expect(find.text(text), findsOneWidget);
+    expect(tester.widget<Text>(find.text(text)).style?.color, DM.bone);
+    expect(find.byIcon(Icons.info_outline), findsOneWidget);
   });
 
   testWidgets('under duress routing looks like a wallet timeout', (

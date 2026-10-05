@@ -8,7 +8,7 @@ use {
     deadman::VestingInput,
     deadman::{
         AmountMode, Config, Rail, RuleInput, Subscription, SubscriptionConfig, Vault, CONFIG_SEED,
-        SUBSCRIPTION_SEED, SUB_CONFIG_SEED, VAULT_SEED,
+        MAX_RULE_DELAY_SECS, MIN_RULE_DELAY_SECS, SUBSCRIPTION_SEED, SUB_CONFIG_SEED, VAULT_SEED,
     },
     litesvm::LiteSVM,
     litesvm_token::{
@@ -23,7 +23,6 @@ use {
 
 const SOL: u64 = 1_000_000_000;
 const DAY: i64 = 86_400;
-const INTERVAL: i64 = 7 * DAY;
 const LOCK: i64 = 3 * DAY;
 const GRACE: i64 = 30 * DAY;
 const FEE_PUBLIC: u16 = 200;
@@ -229,14 +228,13 @@ impl Env {
         self.send(ix, &[&admin]).unwrap();
     }
 
-    fn create_vault(&mut self, rules: Vec<RuleInput>) -> Result<u64, String> {
+    fn create_plan(&mut self, rules: Vec<RuleInput>) -> Result<u64, String> {
         let ix = Instruction::new_with_bytes(
             deadman::id(),
-            &deadman::instruction::CreateVault {
+            &deadman::instruction::CreatePlan {
                 plan_id: self.plan,
                 label: format!("Plan {}", self.plan),
                 guard: self.guard.pubkey(),
-                interval_secs: INTERVAL,
                 lock_secs: LOCK,
                 skip_grace_secs: GRACE,
                 rules,
@@ -276,14 +274,13 @@ impl Env {
         )
     }
 
-    fn update_policy(
+    fn update_plan(
         &mut self,
         rules: Vec<RuleInput>,
         guardian: Option<Pubkey>,
     ) -> Result<u64, String> {
-        let ix = self.owner_ix(deadman::instruction::UpdatePolicy {
+        let ix = self.owner_ix(deadman::instruction::UpdatePlan {
             label: "Updated".to_string(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: GRACE,
             rules,
@@ -481,7 +478,7 @@ impl Env {
 fn ready(rules: Vec<RuleInput>) -> Env {
     let mut env = Env::new();
     env.init_config();
-    env.create_vault(rules).unwrap();
+    env.create_plan(rules).unwrap();
     env
 }
 
@@ -578,7 +575,11 @@ fn rule_validation() {
             "zero fixed",
             vec![rule(&a, Rail::Solana, 10 * DAY, None, AmountMode::Fixed, 0)],
         ),
-        ("before check-in is due", vec![pct(&a, INTERVAL, 10_000)]),
+        ("delay under a minute", vec![pct(&a, 59, 10_000)]),
+        (
+            "delay past the cap",
+            vec![pct(&a, MAX_RULE_DELAY_SECS + 1, 10_000)],
+        ),
         ("owner as beneficiary", vec![pct(&owner, 10 * DAY, 10_000)]),
         ("guard as beneficiary", vec![pct(&guard, 10 * DAY, 10_000)]),
         (
@@ -587,15 +588,152 @@ fn rule_validation() {
         ),
     ];
     for (name, rules) in cases {
-        assert!(
-            env.create_vault(rules).is_err(),
-            "{name} should be rejected"
-        );
+        assert!(env.create_plan(rules).is_err(), "{name} should be rejected");
     }
     let eight = (0..8)
         .map(|i| rule(&a, Rail::Zcash, 10 * DAY + i, None, AmountMode::Fixed, 1))
         .collect();
-    env.create_vault(eight).unwrap();
+    env.create_plan(eight).unwrap();
+}
+
+#[test]
+fn tier_delay_is_bounded_and_ascending_without_a_check_in_interval() {
+    let a = Keypair::new().pubkey();
+    let pct = |after: i64, bps: u64| rule(&a, Rail::Solana, after, None, AmountMode::Percent, bps);
+    let mut env = Env::new();
+    env.init_config();
+    assert!(env
+        .create_plan(vec![pct(MIN_RULE_DELAY_SECS - 1, 10_000)])
+        .is_err());
+    assert!(env
+        .create_plan(vec![pct(2 * DAY, 5_000), pct(DAY, 5_000)])
+        .is_err());
+    env.create_plan(vec![pct(MIN_RULE_DELAY_SECS, 10_000)])
+        .unwrap();
+    assert_eq!(env.vault()._reserved_interval, [0u8; 8]);
+
+    // Same bounds on edit.
+    assert!(env.update_plan(vec![pct(59, 10_000)], None).is_err());
+    assert!(env
+        .update_plan(vec![pct(2 * DAY, 5_000), pct(DAY, 5_000)], None)
+        .is_err());
+    env.update_plan(
+        vec![
+            pct(MIN_RULE_DELAY_SECS, 5_000),
+            pct(MAX_RULE_DELAY_SECS, 10_000),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(env.vault().rules[1].after_secs, MAX_RULE_DELAY_SECS);
+}
+
+#[test]
+fn legacy_create_vault_and_update_policy_are_rejected() {
+    use anchor_lang::AnchorSerialize;
+    // sha256("global:create_vault") / ("global:update_policy"), first 8 bytes.
+    const OLD_CREATE_VAULT: [u8; 8] = [29, 237, 247, 208, 193, 82, 54, 135];
+    const OLD_UPDATE_POLICY: [u8; 8] = [212, 245, 246, 7, 163, 151, 18, 57];
+    let b = Keypair::new().pubkey();
+    let rules = vec![rule(
+        &b,
+        Rail::Solana,
+        3 * DAY,
+        None,
+        AmountMode::Percent,
+        10_000,
+    )];
+    let mut env = Env::new();
+    env.init_config();
+
+    // Old layout: plan_id, label, guard, interval_secs, lock, grace, rules.
+    let mut data = OLD_CREATE_VAULT.to_vec();
+    (
+        env.plan,
+        "Legacy".to_string(),
+        env.guard.pubkey(),
+        DAY,
+        LOCK,
+        GRACE,
+        rules.clone(),
+    )
+        .serialize(&mut data)
+        .unwrap();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &data,
+        deadman::accounts::CreateVault {
+            owner: env.owner.pubkey(),
+            payer: env.owner.pubkey(),
+            vault: env.vault_addr(),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let owner = env.owner.insecure_clone();
+    let err = env.send(ix, &[&owner]).unwrap_err();
+    assert!(err.contains("Custom(101)"), "{err}");
+    assert!(env.svm.get_account(&env.vault_addr()).is_none());
+
+    env.create_plan(rules.clone()).unwrap();
+    let before = env.vault();
+    let mut data = OLD_UPDATE_POLICY.to_vec();
+    (
+        "Legacy".to_string(),
+        DAY,
+        LOCK,
+        GRACE,
+        vec![rule(
+            &b,
+            Rail::Solana,
+            2 * DAY,
+            None,
+            AmountMode::Percent,
+            10_000,
+        )],
+        None::<Pubkey>,
+    )
+        .serialize(&mut data)
+        .unwrap();
+    let ix = Instruction::new_with_bytes(
+        deadman::id(),
+        &data,
+        deadman::accounts::OwnerAction {
+            owner: env.owner.pubkey(),
+            vault: env.vault_addr(),
+        }
+        .to_account_metas(None),
+    );
+    let err = env.send(ix, &[&owner]).unwrap_err();
+    assert!(err.contains("Custom(101)"), "{err}");
+    let after = env.vault();
+    assert_eq!(after.rules[0].after_secs, 3 * DAY);
+    assert_eq!(after.label, before.label);
+}
+
+#[test]
+fn one_minute_tier_releases_a_minute_after_the_last_check_in() {
+    let b = Keypair::new();
+    let mut env = ready(vec![rule(
+        &b.pubkey(),
+        Rail::Solana,
+        MIN_RULE_DELAY_SECS,
+        None,
+        AmountMode::Percent,
+        10_000,
+    )]);
+    env.deposit_sol(SOL);
+    env.advance(MIN_RULE_DELAY_SECS - 1);
+    assert!(env.execute_sol(0, &b.pubkey()).is_err(), "not due yet");
+    let guard = env.guard.insecure_clone();
+    env.pulse(&guard).unwrap();
+    env.advance(MIN_RULE_DELAY_SECS);
+    assert!(
+        env.execute_sol(0, &b.pubkey()).is_err(),
+        "check-in restarted it"
+    );
+    env.advance(1);
+    env.execute_sol(0, &b.pubkey()).unwrap();
 }
 
 #[test]
@@ -784,7 +922,7 @@ fn token_rules_pay_with_fee_and_independent_order() {
     let (a, b) = (Keypair::new(), Keypair::new());
     let mut env = ready(all_to(&a.pubkey()));
     let usdc = env.token_setup(1_000_000_000);
-    env.update_policy(
+    env.update_plan(
         vec![
             rule(
                 &a.pubkey(),
@@ -852,7 +990,7 @@ fn private_token_rule_sends_gas_stipend() {
     let c = Keypair::new();
     let mut env = ready(all_to(&Keypair::new().pubkey()));
     let usdc = env.token_setup(50_000_000);
-    env.update_policy(
+    env.update_plan(
         vec![rule(
             &c.pubkey(),
             Rail::Zcash,
@@ -882,7 +1020,7 @@ fn duress_lockdown_freezes_funds_and_policy() {
     assert!(env.withdraw_sol(SOL).is_err());
     let attacker = Keypair::new().pubkey();
     assert!(
-        env.update_policy(all_to(&attacker), None).is_err(),
+        env.update_plan(all_to(&attacker), None).is_err(),
         "coercer cannot redirect"
     );
 
@@ -933,7 +1071,7 @@ fn guardian_lockdown_is_rate_limited_and_removable() {
     let guardian = Keypair::new();
     let mut env = ready(all_to(&b.pubkey()));
     env.svm.airdrop(&guardian.pubkey(), SOL).unwrap();
-    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
+    env.update_plan(all_to(&b.pubkey()), Some(guardian.pubkey()))
         .unwrap();
 
     env.lockdown(&guardian).unwrap();
@@ -941,7 +1079,7 @@ fn guardian_lockdown_is_rate_limited_and_removable() {
     assert!(env.lockdown(&guardian).is_err(), "cooldown after expiry");
 
     // The owner uses the unlocked window to remove the guardian.
-    env.update_policy(all_to(&b.pubkey()), None).unwrap();
+    env.update_plan(all_to(&b.pubkey()), None).unwrap();
     env.advance(LOCK);
     assert!(env.lockdown(&guardian).is_err(), "no longer guardian");
 }
@@ -952,7 +1090,7 @@ fn guardian_cosigns_early_unlock() {
     let guardian = Keypair::new();
     let mut env = ready(all_to(&b.pubkey()));
     env.svm.airdrop(&guardian.pubkey(), SOL).unwrap();
-    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
+    env.update_plan(all_to(&b.pubkey()), Some(guardian.pubkey()))
         .unwrap();
     env.deposit_sol(SOL);
     let guard = env.guard.insecure_clone();
@@ -1026,16 +1164,16 @@ fn compute_unit_profile() {
             )
         })
         .collect();
-    let create = env.create_vault(rules.clone()).unwrap();
+    let create = env.create_plan(rules.clone()).unwrap();
     env.deposit_sol(10 * SOL);
     let guard = env.guard.insecure_clone();
     let pulse = env.pulse(&guard).unwrap();
-    let update = env.update_policy(rules, Some(b.pubkey())).unwrap();
+    let update = env.update_plan(rules, Some(b.pubkey())).unwrap();
     let lock = env.lockdown(&guard).unwrap();
     env.advance(10 * DAY + 10);
     let exec = env.execute_sol(0, &a.pubkey()).unwrap();
     println!(
-        "CU create_vault(8 rules)={create} pulse={pulse} update_policy(8)={update} \
+        "CU create_plan(8 rules)={create} pulse={pulse} update_plan(8)={update} \
          lockdown={lock} execute_sol_rule={exec}"
     );
     assert!(exec < 30_000);
@@ -1085,7 +1223,7 @@ fn one_owner_runs_independent_plans() {
     env.deposit_sol(2 * SOL);
 
     env.plan = 7;
-    env.create_vault(vec![rule(
+    env.create_plan(vec![rule(
         &b.pubkey(),
         Rail::Zcash,
         30 * DAY,
@@ -1095,7 +1233,7 @@ fn one_owner_runs_independent_plans() {
     )])
     .unwrap();
     env.deposit_sol(3 * SOL);
-    assert!(env.create_vault(all_to(&b.pubkey())).is_err(), "id taken");
+    assert!(env.create_plan(all_to(&b.pubkey())).is_err(), "id taken");
     let v = env.vault();
     assert_eq!((v.plan_id, v.label.as_str()), (7, "Plan 7"));
 
@@ -1115,11 +1253,10 @@ fn label_length_is_capped() {
     env.init_config();
     let ix = Instruction::new_with_bytes(
         deadman::id(),
-        &deadman::instruction::CreateVault {
+        &deadman::instruction::CreatePlan {
             plan_id: 0,
             label: "x".repeat(33),
             guard: env.guard.pubkey(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: GRACE,
             rules: all_to(&a.pubkey()),
@@ -1147,11 +1284,10 @@ fn sponsor_pays_vault_rent() {
     let owner_before = env.lamports(&env.owner.pubkey());
     let ix = Instruction::new_with_bytes(
         deadman::id(),
-        &deadman::instruction::CreateVault {
+        &deadman::instruction::CreatePlan {
             plan_id: 0,
             label: "Sponsored".to_string(),
             guard: env.guard.pubkey(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: GRACE,
             rules: all_to(&a.pubkey()),
@@ -1176,7 +1312,7 @@ fn sponsor_pays_vault_rent() {
 
 fn usdc_rules(env: &mut Env, a: &Keypair, b: &Keypair) -> Pubkey {
     let usdc = env.token_setup(1_000_000);
-    env.update_policy(
+    env.update_plan(
         vec![
             rule(
                 &a.pubkey(),
@@ -1292,7 +1428,7 @@ fn l1_empty_payout_does_not_consume_the_tier() {
     let (a, b) = (Keypair::new(), Keypair::new());
     let mut env = ready(all_to(&b.pubkey()));
     let usdc = env.token_setup(0);
-    env.update_policy(
+    env.update_plan(
         vec![rule(
             &a.pubkey(),
             Rail::Solana,
@@ -1337,7 +1473,7 @@ fn l2_editing_after_a_release_keeps_history_and_never_pays_twice() {
     let paid_a = env.lamports(&a.pubkey());
 
     // Owner returns and saves the plan again (only pending tiers are sent).
-    env.update_policy(
+    env.update_plan(
         vec![rule(
             &b.pubkey(),
             Rail::Solana,
@@ -1362,15 +1498,87 @@ fn l2_editing_after_a_release_keeps_history_and_never_pays_twice() {
 }
 
 #[test]
-fn completed_plan_can_be_rearmed_as_a_fresh_plan() {
-    let b = Keypair::new();
-    let mut env = ready(all_to(&b.pubkey()));
-    env.deposit_sol(SOL);
+fn released_plan_is_final_but_leftovers_can_be_withdrawn_and_closed() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Percent,
+            5_000,
+        ),
+    ]);
+    env.deposit_sol(5 * SOL);
+    env.advance(20 * DAY + 1);
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    env.execute_sol(1, &b.pubkey()).unwrap();
+    let before = env.vault();
+    assert!(before.is_completed());
+
+    let err = env.update_plan(all_to(&b.pubkey()), None).unwrap_err();
+    assert!(err.contains("PlanCompleted"), "{err}");
+    let after = env.vault();
+    assert_eq!(after.rules, before.rules, "released tiers untouched");
+    assert_eq!(after.label, before.label);
+
+    // Moving the guard is a security operation, not a plan change.
+    let new_guard = Keypair::new();
+    let owner = env.owner.insecure_clone();
+    let ix = env.owner_ix(deadman::instruction::SetGuard {
+        new_guard: new_guard.pubkey(),
+    });
+    env.send(ix, &[&owner]).unwrap();
+
+    // The owner recovers what the tiers left behind, then the rent.
+    let left = env.withdrawable();
+    assert!(left > 0);
+    env.withdraw_sol(left).unwrap();
+    let ix = env.close_ix(&env.owner.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&env.vault_addr()), 0);
+}
+
+#[test]
+fn partially_released_plan_stays_editable() {
+    let (a, b) = (Keypair::new(), Keypair::new());
+    let mut env = ready(vec![
+        rule(
+            &a.pubkey(),
+            Rail::Solana,
+            10 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+        rule(
+            &b.pubkey(),
+            Rail::Solana,
+            20 * DAY,
+            None,
+            AmountMode::Fixed,
+            SOL,
+        ),
+    ]);
+    env.deposit_sol(5 * SOL);
     env.advance(10 * DAY + 1);
-    env.execute_sol(0, &b.pubkey()).unwrap();
-    env.update_policy(all_to(&b.pubkey()), None).unwrap();
+    env.execute_sol(0, &a.pubkey()).unwrap();
+    assert!(!env.vault().is_completed());
+    env.update_plan(all_to(&b.pubkey()), None).unwrap();
     let v = env.vault();
-    assert_eq!((v.rules.len(), v.rules[0].executed_at), (1, 0));
+    assert_eq!(v.rules.len(), 2);
+    assert!(v.rules[0].executed_at > 0, "history kept");
+    assert_eq!(v.rules[1].executed_at, 0);
+    assert_eq!(v.rules[1].mode, AmountMode::Percent);
 }
 
 #[test]
@@ -1378,7 +1586,7 @@ fn vault_cannot_be_its_own_beneficiary() {
     let mut env = Env::new();
     env.init_config();
     let vault = env.vault_addr();
-    assert!(env.create_vault(all_to(&vault)).is_err());
+    assert!(env.create_plan(all_to(&vault)).is_err());
 }
 
 #[test]
@@ -1406,9 +1614,8 @@ fn skip_grace_is_owner_configured_and_bounded() {
     };
     let mut env = ready(tiers());
     let policy = |env: &Env, grace: i64| {
-        env.owner_ix(deadman::instruction::UpdatePolicy {
+        env.owner_ix(deadman::instruction::UpdatePlan {
             label: String::new(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: grace,
             rules: tiers(),
@@ -1723,11 +1930,10 @@ fn close_returns_rent_to_the_sponsor_and_the_rest_to_the_owner() {
     env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
     let ix = Instruction::new_with_bytes(
         deadman::id(),
-        &deadman::instruction::CreateVault {
+        &deadman::instruction::CreatePlan {
             plan_id: 0,
             label: String::new(),
             guard: env.guard.pubkey(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: GRACE,
             rules: all_to(&a.pubkey()),
@@ -1828,6 +2034,24 @@ fn revoking_keeps_what_vested_and_frees_the_rest() {
 }
 
 #[test]
+fn fully_released_vesting_cannot_be_revoked_but_can_close() {
+    let b = Keypair::new();
+    let mut env = vesting_env(true, &b);
+    env.advance(100 * DAY);
+    env.release(0, &b.pubkey()).unwrap();
+    assert!(env.vault().is_completed());
+    let err = env.revoke().unwrap_err();
+    assert!(err.contains("PlanCompleted"), "{err}");
+    assert_eq!(env.vault().revoked_at, 0);
+    let left = env.withdrawable();
+    env.withdraw_sol(left).unwrap();
+    let owner = env.owner.insecure_clone();
+    let ix = env.close_ix(&env.owner.pubkey());
+    env.send(ix, &[&owner]).unwrap();
+    assert_eq!(env.lamports(&env.vault_addr()), 0);
+}
+
+#[test]
 fn vesting_tokens_release_with_fee() {
     let b = Keypair::new();
     let mut env = Env::new();
@@ -1876,7 +2100,7 @@ fn plan_kinds_do_not_mix() {
         .contains("WrongPlanKind"));
     assert!(env.skip(0).unwrap_err().contains("WrongPlanKind"));
     assert!(env
-        .update_policy(all_to(&b.pubkey()), None)
+        .update_plan(all_to(&b.pubkey()), None)
         .unwrap_err()
         .contains("WrongPlanKind"));
     // Lockdown still protects a vesting plan from a coerced withdrawal.
@@ -2135,7 +2359,7 @@ fn installment_period_is_validated() {
 fn private_token_env(rail: Rail, c: &Pubkey, sol: u64) -> (Env, Pubkey) {
     let mut env = ready(all_to(&Keypair::new().pubkey()));
     let usdc = env.token_setup(50_000_000);
-    env.update_policy(
+    env.update_plan(
         vec![rule(
             c,
             rail,
@@ -2226,11 +2450,10 @@ fn sponsored_env(sponsor: &Keypair) -> Env {
     env.svm.airdrop(&sponsor.pubkey(), SOL).unwrap();
     let ix = Instruction::new_with_bytes(
         deadman::id(),
-        &deadman::instruction::CreateVault {
+        &deadman::instruction::CreatePlan {
             plan_id: 0,
             label: String::new(),
             guard: env.guard.pubkey(),
-            interval_secs: INTERVAL,
             lock_secs: LOCK,
             skip_grace_secs: GRACE,
             rules: all_to(&Keypair::new().pubkey()),
@@ -2324,8 +2547,8 @@ fn vault_layout_keeps_client_offsets_and_reserved_space() {
     let mut env = Env::new();
     env.init_config();
     env.plan = 0x1234;
-    env.create_vault(all_to(&b.pubkey())).unwrap();
-    env.update_policy(all_to(&b.pubkey()), Some(guardian.pubkey()))
+    env.create_plan(all_to(&b.pubkey())).unwrap();
+    env.update_plan(all_to(&b.pubkey()), Some(guardian.pubkey()))
         .unwrap();
     let data = env.svm.get_account(&env.vault_addr()).unwrap().data;
     assert_eq!(Vault::SPACE, 1390);
@@ -2336,7 +2559,12 @@ fn vault_layout_keeps_client_offsets_and_reserved_space() {
     assert_eq!(&data[42..74], env.guard.pubkey().as_ref());
     assert_eq!(data[74], 1);
     assert_eq!(&data[75..107], guardian.pubkey().as_ref());
+    // Retired check-in interval slot, then lock and skip grace.
+    assert_eq!(&data[107..115], &[0u8; 8]);
+    assert_eq!(&data[115..123], &LOCK.to_le_bytes());
+    assert_eq!(&data[123..131], &GRACE.to_le_bytes());
     let v = env.vault();
+    assert_eq!(v._reserved_interval, [0u8; 8]);
     assert_eq!(v._reserved, [0u8; 55]);
     assert_eq!(v.vest_period_secs, 0);
     assert_eq!(v.stipend_paid, 0);
@@ -2445,7 +2673,7 @@ fn legacy_vault_is_recovered_to_its_owner() {
     }
     // The freed address hosts a new plan.
     env.plan = 1;
-    env.create_vault(all_to(&Keypair::new().pubkey())).unwrap();
+    env.create_plan(all_to(&Keypair::new().pubkey())).unwrap();
     assert_eq!(env.vault().plan_id, 1);
 }
 
@@ -2983,7 +3211,7 @@ fn one_subscription_waives_fees_on_every_plan_of_the_owner() {
     let mut env = ready(all_to(&b.pubkey()));
     let sub = env.sub_setup();
     let usdc = env.token_setup(1_000_000);
-    env.update_policy(
+    env.update_plan(
         sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Cloak),
         None,
     )
@@ -2994,7 +3222,7 @@ fn one_subscription_waives_fees_on_every_plan_of_the_owner() {
     // A plan created after subscribing is covered too.
     let c = Keypair::new();
     env.plan = 9;
-    env.create_vault(vec![rule(
+    env.create_plan(vec![rule(
         &c.pubkey(),
         Rail::Zcash,
         10 * DAY,
@@ -3036,7 +3264,7 @@ fn another_owners_plan_is_not_covered_and_cannot_borrow_the_subscription() {
     let other = Keypair::new();
     env.svm.airdrop(&other.pubkey(), 100 * SOL).unwrap();
     env.switch_owner(&other);
-    env.create_vault(all_to(&d.pubkey())).unwrap();
+    env.create_plan(all_to(&d.pubkey())).unwrap();
     env.deposit_sol(2 * SOL);
     env.advance(10 * DAY + 1);
     let gross = env.withdrawable();
@@ -3063,7 +3291,7 @@ fn payouts_reject_a_substituted_subscription_account() {
     let mut env = ready(all_to(&b.pubkey()));
     let sub = env.sub_setup();
     let usdc = env.token_setup(1_000_000);
-    env.update_policy(
+    env.update_plan(
         sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Solana),
         None,
     )
@@ -3129,7 +3357,7 @@ fn lapsed_subscription_before_the_last_check_in_pays_the_normal_fee() {
     let mut env = ready(all_to(&b.pubkey()));
     let sub = env.sub_setup();
     let usdc = env.token_setup(1_000_000);
-    env.update_policy(
+    env.update_plan(
         sol_and_token_rules(&a.pubkey(), &b.pubkey(), usdc, Rail::Solana),
         None,
     )

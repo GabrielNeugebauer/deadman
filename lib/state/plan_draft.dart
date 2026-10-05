@@ -100,8 +100,9 @@ String moneyText(int base, String? mint) {
 
 String _plural(int n, String unit) => '$n $unit${n == 1 ? '' : 's'}';
 
-/// "10 days", "3 minutes", "36 hours".
+/// "10 days", "3 minutes", "36 hours", "1 year".
 String delayText(int secs) {
+  if (secs >= _year && secs % _year == 0) return _plural(secs ~/ _year, 'year');
   if (secs >= 86400 && secs % 86400 == 0) return _plural(secs ~/ 86400, 'day');
   if (secs >= 3600 && secs % 3600 == 0) return _plural(secs ~/ 3600, 'hour');
   if (secs >= 60 && secs % 60 == 0) return _plural(secs ~/ 60, 'minute');
@@ -128,21 +129,25 @@ String? shareWords(int? bps, String asset) => switch (bps) {
   _ => '${shareInput(bps)} out of every 100 $asset left',
 };
 
-/// Delay presets per check-in interval; the first is the default.
-List<int> delayChoices(int intervalSecs) {
-  const d = 86400;
-  final all = switch (intervalSecs) {
-    120 => const [180, 300, 600, 1800],
-    604800 => const [10 * d, 14 * d, 30 * d, 90 * d],
-    2592000 => const [37 * d, 45 * d, 60 * d, 180 * d],
-    7776000 => const [104 * d, 120 * d, 180 * d, 365 * d],
-    _ => [intervalSecs + 3 * d, intervalSecs * 2, intervalSecs * 4],
-  };
-  return [
-    for (final s in all)
-      if (s >= intervalSecs + Limits.minRuleMarginSecs) s,
-  ];
-}
+const _year = 365 * 86400;
+
+/// "Send after" presets: time since the last check-in. Demo timings swap
+/// in minutes so a payout can release on camera.
+List<int> delayChoices({required bool demo}) => demo
+    ? const [60, 120, 300, 600]
+    : const [
+        86400,
+        3 * 86400,
+        7 * 86400,
+        14 * 86400,
+        30 * 86400,
+        90 * 86400,
+        180 * 86400,
+        _year,
+      ];
+
+/// The first payout's default wait.
+int defaultDelay({required bool demo}) => demo ? 120 : 30 * 86400;
 
 /// Duress-lock presets.
 List<int> lockChoices({required bool demo}) => [
@@ -233,7 +238,7 @@ class PayoutDraft {
   );
 
   /// Problems that block Done (A2-A4, B2, D1).
-  List<PlanIssue> validate({required int intervalSecs}) => [
+  List<PlanIssue> validate() => [
     if (!isAddress(beneficiary)) _b2,
     ...amountErrors(
       mode: mode,
@@ -241,7 +246,7 @@ class PayoutDraft {
       fixedAmount: fixedAmount,
       mint: mint,
     ),
-    ?delayError(afterSecs, intervalSecs),
+    ?delayError(afterSecs),
   ];
 }
 
@@ -455,8 +460,9 @@ List<PlanIssue> amountErrors({
   return const [];
 }
 
-/// D1: the delay must outlast the check-in interval.
-PlanIssue? delayError(int afterSecs, int intervalSecs) {
+/// D1: the wait is between a minute and 3 years (the program's
+/// `MIN_RULE_DELAY_SECS` and `MAX_RULE_DELAY_SECS`).
+PlanIssue? delayError(int afterSecs) {
   if (afterSecs > Limits.maxRuleDelaySecs) {
     return const PlanIssue(
       IssueCode.d1,
@@ -464,14 +470,11 @@ PlanIssue? delayError(int afterSecs, int intervalSecs) {
       body: 'Must be 3 years or less.',
     );
   }
-  if (afterSecs < intervalSecs + Limits.minRuleMarginSecs) {
-    return PlanIssue(
+  if (afterSecs < Limits.minRuleDelaySecs) {
+    return const PlanIssue(
       IssueCode.d1,
       Severity.error,
-      body:
-          'Must be longer than your check-in interval '
-          '(${delayText(intervalSecs)}).',
-      action: 'Move to ${delayText(delayChoices(intervalSecs).first)}',
+      body: 'Must be at least 1 minute.',
     );
   }
   return null;
@@ -1012,10 +1015,9 @@ String payoutAmountLabel(PayoutDraft p) {
   return "${shareInput(bps)}% of what's left of your $asset";
 }
 
-/// "After 10 days of silence (3 days after a missed check-in)".
-String payoutWhen(int afterSecs, int intervalSecs) =>
-    'After ${delayText(afterSecs)} of silence'
-    '${intervalSecs < afterSecs ? ' (${delayText(afterSecs - intervalSecs)} after a missed check-in)' : ''}';
+/// "Sent 10 days after your last check-in".
+String payoutWhen(int afterSecs) =>
+    'Sent ${delayText(afterSecs)} after your last check-in';
 
 String _how(PayoutDraft p) => switch (p.rail) {
   // Without a name, the sentence already starts with the address.

@@ -98,7 +98,7 @@ This is the insight the whole product hangs on. Most dead-man switches make you 
 
 - **Headline:** One vault, release plans, a daily habit
 - **Body:**
-  - **Pulse:** fingerprint check-in, on-chain streak
+  - **Pulse:** fingerprint check-in, no wallet prompt
   - **Release plans:** up to 8 ordered tiers; SOL, USDC or any token
   - **Duress PIN:** silent on-chain lockdown
   - **Family Circle:** heirs see "checked in 2h ago"
@@ -108,7 +108,7 @@ This is the insight the whole product hangs on. Most dead-man switches make you 
 **Visual:** Three phone screenshots side by side: Pulse tab, release-plan editor, Family Circle.
 
 **Speaker notes:**
-One Anchor program holds the funds; everything else signs, schedules or routes. You can run several named plans, such as "Kids" or "Emergency fund". Each one is up to eight tiers, and each tier sends a fixed amount or a percentage of one asset to one person after a set period of silence. Beneficiaries open the same app and see your liveness and their own tiers. That gives them a reason to install it, and it gives you a reason to keep your streak. Everything on this slide runs in the program today. Private delivery and Earn need a mainnet build.
+One Anchor program holds the funds; everything else signs, schedules or routes. You can run several named plans, such as "Kids" or "Emergency fund". Each one is up to eight tiers, and each tier sends a fixed amount or a percentage of one asset to one person after a set period of silence. Beneficiaries open the same app and see your liveness and their own tiers. That gives them a reason to install it, and it gives you a reason to keep checking in. Everything on this slide runs in the program today. Private delivery and Earn need a mainnet build.
 
 ---
 
@@ -125,10 +125,10 @@ One Anchor program holds the funds; everything else signs, schedules or routes. 
   - **~0.0018 SOL** for a year of daily pulses at the 5,000-lamport base fee
 - **Source line:** `docs/HOW_IT_WORKS.md` §2, `docs/KORA.md`, `docs/PITCH_OUTLINE.md` §3
 
-**Visual:** Video still from beat 0:17–0:27: thumb on the sensor, the streak counter ticking up, and the countdown resetting.
+**Visual:** Video still from beat 0:17–0:27: thumb on the sensor, the tick ring refilling, and the countdown resetting.
 
 **Speaker notes:**
-Watch the screen: no Seed Vault pop-up appears. The device's guard key signs the check-in, and the streak goes up. Each pulse restarts every pending tier's clock. The phone doesn't even need SOL: a Kora node, the Solana Foundation's paymaster, pays the fee, but only for guard-signed check-ins and locks, behind a rate-limited gateway. This is our answer to the stickiness problem, because a proof-of-life app's core loop is "nothing happens". The streak, and family members who can see it, give everyone a reason to open the app.
+Watch the screen: no Seed Vault pop-up appears. The device's guard key signs the check-in, and the ring refills. Each pulse restarts every pending tier's clock. The phone doesn't even need SOL: a Kora node, the Solana Foundation's paymaster, pays the fee, but only for guard-signed check-ins and locks, behind a rate-limited gateway. This is our answer to the stickiness problem, because a proof-of-life app's core loop is "nothing happens". Family members who can see "checked in 2h ago" give everyone a reason to open the app.
 
 ---
 
@@ -241,7 +241,7 @@ The split of authority only works on a phone. The cold key sits in Seed Vault ha
 
 | Stream                   | Rate                                                         |
 | ------------------------ | ------------------------------------------------------------ |
-| **Release fee**          | 2% Solana rail, 5% private rails; 5% hard cap in the program |
+| **Release fee**          | 2% Solana rail, 3% private rails; 5% hard cap in the program |
 | **Earn** (SOL → JitoSOL) | Jupiter referral, at least 0.5%; Jupiter keeps 20%           |
 | **Later**                | Margin on the USDC fee paymaster                             |
 
@@ -250,7 +250,7 @@ The split of authority only works on a phone. The cold key sits in Seed Vault ha
 **Visual:** A clean table on a dark card. Put "5% hard cap" in alive green as the trust signal.
 
 **Speaker notes:**
-No subscription: setup is where inheritance products lose people. The fee lives in the program and is capped in code at 5%. Estimates only: $10M protected, 1% released a year, half of it privately, is about $3.5k a year (`HOW_IT_WORKS.md` §6). Earn makes about $4,000 per $1M swapped at 0.5% (`earn-jupiter-jito.md`). At $100M protected the release fee comes to about $20k–50k a year, plus Earn (`PITCH_OUTLINE.md` §7). To be candid, releases are rare, so the release fee stays small until protected assets are large. Earn and vesting releases happen on a schedule and bring revenue earlier. [No vesting revenue estimate exists yet.]
+No subscription: setup is where inheritance products lose people. The fee lives in the program and is capped in code at 5%. Estimates only: $10M protected, 1% released a year, half of it privately, is about $2.5k a year (`HOW_IT_WORKS.md` §6). Earn makes about $4,000 per $1M swapped at 0.5% (`earn-jupiter-jito.md`). At $100M protected the release fee comes to about $20k–30k a year, plus Earn (`PITCH_OUTLINE.md` §7). To be candid, releases are rare, so the release fee stays small until protected assets are large. Earn and vesting releases happen on a schedule and bring revenue earlier. [No vesting revenue estimate exists yet.]
 
 ---
 

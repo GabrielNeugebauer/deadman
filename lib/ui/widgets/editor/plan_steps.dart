@@ -1,13 +1,72 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
+import '../../../solana/codec.dart' show Limits;
 import '../../../solana/deadman_api.dart';
 import '../../../state/plan_draft.dart';
 import '../../rules_format.dart';
 import '../brand/brand.dart';
 
-/// Step progress: one track segment per step (signal up to the current
-/// one), the step number in mono and its name. Done steps can be tapped to
-/// go back.
+/// Glyphs for the editors' sections, drawn on the pixel cast's 11-cell
+/// grid (docs/brand/v2, page 9): the heart (from the cast) marks who gets
+/// it, these mark what and when.
+abstract final class EditorSprites {
+  /// "What they get": a coin.
+  static const coin = PixelSprite('coin', [
+    '...#####...',
+    '.#########.',
+    '.##.....##.',
+    '##.#####.##',
+    '##.#####.##',
+    '##.#####.##',
+    '##.#####.##',
+    '##.#####.##',
+    '.##.....##.',
+    '.#########.',
+    '...#####...',
+  ]);
+
+  /// "Timing": an hourglass, sand still on top.
+  static const hourglass = PixelSprite('hourglass', [
+    '###########',
+    '.#########.',
+    '..#######..',
+    '...#####...',
+    '....###....',
+    '.....#.....',
+    '....#.#....',
+    '...#...#...',
+    '..#..#..#..',
+    '.#..###..#.',
+    '###########',
+  ]);
+}
+
+/// "STEP 1/3": where an editor sits in its plan's steps, as a sticker.
+class StepSticker extends StatelessWidget {
+  const StepSticker({super.key, required this.step, required this.of});
+
+  /// 1-based.
+  final int step;
+  final int of;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Step $step of $of',
+    excludeSemantics: true,
+    // A sticker is a short pixel word; past 1.3x it would push the title
+    // out of the app bar. The step is in the semantics label in full.
+    child: MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: Sticker('Step $step/$of'),
+    ),
+  );
+}
+
+/// Step progress: one square-ended segment per step (pulse up to the
+/// current one) over the step's name. Done steps carry a check and can be
+/// tapped to go back.
 class StepHeader extends StatelessWidget {
   const StepHeader({
     super.key,
@@ -51,7 +110,6 @@ class StepHeader extends StatelessWidget {
                         vertical: DMSpace.sm,
                       ),
                       child: _StepCell(
-                        number: i + 1,
                         label: labels[i],
                         done: i < current,
                         now: i == current,
@@ -68,95 +126,68 @@ class StepHeader extends StatelessWidget {
 }
 
 class _StepCell extends StatelessWidget {
-  const _StepCell({
-    required this.number,
-    required this.label,
-    required this.done,
-    required this.now,
-  });
+  const _StepCell({required this.label, required this.done, required this.now});
 
-  final int number;
   final String label;
   final bool done;
   final bool now;
 
   @override
-  Widget build(BuildContext context) {
-    final reached = done || now;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          height: 3,
-          width: double.infinity,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: reached ? DM.signal : DM.track,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
-        const SizedBox(height: DMSpace.sm),
-        Row(
-          children: [
-            SizedBox(
-              width: 16,
-              child: done
-                  ? const Icon(Icons.check, size: 14, color: DM.signal)
-                  : Text(
-                      '$number',
-                      // Fixed-size marker; the step name next to it scales.
-                      textScaler: TextScaler.noScaling,
-                      style: DMType.mono(
-                        size: 12,
-                        weight: FontWeight.w500,
-                        color: now ? DM.signal : DM.mist,
-                      ),
-                    ),
-            ),
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      SizedBox(
+        height: 4,
+        width: double.infinity,
+        child: ColoredBox(color: done || now ? DM.pulse : DM.line),
+      ),
+      const SizedBox(height: DMSpace.sm),
+      Row(
+        children: [
+          if (done) ...[
+            const Icon(Icons.check, size: 14, color: DM.pulse),
             const SizedBox(width: DMSpace.xxs),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: DMType.outfit(
-                  size: 14,
-                  weight: now ? FontWeight.w600 : FontWeight.w500,
-                  color: now
-                      ? DM.bone
-                      : done
-                      ? DM.sub
-                      : DM.mist,
-                ),
+          ],
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: DMType.outfit(
+                size: 14,
+                weight: now ? FontWeight.w600 : FontWeight.w500,
+                color: now
+                    ? DM.bone
+                    : done
+                    ? DM.dust
+                    : DM.ash,
               ),
             ),
-          ],
-        ),
-      ],
-    );
-  }
+          ),
+        ],
+      ),
+    ],
+  );
 }
 
 /// Bottom action bar of the editors: a 1px line above, void below.
 class EditorBar extends StatelessWidget {
-  const EditorBar({super.key, required this.child, this.color = DM.void_});
+  const EditorBar({super.key, required this.child});
 
   final Widget child;
-  final Color color;
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: color,
-      border: const Border(top: BorderSide(color: DM.line)),
+    decoration: const BoxDecoration(
+      color: DM.void_,
+      border: Border(top: BorderSide(color: DM.line)),
     ),
     child: SafeArea(
       top: false,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
           DMSpace.gutter,
-          DMSpace.md,
+          DMSpace.lg,
           DMSpace.gutter,
           DMSpace.lg,
         ),
@@ -165,6 +196,33 @@ class EditorBar extends StatelessWidget {
     ),
   );
 }
+
+/// The editors' app bar: close or back, the title, optional [actions] and
+/// the step sticker, over a 1px line.
+PreferredSizeWidget editorAppBar({
+  required String title,
+  required int step,
+  required int steps,
+  Widget? leading,
+  List<Widget> actions = const [],
+}) => AppBar(
+  leading: leading,
+  title: Text(title),
+  titleSpacing: leading == null ? null : 0,
+  actions: [
+    ...actions,
+    Padding(
+      padding: const EdgeInsets.only(left: DMSpace.xs, right: DMSpace.gutter),
+      child: Center(
+        child: StepSticker(step: step, of: steps),
+      ),
+    ),
+  ],
+  bottom: const PreferredSize(
+    preferredSize: Size.fromHeight(1),
+    child: Divider(height: 1),
+  ),
+);
 
 /// AppBar, step header, scrollable body and a Back / primary bottom bar.
 /// System back runs [onPopBlocked] while [canPop] is false.
@@ -207,7 +265,17 @@ class StepScaffold extends StatelessWidget {
       if (!didPop && !busy) onPopBlocked();
     },
     child: Scaffold(
-      appBar: AppBar(title: Text(title)),
+      appBar: AppBar(
+        title: Text(title),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: DMSpace.gutter),
+            child: Center(
+              child: StepSticker(step: step + 1, of: steps.length),
+            ),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           StepHeader(
@@ -261,7 +329,7 @@ class StepScaffold extends StatelessWidget {
                         dimension: 20,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: DM.signal,
+                          color: DM.ash,
                         ),
                       )
                     : Text(primaryLabel, textAlign: TextAlign.center),
@@ -274,7 +342,85 @@ class StepScaffold extends StatelessWidget {
   );
 }
 
-/// The lead line under a step's header: one sentence in sub.
+/// One section of a payout or schedule editor, on the ground rather than in
+/// a card: a pixel figure in pulse, the title, then its fields. Sections
+/// after the first sit under a full-width line.
+class EditorSection extends StatelessWidget {
+  const EditorSection({
+    super.key,
+    required this.sprite,
+    required this.title,
+    required this.children,
+    this.first = false,
+  });
+
+  final PixelSprite sprite;
+  final String title;
+  final List<Widget> children;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (!first) ...[
+        const SizedBox(height: DMSpace.xxxl),
+        const Divider(height: 1),
+        const SizedBox(height: DMSpace.xxl),
+      ],
+      Row(
+        children: [
+          // Two-point cells for every figure, so heart, coin and
+          // tombstone share one pixel size whatever their row count.
+          PixelArt(sprite, size: sprite.height * 2.0, color: DM.pulse),
+          const SizedBox(width: DMSpace.md),
+          Expanded(
+            child: Semantics(
+              header: true,
+              child: Text(title, style: Theme.of(context).textTheme.titleLarge),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: DMSpace.xl),
+      ...children,
+    ],
+  );
+}
+
+/// A field with its label above it, as on the payout mockup ("Wallet
+/// address or claim code" over the input). Screen readers get the label
+/// on the input itself, not as a separate line before it.
+class LabeledField extends StatelessWidget {
+  const LabeledField({super.key, required this.label, required this.child});
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(bottom: DMSpace.sm),
+        child: ExcludeSemantics(
+          child: Text(
+            label,
+            style: DMType.outfit(
+              size: 15,
+              weight: FontWeight.w500,
+              color: DM.dust,
+            ),
+          ),
+        ),
+      ),
+      Semantics(label: label, child: child),
+    ],
+  );
+}
+
+/// The lead line under a step's header: one sentence in dust.
 class StepLead extends StatelessWidget {
   const StepLead(this.text, {super.key});
 
@@ -285,21 +431,28 @@ class StepLead extends StatelessWidget {
     padding: const EdgeInsets.only(bottom: DMSpace.lg),
     child: Text(
       text,
-      style: DMType.outfit(size: 15, color: DM.sub, height: 1.45),
+      style: DMType.outfit(size: 15, color: DM.dust, height: 1.45),
     ),
   );
 }
 
-/// The first-run block of a list: a title, one line and an add button.
+/// The first-run block of a list: a pixel figure (a [sprite], or a pack
+/// [icon] such as the heartbeat), a title, one line and an add button.
+/// The add button is outlined: the screen's one filled button is Next in
+/// the bar below.
 class EmptyStateCard extends StatelessWidget {
   const EmptyStateCard({
     super.key,
+    this.sprite,
+    this.icon,
     required this.title,
     required this.body,
     required this.addLabel,
     required this.onAdd,
-  });
+  }) : assert((sprite == null) != (icon == null));
 
+  final PixelSprite? sprite;
+  final DMIcons? icon;
   final String title;
   final String body;
   final String addLabel;
@@ -310,22 +463,28 @@ class EmptyStateCard extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: switch (icon) {
+            final icon? => DMIcon(icon, size: 48, color: DM.pulse),
+            null => PixelArt(sprite!, size: 40, color: DM.pulse),
+          },
+        ),
+        const SizedBox(height: DMSpace.lg),
         Text(title, style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: DMSpace.xs),
-        Text(body, style: DMType.outfit(size: 15, color: DM.sub, height: 1.45)),
-        const SizedBox(height: DMSpace.lg),
-        FilledButton.icon(
-          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
-          onPressed: onAdd,
-          icon: const Icon(Icons.add),
-          label: Text(addLabel),
+        Text(
+          body,
+          style: DMType.outfit(size: 15, color: DM.dust, height: 1.45),
         ),
+        const SizedBox(height: DMSpace.lg),
+        AddRowButton(label: addLabel, onTap: onAdd),
       ],
     ),
   );
 }
 
-/// The "+ Add a payout" row under a list: a text action in signal.
+/// The "+ Add a payout" button under a list: outlined, pulse label.
 class AddRowButton extends StatelessWidget {
   const AddRowButton({super.key, required this.label, required this.onTap});
 
@@ -335,16 +494,13 @@ class AddRowButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => OutlinedButton.icon(
     onPressed: onTap,
-    style: OutlinedButton.styleFrom(
-      foregroundColor: DM.signal,
-      backgroundColor: Colors.transparent,
-    ),
-    icon: const Icon(Icons.add),
+    style: OutlinedButton.styleFrom(foregroundColor: DM.pulse),
+    icon: const DMIcon(DMIcons.plus),
     label: Text(label),
   );
 }
 
-/// A small field-group label: "Which money", "How it arrives".
+/// A field-group label: "Which money", "How it arrives".
 class FieldLabel extends StatelessWidget {
   const FieldLabel(this.text, {super.key});
 
@@ -352,21 +508,19 @@ class FieldLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: DMSpace.sm),
+    padding: const EdgeInsets.only(bottom: DMSpace.md),
     child: Text(
       text,
-      style: DMType.outfit(size: 14, weight: FontWeight.w600, color: DM.sub),
+      style: DMType.outfit(size: 16, weight: FontWeight.w600, color: DM.haze),
     ),
   );
 }
 
-/// The step number of a section or review row: mono digit on a raised
-/// square.
+/// The number of a review row: mono digit on a raised square.
 class StepNumber extends StatelessWidget {
-  const StepNumber(this.number, {super.key, this.active = false});
+  const StepNumber(this.number, {super.key});
 
   final int number;
-  final bool active;
 
   @override
   Widget build(BuildContext context) => ExcludeSemantics(
@@ -374,7 +528,7 @@ class StepNumber extends StatelessWidget {
       dimension: 26,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: active ? DM.deep : DM.raise,
+          color: DM.raise,
           borderRadius: BorderRadius.circular(DMRadius.chip),
         ),
         child: Center(
@@ -384,7 +538,7 @@ class StepNumber extends StatelessWidget {
             style: DMType.mono(
               size: 12,
               weight: FontWeight.w500,
-              color: active ? DM.signal : DM.sub,
+              color: DM.dust,
             ),
           ),
         ),
@@ -393,17 +547,15 @@ class StepNumber extends StatelessWidget {
   );
 }
 
-/// A card with an optional numbered title ("1  Who gets it").
+/// A card with an optional title ("Plan").
 class SectionCard extends StatelessWidget {
   const SectionCard({
     super.key,
-    this.number,
     this.title,
     this.trailing,
     required this.children,
   });
 
-  final int? number;
   final String? title;
   final Widget? trailing;
   final List<Widget> children;
@@ -416,10 +568,6 @@ class SectionCard extends StatelessWidget {
         if (title != null) ...[
           Row(
             children: [
-              if (number != null) ...[
-                StepNumber(number!),
-                const SizedBox(width: DMSpace.md),
-              ],
               Expanded(
                 child: Semantics(
                   header: true,
@@ -441,10 +589,12 @@ class SectionCard extends StatelessWidget {
   );
 }
 
+/// Amber for what may go wrong, flatline for what will: the book's
+/// Missed ("Warning") and Flatline. Info stays neutral.
 Color severityColor(Severity s) => switch (s) {
-  Severity.error || Severity.danger => DM.due,
-  Severity.warn => DM.attention,
-  Severity.info => DM.sub,
+  Severity.error || Severity.danger => DM.flatline,
+  Severity.warn => DM.missed,
+  Severity.info => DM.dust,
 };
 
 IconData severityIcon(Severity s) => switch (s) {
@@ -528,7 +678,7 @@ class WarningTile extends StatelessWidget {
                     body,
                     style: DMType.outfit(
                       size: 14,
-                      color: title.isEmpty ? DM.bone : DM.sub,
+                      color: title.isEmpty ? DM.bone : DM.dust,
                       height: 1.4,
                     ),
                   ),
@@ -575,7 +725,7 @@ class IssueLine extends StatelessWidget {
             style: DMType.outfit(
               size: 14,
               weight: FontWeight.w500,
-              color: issue.severity == Severity.info ? DM.sub : color,
+              color: issue.severity == Severity.info ? DM.dust : color,
             ),
           ),
         ),
@@ -604,8 +754,13 @@ String railShort(Rail r) => switch (r) {
   Rail.zcash => 'Zcash',
 };
 
-/// One row of the rail picker: icon tile, name, what it means, its fee in
-/// mono on the right. The selected row sits on deep with a signal radio.
+/// The fee line of a rail card, from the on-chain FeeSchedule: "2% fee",
+/// "3% fee", or "No fee · monthly plan active".
+String railFeeLine(FeeInfo fee, Rail rail) =>
+    fee.waived ? 'No fee · monthly plan active' : fee.railLine(rail);
+
+/// One radio card of the rail picker ("How it arrives"): the rail's icon,
+/// name, what it means and its fee in mono.
 class RailOptionTile extends StatelessWidget {
   const RailOptionTile({
     super.key,
@@ -620,118 +775,26 @@ class RailOptionTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final String feeLine;
+
+  /// "mainnet only".
   final String? badge;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: DMSpace.sm),
-    child: Semantics(
-      inMutuallyExclusiveGroup: true,
-      checked: selected,
-      button: true,
-      child: Material(
-        color: selected ? DM.deep : DM.graphite,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(DMRadius.button),
-          side: BorderSide(color: selected ? DM.tide : DM.line),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 64),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                DMSpace.md,
-                DMSpace.md,
-                DMSpace.md,
-                DMSpace.md,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  IconTile(icon: rail.icon, size: 34),
-                  const SizedBox(width: DMSpace.md),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Wrap(
-                          spacing: DMSpace.sm,
-                          runSpacing: DMSpace.xxs,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            Text(
-                              railTitle(rail),
-                              style: DMType.outfit(
-                                size: 16,
-                                weight: FontWeight.w600,
-                              ),
-                            ),
-                            if (badge != null)
-                              DecoratedBox(
-                                decoration: BoxDecoration(
-                                  border: Border.all(color: DM.line),
-                                  borderRadius: BorderRadius.circular(
-                                    DMRadius.chip,
-                                  ),
-                                ),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: DMSpace.xs,
-                                    vertical: 2,
-                                  ),
-                                  child: Text(
-                                    badge!,
-                                    style: DMType.mono(
-                                      size: 11,
-                                      color: DM.sub,
-                                      spacing: 0.4,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: DMSpace.xxs),
-                        Text(
-                          railHelper(rail),
-                          style: DMType.outfit(
-                            size: 13.5,
-                            color: DM.sub,
-                            height: 1.35,
-                          ),
-                        ),
-                        const SizedBox(height: DMSpace.xs),
-                        Text(
-                          feeLine,
-                          style: DMType.mono(
-                            size: 12,
-                            color: selected ? DM.bone : DM.sub,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: DMSpace.sm),
-                  Icon(
-                    selected
-                        ? Icons.radio_button_checked
-                        : Icons.radio_button_off,
-                    color: selected ? DM.signal : DM.mist,
-                    size: 22,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+    padding: const EdgeInsets.only(bottom: DMSpace.md),
+    child: SelectCard(
+      selected: selected,
+      title: railTitle(rail),
+      icon: rail.icon,
+      body: railHelper(rail),
+      footnote: feeLine,
+      tag: badge == null ? null : DMTag(label: badge!, mono: true),
+      onTap: onTap,
     ),
   );
 }
 
-/// A small outlined rail tag for cards: "⚡ Normal".
+/// A small outlined rail tag for cards: "Normal" with its icon.
 class RailChip extends StatelessWidget {
   const RailChip(this.rail, {super.key});
 
@@ -814,7 +877,7 @@ class CostRow extends StatelessWidget {
       children: [
         Expanded(
           flex: 2,
-          child: Text(label, style: DMType.outfit(size: 14, color: DM.sub)),
+          child: Text(label, style: DMType.outfit(size: 14, color: DM.dust)),
         ),
         const SizedBox(width: DMSpace.md),
         Expanded(
@@ -847,7 +910,10 @@ class LivePreview extends StatelessWidget {
     children: [
       Semantics(
         liveRegion: true,
-        child: Text.rich(text, style: DMType.outfit(size: 15, height: 1.4)),
+        child: Text.rich(
+          text,
+          style: DMType.outfit(size: 16, color: DM.haze, height: 1.45),
+        ),
       ),
       if (issue != null)
         InkWell(
@@ -858,7 +924,7 @@ class LivePreview extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(child: IssueLine(issue!)),
-                const Icon(Icons.chevron_right, color: DM.mist, size: 20),
+                const DMIcon(DMIcons.chevronRight, color: DM.ash),
               ],
             ),
           ),
@@ -867,85 +933,89 @@ class LivePreview extends StatelessWidget {
   );
 }
 
-/// A decorative line from the last check-in: a tick where the next
-/// check-in is due and a dot where this payout runs.
+/// The payout's wait laid out as the Pulse ring's ticks, flat: pulse while
+/// the clock runs from the last check-in, a tall flatline tick where this
+/// payout is sent, dim after. The sent tick sits on a log scale from a
+/// minute to 3 years. Decorative; the sentence under it says the same in
+/// words.
 class DelayStrip extends StatelessWidget {
-  const DelayStrip({
-    super.key,
-    required this.intervalSecs,
-    required this.delaySecs,
-  });
+  const DelayStrip({super.key, required this.delaySecs});
 
-  final int intervalSecs;
   final int delaySecs;
 
   @override
   Widget build(BuildContext context) => ExcludeSemantics(
     child: SizedBox(
-      height: 40,
+      height: 32,
       width: double.infinity,
-      child: CustomPaint(painter: _StripPainter(intervalSecs, delaySecs)),
+      child: CustomPaint(
+        painter: _StripPainter(
+          delaySecs,
+          MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
+        ),
+      ),
     ),
   );
 }
 
 class _StripPainter extends CustomPainter {
-  _StripPainter(this.interval, this.delay);
+  _StripPainter(this.delay, this.dpr);
 
-  final int interval;
   final int delay;
+  final double dpr;
+
+  /// Snaps to whole device pixels, like the ring and the pixel figures.
+  double _px(double v) => (v * dpr).roundToDouble() / dpr;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const y = 20.0;
-    const pad = 8.0;
-    final span = (delay > interval ? delay : interval) * 1.1;
-    double x(int secs) => pad + (size.width - 2 * pad) * secs / span;
-    final stroke = Paint()
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      const Offset(pad, y),
-      Offset(size.width - pad, y),
-      stroke..color = DM.track,
-    );
-    canvas.drawLine(
-      const Offset(pad, y),
-      Offset(x(delay), y),
-      stroke..color = DM.tide,
-    );
-    canvas.drawCircle(const Offset(pad, y), 4, Paint()..color = DM.sub);
-    final tick = x(interval);
-    canvas.drawLine(
-      Offset(tick, y - 7),
-      Offset(tick, y + 7),
-      Paint()
-        ..color = DM.attention
-        ..strokeWidth = 2,
-    );
-    canvas.drawCircle(Offset(x(delay), y), 6, Paint()..color = DM.signal);
-    canvas.drawCircle(Offset(x(delay), y), 2.5, Paint()..color = DM.void_);
+    const slot = 8.0;
+    final n = (size.width / slot).floor();
+    if (n < 2) return;
+    final step = size.width / n;
+    final tick = _px(step * 0.62);
+    final f =
+        math.log(math.max(delay, 60) / 60) /
+        math.log(Limits.maxRuleDelaySecs / 60);
+    final sent = (f.clamp(0.0, 1.0) * (n - 1)).round().clamp(1, n - 1);
+    final paint = Paint()..isAntiAlias = false;
+    for (var i = 0; i < n; i++) {
+      final x = _px(i * step);
+      final isSent = i == sent;
+      paint.color = isSent
+          ? DM.flatline
+          : i > sent
+          ? DM.line
+          : DM.pulse;
+      final h = isSent ? size.height : 12.0;
+      canvas.drawRect(
+        Rect.fromLTWH(x, _px((size.height - h) / 2), tick, h),
+        paint,
+      );
+    }
   }
 
   @override
-  bool shouldRepaint(_StripPainter old) =>
-      old.interval != interval || old.delay != delay;
+  bool shouldRepaint(_StripPainter old) => old.delay != delay || old.dpr != dpr;
 }
 
-/// One node of a vertical timeline; [label] is a time ("After 10 days of
-/// silence") and reads in mono.
+/// One node of a vertical timeline; [label] is a time ("Sent 10 days after
+/// your last check-in") and reads in mono. [marker] replaces the square dot, e.g. with
+/// the pixel heart on "Last check-in".
 class TimelineEntry extends StatelessWidget {
   const TimelineEntry({
     super.key,
     required this.label,
     this.child,
     this.dot = DM.line,
+    this.marker,
     this.last = false,
   });
 
   final String label;
   final Widget? child;
   final Color dot;
+  final Widget? marker;
   final bool last;
 
   @override
@@ -964,7 +1034,7 @@ class TimelineEntry extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (label.isNotEmpty)
-              Text(label, style: DMType.mono(size: 12.5, color: DM.sub)),
+              Text(label, style: DMType.mono(size: 12.5, color: DM.dust)),
             if (child != null) ...[
               if (label.isNotEmpty) const SizedBox(height: DMSpace.sm),
               child!,
@@ -973,17 +1043,11 @@ class TimelineEntry extends StatelessWidget {
         ),
       ),
       Positioned(
-        left: 1,
-        top: 4,
-        child: SizedBox.square(
-          dimension: 9,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: dot,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
+        left: marker == null ? 1 : 0,
+        top: marker == null ? 4 : 2,
+        child:
+            marker ??
+            SizedBox.square(dimension: 9, child: ColoredBox(color: dot)),
       ),
     ],
   );
@@ -1009,7 +1073,11 @@ class AckBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) => TweenAnimationBuilder<double>(
     key: ValueKey(shake),
-    tween: Tween(begin: shake == 0 ? 1 : 0, end: 1),
+    // No shake with reduced motion; the error line below still shows.
+    tween: Tween(
+      begin: shake == 0 || MediaQuery.disableAnimationsOf(context) ? 1 : 0,
+      end: 1,
+    ),
     duration: const Duration(milliseconds: 400),
     builder: (context, t, child) => Transform.translate(
       offset: Offset(8 * (1 - t) * _wave(t), 0),
@@ -1030,7 +1098,7 @@ class AckBox extends StatelessWidget {
             padding: const EdgeInsets.only(left: DMSpace.xxs),
             child: Text(
               error!,
-              style: DMType.outfit(size: 13.5, color: DM.due),
+              style: DMType.outfit(size: 13.5, color: DM.flatline),
             ),
           ),
       ],
@@ -1041,7 +1109,8 @@ class AckBox extends StatelessWidget {
 }
 
 /// A [ChoiceChip] in the editor's language: the selected chip sits on deep
-/// with a signal label. [mono] sets durations and amounts in mono.
+/// with a pulse label and border. [mono] sets durations and amounts in
+/// mono.
 ChoiceChip pickChip({
   Key? key,
   required String label,
@@ -1051,9 +1120,9 @@ ChoiceChip pickChip({
   bool mono = false,
 }) {
   final color = onSelected == null
-      ? DM.mist
+      ? DM.ash
       : selected
-      ? DM.signal
+      ? DM.pulse
       : DM.bone;
   return ChoiceChip(
     key: key,
@@ -1063,7 +1132,7 @@ ChoiceChip pickChip({
     avatar: avatar,
     showCheckmark: false,
     materialTapTargetSize: MaterialTapTargetSize.padded,
-    side: BorderSide(color: selected ? DM.tide : DM.line),
+    side: BorderSide(color: selected ? DM.pulse : DM.line),
     labelStyle: mono
         ? DMType.mono(size: 13, weight: FontWeight.w500, color: color)
         : DMType.outfit(size: 14, weight: FontWeight.w500, color: color),

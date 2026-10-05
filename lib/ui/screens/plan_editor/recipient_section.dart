@@ -46,7 +46,8 @@ class Recipient {
   }
 }
 
-/// "1  Who gets it": address or claim code, local name, and rail tiles.
+/// "Who gets it": address or claim code, a local name and the rail cards,
+/// as on the brand book's "New payout" mockup.
 class RecipientSection extends StatelessWidget {
   const RecipientSection({
     super.key,
@@ -86,44 +87,49 @@ class RecipientSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = recipient;
     final private = r.rail != Rail.solana;
-    return SectionCard(
-      number: 1,
+    return EditorSection(
+      first: true,
+      sprite: PixelSprites.heart,
       title: 'Who gets it',
       children: [
-        TextField(
-          controller: r.address,
-          focusNode: r.focus,
-          onChanged: (_) {
-            r.applyClaimCode();
-            onChanged();
-          },
-          style: DMType.mono(size: 14),
-          decoration: InputDecoration(
-            labelText: private
-                ? 'Their claim code'
-                : 'Their wallet address or claim code',
-            hintText: 'Solana address, or zcash:… / cloak:…',
-            helperText: private
-                ? 'Ask them to open Deadman → Security → Receive privately '
-                      'and send you the code.'
-                : null,
-            helperMaxLines: 3,
-            errorText: error,
-            errorMaxLines: 2,
-            suffixIcon: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (loading)
-                  const SizedBox.square(
-                    dimension: 12,
-                    child: CircularProgressIndicator(strokeWidth: 1.5),
-                  ),
-                IconButton(
-                  tooltip: 'Paste',
-                  onPressed: _paste,
-                  icon: const Icon(Icons.content_paste),
+        LabeledField(
+          label: private ? 'Their claim code' : 'Wallet address or claim code',
+          child: TextField(
+            key: const ValueKey('recipient-address'),
+            controller: r.address,
+            focusNode: r.focus,
+            onChanged: (_) {
+              r.applyClaimCode();
+              onChanged();
+            },
+            style: DMType.mono(size: 14),
+            decoration: InputDecoration(
+              hintText: private ? 'zcash:… or cloak:…' : 'Paste an address',
+              hintStyle: DMType.mono(size: 14, color: DM.ash),
+              helperText: private
+                  ? 'Ask them to open Deadman → Security → Receive privately '
+                        'and send you the code.'
+                  : null,
+              helperMaxLines: 3,
+              errorText: error,
+              errorMaxLines: 2,
+              suffixIcon: Padding(
+                padding: const EdgeInsets.only(right: DMSpace.xs),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (loading)
+                      const Padding(
+                        padding: EdgeInsets.only(right: DMSpace.sm),
+                        child: SizedBox.square(
+                          dimension: 12,
+                          child: CircularProgressIndicator(strokeWidth: 1.5),
+                        ),
+                      ),
+                    _PasteButton(onPressed: _paste),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -133,7 +139,7 @@ class RecipientSection extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.check_circle, size: 18, color: DM.signal),
+                const Icon(Icons.check_circle, size: 18, color: DM.pulse),
                 const SizedBox(width: DMSpace.sm),
                 Expanded(
                   child: Text(
@@ -150,26 +156,31 @@ class RecipientSection extends StatelessWidget {
             ),
           ),
         if (notice != null) WarningTile.of(notice!),
-        const SizedBox(height: DMSpace.lg),
-        TextField(
-          controller: r.name,
-          maxLength: ContactNames.maxLength,
-          onChanged: (_) => onChanged(),
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(
-            labelText: 'Their name (optional)',
-            helperText:
-                'Only saved on this phone, to make your plan easier to read.',
-            helperMaxLines: 4,
+        const SizedBox(height: DMSpace.xl),
+        LabeledField(
+          label: 'Their name (optional)',
+          child: TextField(
+            key: const ValueKey('recipient-name'),
+            controller: r.name,
+            maxLength: ContactNames.maxLength,
+            onChanged: (_) => onChanged(),
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              hintText: 'e.g. Mom',
+              helperText:
+                  'Only saved on this phone, to make your plan easier to read.',
+              helperMaxLines: 4,
+              counterStyle: DMType.mono(size: 12, color: DM.ash),
+            ),
           ),
         ),
-        const SizedBox(height: DMSpace.md),
+        const SizedBox(height: DMSpace.xl),
         const FieldLabel('How it arrives'),
         for (final rail in Rail.values)
           RailOptionTile(
             rail: rail,
             selected: r.rail == rail,
-            feeLine: fee.railLine(rail),
+            feeLine: railFeeLine(fee, rail),
             badge: rail != Rail.solana && !privateLive ? 'mainnet only' : null,
             onTap: () {
               r.rail = rail;
@@ -179,4 +190,28 @@ class RecipientSection extends StatelessWidget {
       ],
     );
   }
+}
+
+/// The square paste button inside the address field.
+class _PasteButton extends StatelessWidget {
+  const _PasteButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    tooltip: 'Paste',
+    onPressed: onPressed,
+    style: IconButton.styleFrom(
+      backgroundColor: DM.grave,
+      foregroundColor: DM.bone,
+      fixedSize: const Size.square(44),
+      minimumSize: const Size.square(44),
+      tapTargetSize: MaterialTapTargetSize.padded,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(DMRadius.tile),
+      ),
+    ),
+    icon: const Icon(Icons.content_paste_rounded, size: 20),
+  );
 }

@@ -6,7 +6,7 @@ pub enum DeadmanError {
     Unauthorized,
     #[msg("Fee exceeds the 5% cap")]
     FeeTooHigh,
-    #[msg("Interval or lock duration out of range")]
+    #[msg("Lock or grace duration out of range")]
     InvalidDuration,
     #[msg("Rules must be 1-8, sorted by delay, with valid amounts and beneficiaries")]
     InvalidRules,
@@ -32,7 +32,7 @@ pub enum DeadmanError {
     NoGuardian,
     #[msg("Guardian lockdown is cooling down")]
     GuardianCooldown,
-    #[msg("Every tier of this plan has released; check-ins are closed")]
+    #[msg("Every tier of this plan has released; it can no longer be checked in on or changed")]
     PlanCompleted,
     #[msg("Plan label is too long")]
     LabelTooLong,

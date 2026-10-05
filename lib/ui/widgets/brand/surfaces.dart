@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/tokens.dart';
-import 'labels.dart';
 
-/// Graphite card with a 1px line border. Cards never nest: group rows with
+/// Grave card with a 1px line border. Cards never nest: group rows with
 /// [DMListGroup] and separate blocks inside a card with a [Divider].
 class DMCard extends StatelessWidget {
   const DMCard({
@@ -19,14 +18,14 @@ class DMCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   /// Only for the panic / alert card, which takes a faint status border
-  /// (e.g. `DM.due.withValues(alpha: 0.35)`); the fill stays graphite.
+  /// (e.g. `DM.flatline.withValues(alpha: 0.35)`); the fill stays grave.
   final Color borderColor;
 
   @override
   Widget build(BuildContext context) {
     final body = Padding(padding: padding, child: child);
     return Material(
-      color: DM.graphite,
+      color: DM.grave,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(DMRadius.card),
@@ -38,7 +37,7 @@ class DMCard extends StatelessWidget {
 }
 
 /// One card holding rows split by full-width 1px lines (Security's
-/// "Owner wallet / Guard key", the rail picker).
+/// "Owner wallet / Guard key").
 class DMListGroup extends StatelessWidget {
   const DMListGroup({
     super.key,
@@ -134,7 +133,7 @@ class DMListRow extends StatelessWidget {
                     sub,
                     style: monoSubtitle
                         ? DMType.data(size: 12.5)
-                        : DMType.outfit(size: 14, color: DM.sub),
+                        : DMType.outfit(size: 14, color: DM.dust),
                   ),
                 ],
               ],
@@ -154,14 +153,17 @@ class DMListRow extends StatelessWidget {
   }
 }
 
-/// Raised square holding an icon. [tone] tints it (the panic tile uses
-/// [DM.due]); otherwise it is raise + bone.
+/// Square holding an icon, sunk into the card in void (as on the payout
+/// editor's rail cards). [tone] tints it (the panic tile uses
+/// [DM.flatline]). [child] replaces the icon, e.g. with a [PixelArt].
 class IconTile extends StatelessWidget {
-  const IconTile({super.key, required this.icon, this.tone, this.size = 36});
+  const IconTile({super.key, this.icon, this.tone, this.size = 36, this.child})
+    : assert(icon != null || child != null);
 
-  final IconData icon;
+  final IconData? icon;
   final Color? tone;
   final double size;
+  final Widget? child;
 
   @override
   Widget build(BuildContext context) {
@@ -170,71 +172,232 @@ class IconTile extends StatelessWidget {
       dimension: size,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: tone == null ? DM.raise : tone.withValues(alpha: 0.14),
+          color: tone == null ? DM.void_ : tone.withValues(alpha: 0.14),
           borderRadius: BorderRadius.circular(size * 0.25),
         ),
-        child: Icon(icon, size: size * 0.5, color: tone ?? DM.bone),
+        child: Center(
+          child: child ?? Icon(icon, size: size * 0.5, color: tone ?? DM.bone),
+        ),
       ),
     );
   }
 }
 
-/// One cell of [StatTiles]: mono value over a mono caps label.
-class StatTile extends StatelessWidget {
-  const StatTile({
+/// The square app-bar button from the Pulse mockups (the skull button):
+/// grave, 1px line, 44 visible inside a 48 touch target. [badge] adds a
+/// count, e.g. the number of release plans.
+class DMSquareButton extends StatelessWidget {
+  const DMSquareButton({
     super.key,
-    required this.value,
-    required this.label,
-    this.color = DM.bone,
+    required this.child,
+    required this.onPressed,
+    required this.tooltip,
+    this.badge,
+    this.selected = false,
   });
 
-  final String value;
-  final String label;
-  final Color color;
+  final Widget child;
+  final VoidCallback? onPressed;
 
-  @override
-  Widget build(BuildContext context) => Semantics(
-    label: '$label: $value',
-    excludeSemantics: true,
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(value, maxLines: 1, style: DMType.stat(color: color)),
-          ),
-          const SizedBox(height: 8),
-          MonoLabel(label, maxLines: 1),
-        ],
-      ),
-    ),
-  );
-}
+  /// Also the button's accessible name.
+  final String tooltip;
 
-/// The 3-up row under the check-in button: DAY STREAK / BEST / PLAN.
-class StatTiles extends StatelessWidget {
-  const StatTiles({super.key, required this.children});
+  /// Count shown on a pulse badge; null or 0 hides it.
+  final int? badge;
 
-  final List<StatTile> children;
+  /// Deep fill and pulse border while the screen it opens is showing.
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    final cells = <Widget>[];
-    for (final tile in children) {
-      if (cells.isNotEmpty) {
-        cells.add(
-          const VerticalDivider(width: 1, thickness: 1, color: DM.line),
-        );
-      }
-      cells.add(Expanded(child: tile));
-    }
-    return DMCard(
-      padding: EdgeInsets.zero,
-      child: IntrinsicHeight(child: Row(children: cells)),
+    final count = badge ?? 0;
+    final face = Material(
+      color: selected ? DM.deep : DM.grave,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(DMRadius.button),
+        side: BorderSide(color: selected ? DM.pulse : DM.line),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onPressed,
+        child: SizedBox.square(dimension: 44, child: Center(child: child)),
+      ),
+    );
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        enabled: onPressed != null,
+        label: count > 0 ? '$tooltip, $count' : tooltip,
+        excludeSemantics: true,
+        onTap: onPressed,
+        child: SizedBox.square(
+          dimension: 48,
+          child: Center(
+            child: count > 0
+                ? Badge(
+                    label: Text('$count'),
+                    offset: const Offset(-2, -2),
+                    child: face,
+                  )
+                : face,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Radio card for a choice that needs a sentence of explanation (the
+/// payout editor's "How it arrives"). Selected: deep fill, pulse border,
+/// pulse footnote. Group several in a Column with 12 between them.
+class SelectCard extends StatelessWidget {
+  const SelectCard({
+    super.key,
+    required this.selected,
+    required this.title,
+    required this.onTap,
+    this.icon,
+    this.body,
+    this.footnote,
+    this.tag,
+  });
+
+  final bool selected;
+  final String title;
+
+  /// Null disables the card.
+  final VoidCallback? onTap;
+  final IconData? icon;
+  final String? body;
+
+  /// Mono line under the body: "No fee · monthly plan active".
+  final String? footnote;
+
+  /// Beside the title, e.g. `DMTag(label: 'mainnet only', mono: true)`.
+  final Widget? tag;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final body = this.body;
+    final footnote = this.footnote;
+    final card = Material(
+      color: selected ? DM.deep : DM.grave,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(DMRadius.card),
+        side: BorderSide(
+          color: selected ? DM.pulse : DM.line,
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 14, 16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (icon != null) ...[
+                IconTile(
+                  size: 44,
+                  child: Icon(
+                    icon,
+                    size: 22,
+                    color: selected ? DM.pulse : DM.bone,
+                  ),
+                ),
+                const SizedBox(width: 14),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          title,
+                          style: DMType.outfit(
+                            size: 17,
+                            weight: FontWeight.w700,
+                            color: enabled ? DM.bone : DM.ash,
+                          ),
+                        ),
+                        ?tag,
+                      ],
+                    ),
+                    if (body != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        body,
+                        style: DMType.outfit(
+                          size: 14.5,
+                          color: DM.dust,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                    if (footnote != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        footnote,
+                        style: DMType.data(
+                          size: 12.5,
+                          color: selected ? DM.pulse : DM.haze,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              _RadioDot(selected: selected, enabled: enabled),
+            ],
+          ),
+        ),
+      ),
+    );
+    return Semantics(
+      inMutuallyExclusiveGroup: true,
+      checked: selected,
+      enabled: enabled,
+      child: card,
+    );
+  }
+}
+
+class _RadioDot extends StatelessWidget {
+  const _RadioDot({required this.selected, required this.enabled});
+
+  final bool selected;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? DM.pulse : (enabled ? DM.ash : DM.line);
+    return SizedBox.square(
+      dimension: 24,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: color, width: 2),
+        ),
+        child: selected
+            ? Padding(
+                padding: const EdgeInsets.all(5),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: color,
+                  ),
+                ),
+              )
+            : null,
+      ),
     );
   }
 }

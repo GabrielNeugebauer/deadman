@@ -161,6 +161,8 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           demo: _demo,
           startAt: _startAt(nowSecs()),
           periodSecs: _period,
+          step: _step + 1,
+          steps: _steps.length,
         ),
       ),
     );
@@ -393,7 +395,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   }
 
   List<Widget> _schedulesStep() {
-    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.45);
+    final muted = DMType.outfit(size: 14, color: DM.dust, height: 1.45);
     final start = _startAt(nowSecs());
     return [
       const StepLead(
@@ -403,15 +405,18 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
       SectionCard(
         title: 'Plan',
         children: [
-          TextField(
-            key: _labelKey,
-            controller: _label,
-            maxLength: 32,
-            onChanged: (_) => setState(() {}),
-            decoration: InputDecoration(
-              labelText: 'Plan name',
-              hintText: 'e.g. Team grants, Allowance',
-              errorText: _check ? labelError(_label.text)?.body : null,
+          LabeledField(
+            label: 'Plan name',
+            child: TextField(
+              key: _labelKey,
+              controller: _label,
+              maxLength: 32,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                hintText: 'e.g. Team grants, Allowance',
+                counterStyle: DMType.mono(size: 12, color: DM.ash),
+                errorText: _check ? labelError(_label.text)?.body : null,
+              ),
             ),
           ),
           const SizedBox(height: DMSpace.xs),
@@ -426,10 +431,10 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                 onSelected: (_) => setState(() => _startDate = null),
               ),
               pickChip(
-                avatar: Icon(
-                  Icons.event,
-                  size: 16,
-                  color: _startDate != null ? DM.signal : DM.sub,
+                avatar: DMIcon(
+                  DMIcons.calendar,
+                  size: 18,
+                  color: _startDate != null ? DM.pulse : DM.dust,
                 ),
                 label: _startDate == null
                     ? 'Pick a date'
@@ -494,7 +499,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           ),
           const SizedBox(height: DMSpace.sm),
           if (_periodError case final error?)
-            Text(error, style: DMType.outfit(size: 14, color: DM.due))
+            Text(error, style: DMType.outfit(size: 14, color: DM.flatline))
           else
             Text(
               _period == 0
@@ -527,6 +532,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           children: [
             if (_schedules.isEmpty)
               EmptyStateCard(
+                sprite: EditorSprites.coin,
                 title: 'Add your first schedule',
                 body:
                     'Choose who receives money, how much, and how fast it '
@@ -541,7 +547,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                 padding: const EdgeInsets.only(top: DMSpace.sm),
                 child: Text(
                   'Add at least one schedule.',
-                  style: DMType.outfit(size: 14, color: DM.due),
+                  style: DMType.outfit(size: 14, color: DM.flatline),
                 ),
               ),
           ],
@@ -663,7 +669,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         children: [
           Text(
             'Starts $start. You ${_revocable ? 'can stop future unlocking at any time' : 'can never stop these schedules or take back what they owe'}.',
-            style: DMType.outfit(size: 15, color: DM.sub, height: 1.45),
+            style: DMType.outfit(size: 15, color: DM.dust, height: 1.45),
           ),
         ],
       ),
@@ -791,7 +797,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         'One wallet approval creates the plan and makes your deposits. Anyone '
         'can trigger a release once an amount has unlocked; it always goes to '
         "the schedule's beneficiary.",
-        style: DMType.outfit(size: 13.5, color: DM.sub, height: 1.4),
+        style: DMType.outfit(size: 13.5, color: DM.dust, height: 1.4),
       ),
     ];
   }
@@ -817,7 +823,7 @@ class _ScheduleSummaryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = schedule;
     final cliffAt = s.durationSecs == 0 ? 0.0 : s.cliffSecs / s.durationSecs;
-    final small = DMType.mono(size: 11, color: DM.mist, spacing: 0.4);
+    final small = DMType.mono(size: 11, color: DM.ash, spacing: 0.4);
     return Semantics(
       button: true,
       label: 'Schedule $number, edit',
@@ -841,7 +847,7 @@ class _ScheduleSummaryCard extends StatelessWidget {
                   ),
                 ),
                 RailChip(s.rail),
-                const Icon(Icons.chevron_right, color: DM.mist),
+                const DMIcon(DMIcons.chevronRight, color: DM.ash),
               ],
             ),
             const SizedBox(height: DMSpace.xs),
@@ -869,7 +875,7 @@ class _ScheduleSummaryCard extends StatelessWidget {
                   Text(
                     'over ${durationLabel(s.durationSecs)}'
                     '${s.cliffSecs == 0 ? '' : ', nothing for the first ${durationLabel(s.cliffSecs)}'}',
-                    style: DMType.outfit(size: 14, color: DM.sub),
+                    style: DMType.outfit(size: 14, color: DM.dust),
                   ),
                   if (installmentsText(
                         s,
@@ -884,7 +890,7 @@ class _ScheduleSummaryCard extends StatelessWidget {
                     ),
                   const SizedBox(height: DMSpace.md),
                   VestingBar(
-                    color: DM.signal,
+                    color: DM.pulse,
                     progress: previewProgress(
                       total: s.total,
                       vested: 0,

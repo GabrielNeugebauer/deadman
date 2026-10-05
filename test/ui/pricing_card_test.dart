@@ -16,7 +16,7 @@ Future<void> _pump(WidgetTester tester, SubscriptionTerms? terms) async {
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
-            feeBpsPrivate: 500,
+            feeBpsPrivate: 300,
           ),
         ),
         subscriptionTermsProvider.overrideWith((ref) async => terms),
@@ -46,7 +46,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.bySemanticsLabel('Via Solana: 2%'), findsOneWidget);
-    expect(find.bySemanticsLabel('Via Cloak or Zcash: 5%'), findsOneWidget);
+    expect(find.bySemanticsLabel('Via Cloak or Zcash: 3%'), findsOneWidget);
     expect(
       find.textContaining(
         'Or pay 10 USDC a month and releases carry no fee: one subscription '

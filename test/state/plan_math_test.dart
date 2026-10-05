@@ -112,9 +112,9 @@ void main() {
       expect(s.pending, isEmpty);
     });
 
-    test('a fully released plan starts fresh', () {
+    test('a fully released plan keeps its history (it is final)', () {
       final s = splitRules(vault(rules: [rule(executedAt: 5)]));
-      expect(s.history, isEmpty);
+      expect(s.history, hasLength(1));
       expect(s.pending, isEmpty);
     });
   });

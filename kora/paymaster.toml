@@ -1,5 +1,5 @@
 # Deadman PAYMASTER node (Kora 2.0.5), port 8091, API key required.
-# Owners without SOL pay the network fee (and, for create_vault /
+# Owners without SOL pay the network fee (and, for create_plan /
 # create_vesting, the vault rent) in USDC. Only tool/kora_gateway.dart (public
 # :8081) holds the key; it forwards owner-signed Deadman, deposit and payment
 # instructions only, and requires the LAST instruction to be the USDC payment.
@@ -79,7 +79,7 @@ token = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 strict = false
 
 # The fee payer may only fund account creation (Anchor `init` CPI with
-# payer = Kora in create_vault / create_vesting). Everything else is denied.
+# payer = Kora in create_plan / create_vesting). Everything else is denied.
 [validation.fee_payer_policy.system]
 allow_transfer = false
 allow_assign = false

@@ -32,15 +32,15 @@ Older Sapling `zs` addresses are not supported, per SwapKit. The route only acce
 
 I did not need an alternative such as Maya or THORChain, because NEAR Intents works for this.
 
-## Fees (matters for the 2%/5% plan)
+## Fees (matters for the 2%/3% plan)
 
 - The API supports app fees: `appFees: [{recipient, fee}]`, where `fee` is a whole number of bps taken from the input. `recipient` must be a NEAR Intents account, either named or the 64-hex form of an Ed25519 public key (https://docs.near-intents.org/integration/distribution-channels/1click-api/fee-config.md).
 - **What I observed live, without a token:** the `fee` you send is the **total** charge, and it is split 50/50 with 1Click. Sending 200 gave Deadman 100 bps; 400 gave 200; 500 gave 250. The total cap is 500 bps. The docs say that without a token you keep your full fee and 1Click adds 25 on top, which is not what happened.
 - **Consequences:**
   - A 2% fee for Deadman through this rail costs the beneficiary 4%.
-  - A 5% fee for Deadman through this rail is impossible; the most Deadman can get is 2.5%.
+  - A 3% fee for Deadman through this rail is impossible; the most Deadman can get is 2.5%.
   - Fees land as balances inside NEAR Intents, not in a Solana wallet.
-  - My recommendation: charge the 2–5% protocol fee on-chain in the Deadman program when a rule fires, and keep this rail's fee small.
+  - My recommendation: charge the 2–3% protocol fee on-chain in the Deadman program when a rule fires, and keep this rail's fee small.
 - Settings at the top of the file:
   - `zcashAppFeeBps = 100`.
   - `zcashAppFeeRecipient = ''` with `// TODO(treasury)`. While it is empty, no `appFees` are sent.

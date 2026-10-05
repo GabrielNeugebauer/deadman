@@ -5,6 +5,7 @@ import 'package:deadman/state/secure_store.dart';
 import 'package:deadman/ui/screens/settings_tab.dart';
 import 'package:deadman/ui/theme.dart';
 import 'package:deadman/ui/widgets/brand/brand.dart';
+import 'package:deadman/ui/widgets/pack_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,7 +23,6 @@ VaultState _lockedPlan(int lockedUntil) {
     label: v.label,
     guard: v.guard,
     guardian: v.guardian,
-    intervalSecs: v.intervalSecs,
     lockSecs: v.lockSecs,
     skipGraceSecs: v.skipGraceSecs,
     lastPulse: v.lastPulse,
@@ -72,7 +72,7 @@ class _Harness {
             (ref) async => FeeSchedule(
               treasury: addr(9),
               feeBpsPublic: 200,
-              feeBpsPrivate: 500,
+              feeBpsPrivate: 300,
             ),
           ),
           subscriptionTermsProvider.overrideWith((ref) async => null),
@@ -115,7 +115,14 @@ void main() {
         find.descendant(of: chip, matching: find.text('UNLOCKED')),
         findsOne,
       );
-      expect(tester.widget<StatusChip>(chip).status, DMStatus.onTrack);
+      final sticker = tester.widget<StatusSticker>(chip);
+      expect(sticker.status, DMStatus.alive);
+      // The alive skull belongs to check-ins, not to the lock state.
+      expect(sticker.showSprite, isFalse);
+      expect(
+        find.descendant(of: chip, matching: find.byType(PixelArt)),
+        findsNothing,
+      );
     });
 
     testWidgets('LOCKED, in the locked color, during a lockdown', (
@@ -126,7 +133,12 @@ void main() {
         find.descendant(of: chip, matching: find.text('LOCKED')),
         findsOne,
       );
-      expect(tester.widget<StatusChip>(chip).status, DMStatus.locked);
+      expect(tester.widget<StatusSticker>(chip).status, DMStatus.locked);
+      final lock = tester.widget<PixelArt>(
+        find.descendant(of: chip, matching: find.byType(PixelArt)),
+      );
+      expect(lock.sprite, PixelSprites.lock);
+      expect(lock.color, DM.bone);
     });
 
     testWidgets('a duress session never shows the lock it sent', (
@@ -138,6 +150,12 @@ void main() {
         duress: true,
       );
       expect(find.text('LOCKED'), findsNothing);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is PixelArt && w.sprite == PixelSprites.lock,
+        ),
+        findsNothing,
+      );
       expect(
         find.descendant(of: chip, matching: find.text('UNLOCKED')),
         findsOne,
@@ -175,12 +193,60 @@ void main() {
     }
   });
 
+  testWidgets('rows lead with the pixel pack icons', (tester) async {
+    await _Harness().pump(tester);
+    Finder rowOf(String title) =>
+        find.ancestor(of: find.text(title), matching: find.byType(DMListRow));
+    DMIcons leadOf(String title) => tester
+        .widget<DMIconTile>(
+          find.descendant(of: rowOf(title), matching: find.byType(DMIconTile)),
+        )
+        .icon;
+    expect(leadOf('Owner wallet'), DMIcons.wallet);
+    expect(leadOf('Guard key'), DMIcons.key);
+    expect(leadOf('Panic lockdown'), DMIcons.warning);
+    expect(leadOf('Move guard to this phone'), DMIcons.swap);
+    expect(leadOf('Show recovery phrase'), DMIcons.key);
+    expect(leadOf('Restore receiving profiles from phrase'), DMIcons.history);
+    expect(leadOf('Private rails check'), DMIcons.shieldPlus);
+    expect(leadOf('Lock app'), DMIcons.lock);
+    expect(leadOf('Forget this device'), DMIcons.logout);
+    DMIcons? railOf(String rail) => tester
+        .widget<DMIcon>(
+          find
+              .descendant(
+                of: find.byKey(ValueKey('receive-$rail')),
+                matching: find.byType(DMIcon),
+              )
+              .first,
+        )
+        .icon;
+    expect(railOf('cloak'), DMIcons.cloak);
+    expect(railOf('zcash'), DMIcons.shieldZ);
+    final panic = tester.widget<DMIcon>(
+      find.descendant(
+        of: find.byKey(const ValueKey('panic-card')),
+        matching: find.byType(DMIcon),
+      ),
+    );
+    expect(panic.color, DM.flatline);
+    final chevron = tester.widget<DMIcon>(
+      find.descendant(
+        of: rowOf('Private rails check'),
+        matching: find.byWidgetPredicate(
+          (w) => w is DMIcon && w.icon == DMIcons.chevronRight,
+        ),
+      ),
+    );
+    expect(chevron.color, DM.ash);
+  });
+
   testWidgets('only the panic card carries a status border', (tester) async {
     await _Harness().pump(tester);
     final panic = tester.widget<DMCard>(
       find.byKey(const ValueKey('panic-card')),
     );
-    expect(panic.borderColor, DM.due.withValues(alpha: 0.35));
+    expect(panic.borderColor, DM.flatline.withValues(alpha: 0.35));
     final others = tester
         .widgetList<DMCard>(find.byType(DMCard))
         .where((c) => c.key != const ValueKey('panic-card'));
@@ -194,7 +260,7 @@ void main() {
         matching: find.byType(IconTile),
       ),
     );
-    expect(tile.tone, DM.due);
+    expect(tile.tone, DM.flatline);
   });
 
   testWidgets('panic asks first; Cancel locks nothing', (tester) async {
@@ -226,7 +292,12 @@ void main() {
       findsOne,
     );
     expect(
-      find.descendant(of: cloak, matching: find.byIcon(Icons.add)),
+      find.descendant(
+        of: cloak,
+        matching: find.byWidgetPredicate(
+          (w) => w is DMIcon && w.icon == DMIcons.plus,
+        ),
+      ),
       findsOne,
     );
     expect(
@@ -250,7 +321,10 @@ void main() {
 
   testWidgets('pricing lists each rail rate in mono', (tester) async {
     await _Harness().pump(tester);
-    final rate = tester.widget<Text>(find.text('5%'));
-    expect(rate.style?.fontFamily, contains('JetBrains'));
+    for (final r in ['2%', '3%']) {
+      final rate = tester.widget<Text>(find.text(r));
+      expect(rate.style?.fontFamily, contains('JetBrains'));
+    }
+    expect(find.text('5%'), findsNothing);
   });
 }

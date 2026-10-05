@@ -73,7 +73,7 @@ String vestingAmounts(ScheduleProgress p, String? mint) =>
 /// Released (solid) over vested (tinted) over the total (track). Flat,
 /// like the pulse ring: the bar measures, it does not decorate.
 class VestingBar extends StatelessWidget {
-  const VestingBar({super.key, required this.progress, this.color = DM.signal});
+  const VestingBar({super.key, required this.progress, this.color = DM.pulse});
 
   final ScheduleProgress progress;
   final Color color;
@@ -94,7 +94,7 @@ class VestingBar extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              part(1, DM.track),
+              part(1, DM.line),
               part(progress.vestedFraction, color.withValues(alpha: 0.35)),
               part(progress.releasedFraction, color),
             ],
@@ -150,7 +150,7 @@ class VestingScheduleView extends StatelessWidget {
         Text(vestingAmounts(progress, rule.mint), style: data),
         Text(
           vestingStatus(progress, rule.mint, now),
-          style: progress.revoked ? data.copyWith(color: DM.attention) : data,
+          style: progress.revoked ? data.copyWith(color: DM.bone) : data,
         ),
         if (next != null) Text(next, style: data),
       ],

@@ -14,6 +14,7 @@ import '../rules_format.dart';
 import '../web/web_ui.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
+import '../widgets/pack_icons.dart';
 import '../widgets/private_funds.dart';
 import '../widgets/vesting_progress.dart';
 
@@ -52,10 +53,14 @@ class CircleTab extends ConsumerWidget {
                   'People who named you in their release or vesting plan.',
               // No pull-to-refresh with a mouse.
               trailing: ref.watch(isWebProvider)
-                  ? IconButton(
+                  ? DMSquareButton(
                       tooltip: 'Refresh',
                       onPressed: refresh,
-                      icon: const Icon(Icons.refresh),
+                      child: const Icon(
+                        Icons.refresh,
+                        size: 20,
+                        color: DM.bone,
+                      ),
                     )
                   : null,
             ),
@@ -71,7 +76,7 @@ class CircleTab extends ConsumerWidget {
                 ),
               ],
               error: (e, _) => [
-                Text('$e', style: DMType.outfit(size: 14, color: DM.due)),
+                _LoadError(error: e, web: ref.watch(isWebProvider)),
               ],
               data: (list) => list.isEmpty
                   ? [_Empty(address: me)]
@@ -87,67 +92,90 @@ class CircleTab extends ConsumerWidget {
   }
 }
 
-/// Where a plan stands: a sentence when the chip alone does not say it,
-/// the chip's status and its words.
-typedef _Standing = ({String? title, DMStatus status, String chip});
+/// Where a plan stands: a sentence when the sticker alone does not say
+/// it, the sticker's status and word, and whether the sticker wears the
+/// status figure. Only the four moods and the lock wear one; vesting and
+/// reserved states are words on their status color.
+typedef _Standing = ({
+  String? title,
+  DMStatus status,
+  String sticker,
+  bool figure,
+});
 
+/// Inheritance plans are alive while the next release counts down, due
+/// once a tier is past its time, released when every tier paid.
 _Standing _standing(VaultState v, int now) {
-  final next = v.nextRuleDue;
+  final next = v.nextReleaseAt;
   if (v.isVesting) {
     if (v.revokedAt != 0) {
       return (
         title: 'Vesting revoked; vested amounts stay claimable',
-        status: DMStatus.attention,
-        chip: 'Revoked',
+        status: DMStatus.released,
+        sticker: 'Revoked',
+        figure: false,
       );
     }
     if (vestingSettled(v)) {
       return (
         title: 'Fully paid out',
         status: DMStatus.released,
-        chip: 'Paid out',
+        sticker: 'Paid out',
+        figure: true,
       );
     }
     if (now < v.startAt) {
       return (
         title: 'Vesting starts in ${span(v.startAt - now)}',
         status: DMStatus.released,
-        chip: 'Scheduled',
+        sticker: 'Scheduled',
+        figure: false,
       );
     }
-    return (title: null, status: DMStatus.onTrack, chip: 'Vesting');
+    return (
+      title: null,
+      status: DMStatus.alive,
+      sticker: 'Vesting',
+      figure: false,
+    );
   }
   if (next == null) {
     return v.completed
         ? (
             title: 'Plan fully released',
             status: DMStatus.released,
-            chip: 'Released',
+            sticker: DMStatus.released.label,
+            figure: true,
           )
         : (
             title: 'No tier pending; reserved shares await claim',
             status: DMStatus.released,
-            chip: 'Reserved',
+            sticker: 'Reserved',
+            figure: false,
           );
   }
   if (now > next) {
     return (
       title: 'Silent past a release tier',
       status: DMStatus.due,
-      chip: 'Due',
-    );
-  }
-  if (now > v.pulseDue) {
-    return (
-      title: 'Missed a check-in',
-      status: DMStatus.attention,
-      chip: '${span(now - v.lastPulse)} silent',
+      sticker: DMStatus.due.label,
+      figure: true,
     );
   }
   if (v.isLocked(now)) {
-    return (title: null, status: DMStatus.locked, chip: 'Locked');
+    return (
+      title: null,
+      status: DMStatus.locked,
+      sticker: DMStatus.locked.label,
+      figure: true,
+    );
   }
-  return (title: null, status: DMStatus.onTrack, chip: 'On track');
+  return (
+    title: null,
+    status: DMStatus.alive,
+    sticker: DMStatus.alive.label,
+    figure: true,
+  );
 }
 
 class _PersonCard extends ConsumerStatefulWidget {
@@ -206,7 +234,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
 
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
     final v = widget.vault;
     final now = nowSecs();
     final isGuardian = v.guardian == widget.me;
@@ -229,7 +256,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
         widget.keys.contains(r.beneficiary) ? 'you' : short(r.beneficiary);
     final live = ref.watch(privateRailsLiveProvider);
     final web = ref.watch(isWebProvider);
-    final detail = DMType.data();
     return Padding(
       padding: const EdgeInsets.only(bottom: DMSpace.lg),
       child: DMCard(
@@ -237,40 +263,43 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: Text(
-                    v.label.isEmpty
-                        ? short(v.owner)
-                        : '${v.label} · ${short(v.owner)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: DMType.mono(size: 15),
-                  ),
+                  child: _PlanTitle(vault: v, guardian: isGuardian),
                 ),
-                if (isGuardian) ...[
-                  const SizedBox(width: DMSpace.sm),
-                  const MonoLabel('Guardian', color: DM.sub),
-                ],
-                const SizedBox(width: DMSpace.sm),
-                StatusChip(standing.status, label: standing.chip),
+                const SizedBox(width: DMSpace.md),
+                StatusSticker(
+                  standing.status,
+                  label: standing.sticker,
+                  showSprite: standing.figure,
+                ),
               ],
             ),
             if (standing.title case final title?) ...[
-              const SizedBox(height: DMSpace.md),
-              Text(title, style: t.titleMedium),
+              const SizedBox(height: DMSpace.lg),
+              Text(
+                title,
+                style: DMType.outfit(size: 16, weight: FontWeight.w600),
+              ),
             ],
-            const SizedBox(height: DMSpace.xs),
-            Text(
-              v.isVesting
-                  ? 'Vesting plan · ${v.revocable ? 'revocable by the owner' : 'irrevocable'}'
-                  : 'Last check-in ${ago(v.lastPulse, now)} · ${v.streak}-day streak',
-              style: detail,
-            ),
+            const SizedBox(height: DMSpace.sm),
+            if (v.isVesting)
+              Text(
+                'Vesting plan · ${v.revocable ? 'revocable by the owner' : 'irrevocable'}',
+                style: DMType.data(),
+              )
+            else
+              _LastCheckIn(
+                text: 'Last check-in ${ago(v.lastPulse, now)}',
+                alive:
+                    standing.status == DMStatus.alive ||
+                    standing.status == DMStatus.locked,
+              ),
             if (v.isLocked(now))
               Text(
                 'Vault locked for ${span(v.lockedUntil - now)} · releases still run',
-                style: detail,
+                style: DMType.data(),
               ),
             if (v.isVesting)
               for (final (i, r) in mine) ...[
@@ -298,8 +327,10 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
               for (final (i, r) in mine) ...[
                 const Divider(height: DMSpace.xxxl),
                 _TierLine(
+                  index: i,
                   amount: amountLabel(r),
                   rail: r.rail,
+                  due: !r.executed && !r.skipped && v.ruleDueAt(i) <= now,
                   when: r.executed
                       ? 'Released ${ago(r.executedAt, now)} · ${amountText(r.paid, r.mint)}'
                       : r.skipped
@@ -307,9 +338,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                       : v.ruleDueAt(i) > now
                       ? 'Releases after ${span(v.ruleDueAt(i) - now)} more silence'
                       : 'Due now',
-                  whenColor: !r.executed && !r.skipped && v.ruleDueAt(i) <= now
-                      ? DM.due
-                      : DM.sub,
                 ),
                 if (v.canExecute(i, now)) ...[
                   const SizedBox(height: DMSpace.lg),
@@ -330,14 +358,14 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     ),
                   ),
                   if (tierFunded(v, i, tokens) == false)
-                    _Note(waitingForFunds(r.mint))
+                    FinePrint(waitingForFunds(r.mint), problem: true)
                   else if (_quote(i, true) case final q?)
                     _ClaimCost(q)
                   else if (r.rail != Rail.solana)
-                    const _Note(
+                    const FinePrint(
                       'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
                     ),
-                  if (waived) _Note(feeWaivedText(_quote(i, true))),
+                  if (waived) FinePrint(feeWaivedText(_quote(i, true))),
                 ],
                 // Tiers past due and grace that cannot pay: the keeper
                 // skips them; nobody does it by hand.
@@ -348,7 +376,7 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                         tierFunded(v, j, tokens) != true)
                       j,
                 ])
-                  _Note(
+                  FinePrint(
                     '${j == i ? '' : 'Tier ${j + 1} could not pay and holds yours back. '}'
                     'Deadman skips it automatically after the grace period; '
                     'its share stays reserved for ${forWhom(v.rules[j])}',
@@ -372,38 +400,125 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
   }
 }
 
-/// One tier of a release plan: what it pays, when, and on which rail.
-class _TierLine extends StatelessWidget {
-  const _TierLine({
-    required this.amount,
-    required this.rail,
-    required this.when,
-    required this.whenColor,
-  });
+/// The plan's name over its owner's address; an unnamed plan is its
+/// owner's address. "GUARDIAN" when this wallet guards it.
+class _PlanTitle extends StatelessWidget {
+  const _PlanTitle({required this.vault, required this.guardian});
 
-  final String amount;
-  final Rail rail;
-  final String when;
-  final Color whenColor;
+  final VaultState vault;
+  final bool guardian;
+
+  @override
+  Widget build(BuildContext context) {
+    final owner = short(vault.owner);
+    final named = vault.label.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          named ? vault.label : owner,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: named
+              ? Theme.of(context).textTheme.titleLarge
+              : DMType.mono(size: 17, weight: FontWeight.w500),
+        ),
+        if (named || guardian) ...[
+          const SizedBox(height: DMSpace.xxs),
+          Wrap(
+            spacing: DMSpace.sm,
+            runSpacing: DMSpace.xxs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (named) Text('Owner $owner', style: DMType.data(size: 12.5)),
+              if (guardian) const MonoLabel('Guardian', color: DM.haze),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// "Last check-in 2h 4m ago" led by the pixel heart (check-ins): a pulse
+/// heart while the next release still counts down (locked or not), a grey
+/// one once a tier is due or the plan is done.
+class _LastCheckIn extends StatelessWidget {
+  const _LastCheckIn({required this.text, required this.alive});
+
+  final String text;
+  final bool alive;
 
   @override
   Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(amount, style: Theme.of(context).textTheme.bodyLarge),
-            const SizedBox(height: DMSpace.xxs),
-            Text(when, style: DMType.data(color: whenColor)),
-          ],
-        ),
-      ),
-      const SizedBox(width: DMSpace.md),
-      RailTag(rail),
+      PixelArt(PixelSprites.heart, size: 11, color: alive ? DM.pulse : DM.ash),
+      const SizedBox(width: DMSpace.sm),
+      Flexible(child: Text(text, style: DMType.data())),
     ],
   );
+}
+
+/// One tier of a release plan: which tier, what it pays, when, and on
+/// which rail. A due tier wears the tombstone.
+class _TierLine extends StatelessWidget {
+  const _TierLine({
+    required this.index,
+    required this.amount,
+    required this.rail,
+    required this.when,
+    required this.due,
+  });
+
+  final int index;
+  final String amount;
+  final Rail rail;
+  final String when;
+
+  /// Past its time and not released: flatline, with the tombstone.
+  final bool due;
+
+  @override
+  Widget build(BuildContext context) {
+    final whenColor = due ? DM.flatline : DM.dust;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              MonoLabel('Tier ${index + 1}'),
+              const SizedBox(height: DMSpace.xs),
+              Text(amount, style: Theme.of(context).textTheme.bodyLarge),
+              const SizedBox(height: DMSpace.xxs),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (due) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: PixelArt(
+                        PixelSprites.tombstone,
+                        size: 12,
+                        color: DM.flatline,
+                      ),
+                    ),
+                    const SizedBox(width: DMSpace.sm),
+                  ],
+                  Flexible(
+                    child: Text(when, style: DMType.data(color: whenColor)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: DMSpace.md),
+        RailTag(rail),
+      ],
+    );
+  }
 }
 
 /// Outlined "Route privately via …", or why routing is off here.
@@ -423,7 +538,7 @@ class _RouteButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => OutlinedButton.icon(
     onPressed: onPressed,
-    icon: Icon(rail.icon, size: 18),
+    icon: RailIcon(rail),
     label: Text(
       live
           ? 'Route privately via ${rail.label}'
@@ -479,9 +594,16 @@ class _VestingClaim extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: Text(
-                scheduleLabel(rule),
-                style: Theme.of(context).textTheme.bodyLarge,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  MonoLabel('Schedule ${index + 1}'),
+                  const SizedBox(height: DMSpace.xs),
+                  Text(
+                    scheduleLabel(rule),
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                ],
               ),
             ),
             const SizedBox(width: DMSpace.md),
@@ -489,12 +611,13 @@ class _VestingClaim extends StatelessWidget {
           ],
         ),
         const SizedBox(height: DMSpace.md),
-        VestingBar(progress: p, color: DM.signal),
+        VestingBar(progress: p, color: p.revoked ? DM.ash : DM.pulse),
         const SizedBox(height: DMSpace.sm),
         Text(vestingAmounts(p, rule.mint), style: DMType.data()),
+        // Revoked is not a missed check-in: bone for weight, never amber.
         Text(
           vestingStatus(p, rule.mint, now),
-          style: DMType.data(color: p.revoked ? DM.attention : DM.sub),
+          style: DMType.data(color: p.revoked ? DM.bone : DM.dust),
         ),
         if (next != null) Text(next, style: DMType.data()),
         if (p.claimable > 0) ...[
@@ -506,12 +629,14 @@ class _VestingClaim extends StatelessWidget {
             child: Text('Claim vested ${amountText(p.claimable, rule.mint)}'),
           ),
           if (funded == false)
-            _Note(waitingForFunds(rule.mint))
+            FinePrint(waitingForFunds(rule.mint), problem: true)
           else if (quote case final q?)
             _ClaimCost(q)
           else if (rule.rail != Rail.solana)
-            const _Note('Claiming from your wallet links it to this payout.'),
-          if (waived) _Note(feeWaivedText(quote)),
+            const FinePrint(
+              'Claiming from your wallet links it to this payout.',
+            ),
+          if (waived) FinePrint(feeWaivedText(quote)),
         ],
         if (rule.paid > 0 &&
             rule.rail != Rail.solana &&
@@ -548,7 +673,7 @@ class _ClaimCost extends StatelessWidget {
                 'from the prize',
           ClaimPayer.wallet => 'Your wallet pays the network fee',
         };
-    return _Note(text, color: problem == null ? DM.sub : DM.attention);
+    return FinePrint(text, problem: problem != null);
   }
 }
 
@@ -563,23 +688,8 @@ String feeWaivedText(ClaimQuote? quote) {
 String waitingForFunds(String? mint) =>
     'Waiting for funds: this plan holds no ${assetSymbol(mint)} yet';
 
-/// Fine print under a button or a tier.
-class _Note extends StatelessWidget {
-  const _Note(this.text, {this.color = DM.sub});
-
-  final String text;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: DMSpace.sm),
-    child: Text(
-      text,
-      style: DMType.outfit(size: 13, color: color, height: 1.4),
-    ),
-  );
-}
-
+/// Nobody has named this wallet: the mark skull and the address to
+/// share.
 class _Empty extends StatelessWidget {
   const _Empty({required this.address});
 
@@ -589,9 +699,20 @@ class _Empty extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     return DMCard(
+      padding: const EdgeInsets.fromLTRB(
+        DMSpace.cardPadding,
+        DMSpace.xxl,
+        DMSpace.cardPadding,
+        DMSpace.cardPadding,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: PixelSkull(size: 44),
+          ),
+          const SizedBox(height: DMSpace.xl),
           Text('Nobody has named you yet.', style: t.titleMedium),
           const SizedBox(height: DMSpace.xs),
           Text(
@@ -599,7 +720,7 @@ class _Empty extends StatelessWidget {
             'Security → Receive privately.',
             style: t.bodyMedium,
           ),
-          const SizedBox(height: DMSpace.lg),
+          const SizedBox(height: DMSpace.xl),
           OutlinedButton.icon(
             onPressed: () {
               Clipboard.setData(ClipboardData(text: address));
@@ -612,4 +733,30 @@ class _Empty extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The plan lookup failed: what happened, and that pulling down retries.
+class _LoadError extends StatelessWidget {
+  const _LoadError({required this.error, required this.web});
+
+  final Object error;
+
+  /// No pull-to-refresh with a mouse: point at the Refresh button.
+  final bool web;
+
+  @override
+  Widget build(BuildContext context) => DMCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Could not load the plans naming you',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: DMSpace.xs),
+        Text('$error', style: DMType.data()),
+        FinePrint(web ? 'Refresh to try again.' : 'Pull down to try again.'),
+      ],
+    ),
+  );
 }

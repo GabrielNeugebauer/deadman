@@ -9,8 +9,8 @@ Future<void> scheduleLockdownRetry() async {}
 Future<void> cancelLockdownRetry() async {}
 
 Future<void> scheduleFrom({
-  required int pulseDue,
-  required int deadline,
+  required int releaseAt,
+  required int delaySecs,
 }) async {}
 
-Future<void> notifyPulseDue({bool overdue = false}) async {}
+Future<void> notifyRelease(int remaining) async {}

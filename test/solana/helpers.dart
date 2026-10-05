@@ -48,7 +48,7 @@ List<int> vaultBytes({
   String label = '',
   required String guard,
   String? guardian,
-  int intervalSecs = 86400,
+  int legacyInterval = 86400,
   int lockSecs = 3600,
   int skipGraceSecs = 30 * 86400,
   int lastPulse = 1790000000,
@@ -73,7 +73,7 @@ List<int> vaultBytes({
   ...le(2, planId),
   ...keyBytes(guard),
   if (guardian == null) 0 else ...[1, ...keyBytes(guardian)],
-  ...le(8, intervalSecs),
+  ...le(8, legacyInterval), // _reserved_interval
   ...le(8, lockSecs),
   ...le(8, skipGraceSecs),
   ...le(8, lastPulse),
@@ -109,7 +109,7 @@ List<int> configBytes({
   required String admin,
   required String treasury,
   int feeBpsPublic = 200,
-  int feeBpsPrivate = 500,
+  int feeBpsPrivate = 300,
 }) => [
   ...Disc.configAccount,
   ...keyBytes(admin),

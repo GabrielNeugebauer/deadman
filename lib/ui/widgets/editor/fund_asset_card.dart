@@ -77,7 +77,6 @@ class FundAssetCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: Semantics(
@@ -89,43 +88,42 @@ class FundAssetCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: DMSpace.md),
-              ActionChip(
-                label: const Text('Use all'),
-                materialTapTargetSize: MaterialTapTargetSize.padded,
-                labelStyle: DMType.outfit(
-                  size: 14,
-                  weight: FontWeight.w600,
-                  color: useAll == null ? DM.mist : DM.signal,
-                ),
+              TextButton(
                 onPressed: useAll == null ? null : () => onUseAll(useAll!),
+                child: const Text('Use all'),
               ),
             ],
           ),
           Text(
             needs,
-            style: DMType.outfit(size: 14, color: DM.sub, height: 1.4),
+            style: DMType.outfit(size: 14, color: DM.dust, height: 1.4),
           ),
-          const SizedBox(height: DMSpace.lg),
-          TextField(
-            key: fieldKey,
-            controller: controller,
-            focusNode: focusNode,
-            onChanged: (_) => onChanged(),
-            inputFormatters: [
-              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
-            ],
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            style: DMType.mono(size: 18, weight: FontWeight.w500),
-            decoration: InputDecoration(
-              labelText: 'Put in this plan',
-              hintText: '0',
-              suffixText: symbol,
-              suffixStyle: DMType.mono(size: 14, color: DM.sub),
-              helperText: helper,
-              helperStyle: DMType.mono(size: 12, color: DM.sub),
-              helperMaxLines: 2,
-              errorText: errorText,
-              errorMaxLines: 3,
+          const SizedBox(height: DMSpace.xl),
+          LabeledField(
+            label: 'Put in this plan',
+            child: TextField(
+              key: fieldKey,
+              controller: controller,
+              focusNode: focusNode,
+              onChanged: (_) => onChanged(),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+              ],
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              style: DMType.mono(size: 18, weight: FontWeight.w500),
+              decoration: InputDecoration(
+                hintText: '0',
+                hintStyle: DMType.mono(size: 18, color: DM.ash),
+                suffixText: symbol,
+                suffixStyle: DMType.mono(size: 14, color: DM.dust),
+                helperText: helper,
+                helperStyle: DMType.mono(size: 12, color: DM.dust),
+                helperMaxLines: 2,
+                errorText: errorText,
+                errorMaxLines: 3,
+              ),
             ),
           ),
           if (lines.isNotEmpty) ...[
@@ -145,7 +143,7 @@ class FundAssetCard extends StatelessWidget {
                 leftover!,
                 style: DMType.data(
                   size: 12.5,
-                  color: leftoverWarn ? DM.attention : DM.sub,
+                  color: leftoverWarn ? DM.missed : DM.dust,
                 ),
               ),
             ),

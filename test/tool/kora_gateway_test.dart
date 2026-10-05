@@ -155,7 +155,7 @@ void main() {
     });
 
     for (final (name, disc) in [
-      ('update_policy', Disc.updatePolicy),
+      ('update_plan', Disc.updatePlan),
       ('execute_sol_rule without its accounts', Disc.executeSolRule),
       ('skip_rule', [...Disc.skipRule, 0]),
       ('set_guard', Disc.setGuard),
@@ -578,7 +578,7 @@ Instruction createVault(String owner, String payer) => deadmanIx(
     rw(vaultPda(owner, 0).address),
     ro(systemProgramId),
   ],
-  [...Disc.createVault, 0, 0, 1, 2, 3],
+  [...Disc.createPlan, 0, 0, 1, 2, 3],
 );
 
 Instruction transferChecked({
@@ -712,30 +712,27 @@ void paymasterTests() {
   });
 
   group('validatePaymasterTx', () {
-    test(
-      'accepts create_vault with Kora as payer and a USDC payment',
-      () async {
-        final tx = await wire(
-          [
-            ComputeBudgetInstruction.setComputeUnitLimit(units: 200000),
-            createVault(owner.address, kora),
-            pay(owner.address),
-          ],
-          signers: [owner],
-        );
-        final r = validatePaymasterTx(tx, pmPolicy);
-        expect(r.signer, owner.address);
-        expect(r.koraFundsRent, isTrue);
-        expect(r.instructions, [
-          'compute_budget',
-          'deadman.create_vault',
-          'token.transfer_checked',
-        ]);
-        expect(r.payment, (mint: usdc, destination: payAta, amount: 3000000));
-        expect(r.feeLamports, 10000);
-        expect(await verifyOwnerSignature(r), isTrue);
-      },
-    );
+    test('accepts create_plan with Kora as payer and a USDC payment', () async {
+      final tx = await wire(
+        [
+          ComputeBudgetInstruction.setComputeUnitLimit(units: 200000),
+          createVault(owner.address, kora),
+          pay(owner.address),
+        ],
+        signers: [owner],
+      );
+      final r = validatePaymasterTx(tx, pmPolicy);
+      expect(r.signer, owner.address);
+      expect(r.koraFundsRent, isTrue);
+      expect(r.instructions, [
+        'compute_budget',
+        'deadman.create_plan',
+        'token.transfer_checked',
+      ]);
+      expect(r.payment, (mint: usdc, destination: payAta, amount: 3000000));
+      expect(r.feeLamports, 10000);
+      expect(await verifyOwnerSignature(r), isTrue);
+    });
 
     test('accepts a SOL and token deposit paid in USDC', () async {
       final vault = vaultPda(owner.address, 0).address;
@@ -1101,7 +1098,7 @@ void paymasterTests() {
         [
           deadmanIx(
             [rw(owner.address, signer: true), rw(kora)],
-            [...Disc.updatePolicy, 0],
+            [...Disc.updatePlan, 0],
           ),
           pay(owner.address),
         ],
@@ -1124,7 +1121,7 @@ void paymasterTests() {
               rw(vaultPda(owner.address, 1).address),
               ro(systemProgramId),
             ],
-            [...Disc.createVault, 1, 0],
+            [...Disc.createPlan, 1, 0],
           ),
           pay(owner.address),
         ],
@@ -1152,6 +1149,25 @@ void paymasterTests() {
         expect(
           () => validatePaymasterTx(tx, pmPolicy),
           rejects('Deadman $name is not paid by the paymaster'),
+        );
+      });
+    }
+
+    for (final (name, data) in [
+      ('create_vault', [29, 237, 247, 208, 193, 82, 54, 135]),
+      ('update_policy', [212, 245, 246, 7, 163, 151, 18, 57]),
+    ]) {
+      test('rejects the removed $name', () async {
+        final tx = await wire(
+          [
+            deadmanIx([rw(owner.address, signer: true), rw(key(40))], data),
+            pay(owner.address),
+          ],
+          signers: [owner],
+        );
+        expect(
+          () => validatePaymasterTx(tx, pmPolicy),
+          rejects('Deadman instruction is not paid by the paymaster'),
         );
       });
     }
@@ -1841,7 +1857,7 @@ void paymasterTests() {
       client.close();
     });
 
-    test('forwards a paid create_vault, refuses an unpaid one', () async {
+    test('forwards a paid create_plan, refuses an unpaid one', () async {
       final owner = await keypair(24);
       chain[usdcAta(owner.address)] = tokenAccount(owner.address, 3000000);
       final unpaid = base64Encode(

@@ -1,34 +1,45 @@
 import 'package:flutter/material.dart';
 
 import '../../solana/deadman_client.dart';
-import '../theme.dart';
+import 'brand/brand.dart';
 
-/// A snackbar on raise. Errors keep the raise fill and carry a due-colored
+/// A snackbar on raise. Errors keep the raise fill and carry a flatline
 /// icon: status color marks the message, it never floods the bar.
-void toast(BuildContext context, String message, {bool error = false}) {
+///
+/// [sprite] leads a success message with a pixel figure in pulse, as in
+/// the Pulse mockup ("Pulse recorded on 4 plans." with the heart). Use the
+/// cast figure for the thing the message names; errors ignore it.
+void toast(
+  BuildContext context,
+  String message, {
+  bool error = false,
+  PixelSprite? sprite,
+}) {
+  final Widget? lead = error
+      ? const Icon(
+          Icons.error_outline,
+          size: 18,
+          color: DM.flatline,
+          semanticLabel: 'Error',
+        )
+      : sprite == null
+      ? null
+      : PixelArt(sprite, size: 22, color: DM.pulse);
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
         key: error ? const ValueKey('toast-error') : null,
-        content: error
-            ? Row(
+        content: lead == null
+            ? Text(message)
+            : Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Padding(
-                    padding: EdgeInsets.only(top: 1),
-                    child: Icon(
-                      Icons.error_outline,
-                      size: 18,
-                      color: DM.due,
-                      semanticLabel: 'Error',
-                    ),
-                  ),
+                  Padding(padding: const EdgeInsets.only(top: 1), child: lead),
                   const SizedBox(width: DMSpace.md),
                   Expanded(child: Text(message)),
                 ],
-              )
-            : Text(message),
+              ),
         duration: Duration(seconds: message.length > 90 ? 8 : 4),
       ),
     );

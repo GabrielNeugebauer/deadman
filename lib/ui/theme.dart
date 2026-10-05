@@ -11,18 +11,17 @@ export 'theme/tokens.dart';
 @Deprecated('Use DM tokens and DMStatus from theme/tokens.dart')
 abstract final class DmColors {
   static const bg = DM.void_;
-  static const surface = DM.graphite;
+  static const surface = DM.grave;
   static const raised = DM.raise;
   static const line = DM.line;
   static const text = DM.bone;
-  static const muted = DM.sub;
-  static const alive = DM.signal;
-  static const warn = DM.attention;
-  static const danger = DM.due;
+  static const muted = DM.dust;
+  static const alive = DM.pulse;
+  static const warn = DM.missed;
+  static const danger = DM.flatline;
 
-  /// Was a purple "Plus" accent. The brand has one accent; purple is
-  /// reserved for [DMStatus.locked].
-  static const plus = DM.tide;
+  /// Was a purple "Plus" accent. The brand has one accent, Pulse.
+  static const plus = DM.pulse;
 }
 
 ThemeData buildTheme() => DeadmanTheme.dark();

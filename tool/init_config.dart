@@ -2,7 +2,7 @@
 // program's upgrade authority.
 //
 // dart run tool/init_config.dart --keypair <path> --treasury <addr>
-//   [--fee-public 200] [--fee-private 500] [--rpc <url>]
+//   [--fee-public 200] [--fee-private 300] [--rpc <url>]
 import 'dart:convert';
 import 'dart:io';
 
@@ -28,7 +28,7 @@ Future<void> main(List<String> argv) async {
     exit(64);
   }
   final feePublic = int.parse(args['fee-public'] ?? '200');
-  final feePrivate = int.parse(args['fee-private'] ?? '500');
+  final feePrivate = int.parse(args['fee-private'] ?? '300');
   final rpc = args['rpc'] ?? 'https://api.devnet.solana.com';
 
   final secret = (jsonDecode(File(keypairPath).readAsStringSync()) as List)

@@ -20,8 +20,8 @@
       "type": "dart",
       "program": "lib/main.dart",
       "args": [
-        "--dart-define=KORA_SPONSOR_URL=http://192.168.15.54:8080",
-        "--dart-define=KORA_PAYMASTER_URL=http://192.168.15.54:8081"
+        "--dart-define=KORA_SPONSOR_URL=http://192.168.0.144:8080",
+        "--dart-define=KORA_PAYMASTER_URL=http://192.168.0.144:8081"
       ]
     }
   ]

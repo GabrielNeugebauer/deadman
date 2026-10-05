@@ -136,8 +136,9 @@ class _WalletRow extends ConsumerWidget {
           : last
           ? 'Last used'
           : 'Detected',
+      monoSubtitle: false,
       trailing: installed
-          ? const Icon(Icons.chevron_right, color: DM.sub)
+          ? const DMIcon(DMIcons.chevronRight, color: DM.ash)
           : TextButton.icon(
               onPressed: install,
               icon: const Icon(Icons.open_in_new, size: 16),
@@ -171,7 +172,7 @@ class _WalletIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Wallets' own brand colors stay out: purple means locked here.
+    // Wallets' own brand colors stay out: pulse is the only accent here.
     final letter = Container(
       width: 36,
       height: 36,
@@ -258,7 +259,7 @@ class AndroidAppCard extends ConsumerWidget {
           'biometric lock, and private routing through Cloak and Zcash run in '
           'the Android app.',
       monoSubtitle: false,
-      trailing: const Icon(Icons.open_in_new, size: 20, color: DM.sub),
+      trailing: const Icon(Icons.open_in_new, size: 20, color: DM.ash),
       onTap: () => ref.read(openUrlProvider)(AppConfig.androidAppUrl),
     ),
   );

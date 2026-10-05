@@ -11,6 +11,7 @@ import 'screens/settings_tab.dart';
 import 'screens/welcome_screen.dart';
 import 'theme.dart';
 import 'web/web_ui.dart';
+import 'widgets/brand/brand.dart';
 
 class DeadmanApp extends StatelessWidget {
   const DeadmanApp({super.key});
@@ -39,9 +40,8 @@ class _Gate extends ConsumerWidget {
     if (session.owner == null) return const WelcomeScreen();
     final hasPins = ref.watch(_hasPinsProvider);
     return hasPins.when(
-      loading: () =>
-          const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (e, _) => Scaffold(body: Center(child: Text('$e'))),
+      loading: () => const SplashScreen(),
+      error: (e, _) => SplashScreen(error: '$e'),
       data: (has) {
         if (!has) {
           return PinSetupScreen(onDone: () => ref.invalidate(_hasPinsProvider));
@@ -49,6 +49,59 @@ class _Gate extends ConsumerWidget {
         if (!session.unlocked) return const LockScreen();
         return const _Shell();
       },
+    );
+  }
+}
+
+/// The brand book's splash (page 6): the skull over the pixel wordmark on
+/// void, "Proof of life, on Solana" at the foot. Shown while the PIN store
+/// opens; on failure the error takes the foot line's place.
+class SplashScreen extends StatelessWidget {
+  const SplashScreen({super.key, this.error});
+
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final error = this.error;
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            DMSpace.gutter,
+            0,
+            DMSpace.gutter,
+            DMSpace.xxxl,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Expanded(
+                child: Center(
+                  child: DeadmanLockup(
+                    height: 104,
+                    stacked: true,
+                    mood: SkullMood.alive,
+                  ),
+                ),
+              ),
+              if (error == null)
+                Text(
+                  'Proof of life, on Solana',
+                  textAlign: TextAlign.center,
+                  style: DMType.outfit(size: 14, color: DM.ash),
+                )
+              else
+                Text(
+                  error,
+                  key: const ValueKey('splash-error'),
+                  textAlign: TextAlign.center,
+                  style: DMType.outfit(size: 14, color: DM.flatline),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -78,18 +131,9 @@ class _ShellState extends State<_Shell> {
           selectedIndex: _index,
           onDestinationSelected: (i) => setState(() => _index = i),
           destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.radio_button_unchecked),
-              label: 'Pulse',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.people_outline),
-              label: 'Circle',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.shield_outlined),
-              label: 'Security',
-            ),
+            DMNavigationDestination(icon: DMIcons.pulse, label: 'Pulse'),
+            DMNavigationDestination(icon: DMIcons.users, label: 'Circle'),
+            DMNavigationDestination(icon: DMIcons.shield, label: 'Security'),
           ],
         ),
       ],

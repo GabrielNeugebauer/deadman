@@ -373,7 +373,6 @@ void _dryRun(String owner, String guard, List<VestingSpec> schedules) {
     label: 'E2E installments',
     guard: guard,
     guardian: null,
-    intervalSecs: 0,
     lockSecs: 3600,
     skipGraceSecs: 0,
     lastPulse: now,

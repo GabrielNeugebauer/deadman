@@ -29,8 +29,8 @@ import 'package:solana/solana.dart';
 
 const solTier = 2000000; // 0.002 SOL
 const usdcTier = 1000000; // 1 USDC (6 decimals)
-const intervalSecs = 60;
-const afterSecs = 120; // the program's minimum: interval + 60 s margin
+// Program minimum is 60 s; 120 s leaves room for the setup transactions.
+const afterSecs = 120;
 
 Future<void> main(List<String> argv) async {
   final args = <String, String>{
@@ -135,7 +135,6 @@ Future<({bool sol, bool usdc})> _attempt(
     planId: planId,
     label: 'E2E gasless claims',
     guard: guard.address,
-    intervalSecs: intervalSecs,
     lockSecs: 60,
     skipGraceSecs: 60,
     rules: [
@@ -162,7 +161,7 @@ Future<({bool sol, bool usdc})> _attempt(
   final vault = (await client.fetchVault(owner.address, planId))!;
   final due = vault.ruleDueAt(0);
   stdout.writeln(
-    'create_vault $createSig\n'
+    'create_plan $createSig\n'
     'vault ${vault.address}, heir ${heir.address} '
     '(SOL ${await client.balance(heir.address)}), due at $due',
   );

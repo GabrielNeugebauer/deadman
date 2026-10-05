@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -139,10 +137,15 @@ final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   // Vesting plans need no check-ins, so they never drive reminders.
   final active = activeSwitchPlans(vaults);
   if (active.isNotEmpty) {
-    // Remind on the most urgent plan.
-    final pulseDue = active.map((v) => v.pulseDue).reduce(min);
-    final deadline = active.map((v) => v.nextRuleDue!).reduce(min);
-    await scheduleFrom(pulseDue: pulseDue, deadline: deadline);
+    // Remind ahead of the next release across every plan.
+    final urgent = active.reduce(
+      (a, b) => a.nextReleaseAt! <= b.nextReleaseAt! ? a : b,
+    );
+    final releaseAt = urgent.nextReleaseAt!;
+    await scheduleFrom(
+      releaseAt: releaseAt,
+      delaySecs: releaseAt - urgent.lastPulse,
+    );
   }
   return vaults;
 });

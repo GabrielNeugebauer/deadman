@@ -5,6 +5,7 @@ import 'package:deadman/ui/screens/lock_screen.dart';
 import 'package:deadman/ui/screens/pin_setup_screen.dart';
 import 'package:deadman/ui/screens/recovery_phrase_screen.dart';
 import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:deadman/ui/widgets/feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -87,10 +88,12 @@ void main() {
       await h.pump(tester, PinSetupScreen(onDone: () => done = true));
       expect(find.text('Choose your PIN'), findsOneWidget);
       expect(find.bySemanticsLabel('Step 1 of 3'), findsOneWidget);
+      expect(find.text('STEP 1/3'), findsOneWidget);
 
       await _enter(tester, '123456');
       expect(find.text('Confirm your PIN'), findsOneWidget);
       expect(find.bySemanticsLabel('Step 2 of 3'), findsOneWidget);
+      expect(find.text('STEP 2/3'), findsOneWidget);
 
       await _enter(tester, '123456');
       expect(find.text('Choose a duress PIN'), findsOneWidget);
@@ -125,8 +128,11 @@ void main() {
       await _enter(tester, '123456');
       await _enter(tester, '123456');
       for (final icon in tester.widgetList<Icon>(find.byType(Icon))) {
-        expect(icon.color, isNot(DM.attention));
-        expect(icon.color, isNot(DM.due));
+        expect(icon.color, isNot(DM.missed));
+        expect(icon.color, isNot(DM.flatline));
+      }
+      for (final s in tester.widgetList<Sticker>(find.byType(Sticker))) {
+        expect(s.color, DM.pulse);
       }
     });
   });
@@ -165,6 +171,15 @@ void main() {
       expect(s.duress, isTrue);
       expect(h.lockdowns, [addr(1)]);
       expect(find.byType(SnackBar), findsNothing);
+    });
+
+    testWidgets('the skull lockup heads the screen, with no step sticker', (
+      tester,
+    ) async {
+      await _Harness().pump(tester, const LockScreen());
+      expect(find.byType(DeadmanLockup), findsOneWidget);
+      expect(find.bySemanticsLabel('Deadman'), findsOneWidget);
+      expect(find.byType(Sticker), findsNothing);
     });
 
     testWidgets('digits are mono keys; delete has a label', (tester) async {
@@ -222,7 +237,37 @@ void main() {
   });
 
   group('toast', () {
-    testWidgets('errors keep the raise bar and mark it with a due icon', (
+    testWidgets('a sprite leads a success message in pulse', (tester) async {
+      await _Harness().pump(
+        tester,
+        Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => toast(
+                context,
+                'Pulse recorded on 2 plans.',
+                sprite: PixelSprites.heart,
+              ),
+              child: const Text('ok'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('ok'));
+      await tester.pump();
+      final art = tester.widget<PixelArt>(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.byType(PixelArt),
+        ),
+      );
+      expect(art.sprite, PixelSprites.heart);
+      expect(art.color, DM.pulse);
+      expect(art.semanticLabel, isNull);
+      expect(find.text('Pulse recorded on 2 plans.'), findsOneWidget);
+    });
+
+    testWidgets('errors keep the raise bar and mark it with a flatline icon', (
       tester,
     ) async {
       await _Harness().pump(
@@ -255,7 +300,8 @@ void main() {
       expect(bar.backgroundColor, isNull);
       expect(find.text('It failed'), findsOneWidget);
       final icon = tester.widget<Icon>(find.byIcon(Icons.error_outline));
-      expect(icon.color, DM.due);
+      expect(icon.color, DM.flatline);
+      expect(find.byType(PixelArt), findsNothing);
     });
   });
 }

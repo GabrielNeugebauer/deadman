@@ -111,7 +111,6 @@ class VaultState {
     required this.label,
     required this.guard,
     required this.guardian,
-    required this.intervalSecs,
     required this.lockSecs,
     required this.skipGraceSecs,
     required this.lastPulse,
@@ -141,7 +140,6 @@ class VaultState {
   final String label;
   final String guard;
   final String? guardian;
-  final int intervalSecs;
   final int lockSecs;
 
   /// Owner-chosen time a due tier gets to pay before it may be skipped
@@ -296,8 +294,6 @@ class VaultState {
     return total;
   }
 
-  int get pulseDue => lastPulse + intervalSecs;
-
   static const guardWindowSecs = 365 * 86400;
 
   /// When guard-key check-ins stop being accepted without a wallet check-in.
@@ -332,6 +328,11 @@ class VaultState {
   bool get completed => rules.every((r) => r.executed);
   int ruleDueAt(int index) => lastPulse + rules[index].afterSecs;
   bool isLocked(int now) => now < lockedUntil;
+
+  /// When the next tier releases unless the owner checks in first: the
+  /// earliest pending tier deadline (last check-in + its delay), or null
+  /// when every tier has paid or been skipped. The plan is alive until then.
+  int? get nextReleaseAt => nextRuleDue;
 
   /// Earliest pending rule deadline, or null when every rule has paid or
   /// been skipped.
@@ -590,7 +591,6 @@ abstract class DeadmanApi {
     required int planId,
     required String label,
     required String guard,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -627,13 +627,12 @@ abstract class DeadmanApi {
   });
 
   /// [rules] are the new pending tiers only: tiers that already released
-  /// stay on-chain as history and are not resent (unless every tier has
-  /// released, in which case [rules] starts a fresh plan).
+  /// stay on-chain as history and are not resent. A fully released plan is
+  /// final: it throws `PlanCompleted`.
   Future<Uint8List> buildUpdatePolicy({
     required String owner,
     required int planId,
     required String label,
-    required int intervalSecs,
     required int lockSecs,
     required int skipGraceSecs,
     required List<RuleSpec> rules,
@@ -755,6 +754,9 @@ abstract class DeadmanApi {
   String? get feeToken;
   set feeToken(String? mint);
 
+  /// Closes plan [planId]: every token it holds goes back to the owner's
+  /// token accounts and its SOL to the owner (the rent to the rent payer),
+  /// in one transaction. Vesting plans close only once nothing is owed.
   Future<Uint8List> buildCloseVault({
     required String owner,
     required int planId,

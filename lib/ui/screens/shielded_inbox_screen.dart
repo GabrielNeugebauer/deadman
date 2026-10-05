@@ -115,7 +115,11 @@ class _ShieldedInboxScreenState extends ConsumerState<ShieldedInboxScreen> {
                     if (!n.spent) n,
                 ];
                 if (notes.isEmpty) {
-                  return const _Message('No shielded notes yet.');
+                  return const _Message(
+                    'No shielded notes yet. Payouts routed to this phone\'s '
+                    'Cloak address show up here.',
+                    empty: true,
+                  );
                 }
                 final byMint = <String?, List<CloakNote>>{};
                 for (final n in notes) {
@@ -169,7 +173,7 @@ class _NoteGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const icon = Icon(Icons.account_balance_wallet_outlined);
+    const icon = DMIcon(DMIcons.wallet);
     const label = Text('Withdraw to my wallet');
     return DMCard(
       child: Column(
@@ -191,7 +195,7 @@ class _NoteGroup extends StatelessWidget {
                 padding: const EdgeInsets.only(top: DMSpace.xxs),
                 child: Text(
                   amountText(n.amount, n.mint),
-                  style: DMType.data(color: DM.mist),
+                  style: DMType.data(color: DM.ash),
                 ),
               ),
           ],
@@ -210,12 +214,20 @@ class _NoteGroup extends StatelessWidget {
   }
 }
 
+/// Centered state: scanning, an error, or nothing to show. The empty
+/// inbox gets the skull in ash, the brand's empty-state figure.
 class _Message extends StatelessWidget {
-  const _Message(this.text, {this.busy = false, this.error = false});
+  const _Message(
+    this.text, {
+    this.busy = false,
+    this.error = false,
+    this.empty = false,
+  });
 
   final String text;
   final bool busy;
   final bool error;
+  final bool empty;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -228,10 +240,14 @@ class _Message extends StatelessWidget {
             const CircularProgressIndicator(),
             const SizedBox(height: DMSpace.lg),
           ],
+          if (empty) ...[
+            const SkullMark(size: 48, color: DM.ash),
+            const SizedBox(height: DMSpace.xl),
+          ],
           if (error) ...[
             const Icon(
               Icons.error_outline,
-              color: DM.due,
+              color: DM.flatline,
               semanticLabel: 'Error',
             ),
             const SizedBox(height: DMSpace.md),
@@ -240,7 +256,7 @@ class _Message extends StatelessWidget {
             text,
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium
-                ?.copyWith(color: error ? DM.bone : DM.sub),
+                ?.copyWith(color: error ? DM.bone : DM.dust),
           ),
         ],
       ),

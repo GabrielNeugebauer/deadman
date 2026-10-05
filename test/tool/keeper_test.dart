@@ -368,7 +368,7 @@ void main() {
     const fees = FeeSchedule(
       treasury: '7ZQi6r2ZbKGCDFqKpvVjwMBVHzH2bqoqXuRnDKxDtjXY',
       feeBpsPublic: 200,
-      feeBpsPrivate: 500,
+      feeBpsPrivate: 300,
     );
     const now = 1790500000;
     const lastPulse = 1790000000;

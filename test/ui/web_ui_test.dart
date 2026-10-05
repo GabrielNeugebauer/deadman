@@ -8,6 +8,7 @@ import 'package:deadman/ui/screens/pulse_tab.dart';
 import 'package:deadman/ui/screens/settings_tab.dart';
 import 'package:deadman/ui/screens/welcome_screen.dart';
 import 'package:deadman/ui/web/web_ui.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:deadman/wallet/wallet_bridge.dart';
 import 'package:deadman/wallet/web_wallet_bridge.dart';
 import 'package:flutter/material.dart';
@@ -123,7 +124,7 @@ class _Harness {
             (ref) async => FeeSchedule(
               treasury: addr(9),
               feeBpsPublic: 200,
-              feeBpsPrivate: 500,
+              feeBpsPrivate: 300,
             ),
           ),
           walletBalanceProvider.overrideWith((ref) async => 1000000000),
@@ -191,6 +192,25 @@ void main() {
       await h.pump(tester, const WelcomeScreen(), web: false);
       expect(find.text('Connect Seed Vault wallet'), findsOneWidget);
       expect(find.text('Web'), findsNothing);
+    });
+
+    testWidgets('welcome is the brand splash: skull, wordmark, tagline', (
+      tester,
+    ) async {
+      final h = _Harness();
+      await h.pump(tester, const WelcomeScreen(), web: false);
+      expect(find.byType(DeadmanLockup), findsOneWidget);
+      expect(find.byType(SkullMark), findsOneWidget);
+      final tagline = tester.widget<Text>(
+        find.byKey(const ValueKey('welcome-tagline')),
+      );
+      expect(tagline.data, 'CHECK IN, OR CHECK OUT.');
+      expect(tagline.style?.fontFamily, contains('Silkscreen'));
+      expect(find.bySemanticsLabel('Check in, or check out.'), findsOneWidget);
+      expect(
+        find.text('A dead man\'s switch for your Solana wallet.'),
+        findsOneWidget,
+      );
     });
   });
 
@@ -299,7 +319,10 @@ void main() {
       );
       expect(find.text('Move guard to this phone'), findsNothing);
       expect(find.text('Guarded by another device'), findsNothing);
-      expect(find.byIcon(Icons.account_balance_wallet_outlined), findsWidgets);
+      expect(_dmIcon(DMIcons.wallet), findsWidgets);
+      // No pull-to-refresh with a mouse: the header carries a button.
+      expect(find.byTooltip('Refresh'), findsOneWidget);
+      expect(_dmIcon(DMIcons.fingerprint), findsNothing);
 
       await tester.tap(find.text('Check in'));
       // The tab ticks every second, so it never settles.
@@ -312,6 +335,12 @@ void main() {
       expect(h.api.pulsed, isEmpty);
       expect(h.wallet.approvals, 1);
       expect(find.text('Pulse recorded on 2 plans.'), findsOneWidget);
+      // The check-in toast leads with the pixel heart, as in the mockup.
+      final heart = find.descendant(
+        of: find.byType(SnackBar),
+        matching: find.byType(PixelArt),
+      );
+      expect(tester.widget<PixelArt>(heart).sprite, PixelSprites.heart);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -325,7 +354,8 @@ void main() {
         saved: {'owner': addr(1)},
       );
       expect(find.text('Move guard to this phone'), findsOneWidget);
-      expect(find.byIcon(Icons.fingerprint), findsOneWidget);
+      expect(_dmIcon(DMIcons.fingerprint), findsOneWidget);
+      expect(find.byTooltip('Refresh'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -358,3 +388,6 @@ void main() {
     expect(routeOffLabel('Zcash', web: false), 'Route via Zcash: mainnet only');
   });
 }
+
+Finder _dmIcon(DMIcons icon) =>
+    find.byWidgetPredicate((w) => w is DMIcon && w.icon == icon);

@@ -121,16 +121,16 @@ If the deploy stops halfway, the CLI prints a 12-word phrase for the intermediat
 
 ## 4. Initialize Config
 
-`init_config` must be signed by the program's **current upgrade authority**, and that signer becomes `Config.admin` for good: there is no instruction to rotate the admin. The admin can later change the treasury and both fees (`set_config`, capped at 5%). So choose who the admin is now:
+`init_config` must be signed by the program's **current upgrade authority**, and that signer becomes `Config.admin` for good: there is no instruction to rotate the admin. The admin can later change the treasury and both fees (`set_config` through `tool/set_config.dart`, capped at 5%). So choose who the admin is now:
 
 - **A, simple:** run it now with the deploy key, before step 6. The deploy key then stays the fee admin; keep it offline after the deploy.
 - **B, preferred:** do step 6 first, then run `init_config` as a Squads proposal (Squads "Transaction builder", or build the same instruction as `tool/init_config.dart` with the Squads vault as admin). The multisig is then both upgrade authority and fee admin.
 
-Option A, with the treasury as a wallet you control (a Squads vault is fine as treasury in either option) and 2% / 5% fees **(spends ~0.001 SOL)**:
+Option A, with the treasury as a wallet you control (a Squads vault is fine as treasury in either option) and 2% / 3% fees **(spends ~0.001 SOL)**:
 
 ```bash
 dart run tool/init_config.dart --keypair "$DEPLOYER" \
-  --treasury <TREASURY_ADDRESS> --fee-public 200 --fee-private 500 --rpc "$RPC_URL"
+  --treasury <TREASURY_ADDRESS> --fee-public 200 --fee-private 300 --rpc "$RPC_URL"
 solana account BqTe2haaD7dPfc4dmYQFaGrczbMhrXiuddc2knjvoCgr --url "$RPC_URL"   # 77 bytes, owner = program
 ```
 
@@ -288,7 +288,7 @@ flutter build apk --release \
      --return-to <your wallet> --i-funded-this
    ```
 
-What it does, in order: (a) creates an inheritance plan with a 60 s check-in interval and two tiers due at 120 s: 0.05 SOL to claim key A on the Zcash rail and 0.035 SOL (or `--cloak-usdc 2` USDC) to claim key B on the Cloak rail, and deposits; (b) waits until they are due and executes them with the keeper's payability check; (c) routes claim key A through 1Click to your u1 and tracks it to `SUCCESS` (about 3 minutes); (d) routes claim key B through Cloak in headless Chromium (`tool/cloak_bundle/live.mjs`: deposit, proof, private send to `--cloak-dest`) and checks what arrived; (e) creates a 1 USDC vesting plan over 60 s, releases it once and checks the heir got it minus 2%; (f) closes both plans and sweeps every key (owner, guard, claim keys, heir; SOL and USDC, closing token accounts) to `--return-to`. It prints a summary table with Solscan links and the funds started, swept back, delivered and spent.
+What it does, in order: (a) creates an inheritance plan (`create_plan`) with two tiers due 120 s after the last check-in: 0.05 SOL to claim key A on the Zcash rail and 0.035 SOL (or `--cloak-usdc 2` USDC) to claim key B on the Cloak rail, and deposits; (b) waits until they are due and executes them with the keeper's payability check; (c) routes claim key A through 1Click to your u1 and tracks it to `SUCCESS` (about 3 minutes); (d) routes claim key B through Cloak in headless Chromium (`tool/cloak_bundle/live.mjs`: deposit, proof, private send to `--cloak-dest`) and checks what arrived; (e) creates a 1 USDC vesting plan over 60 s, releases it once and checks the heir got it minus 2%; (f) closes both plans and sweeps every key (owner, guard, claim keys, heir; SOL and USDC, closing token accounts) to `--return-to`. It prints a summary table with Solscan links and the funds started, swept back, delivered and spent.
 
 Expected spend with the defaults: protocol fees 0.00425 SOL and 0.02 USDC (to your treasury), the 1Click spread (about 0.002 SOL), the Cloak exit fee (0.005 SOL + 0.3%), the vesting vault's USDC account rent (0.0015 SOL; `close_vault` leaves token accounts), the treasury's USDC account if it is new (0.0015 SOL) and network fees: about **0.015 SOL and 0.02 USDC**. The ZEC (about 0.004 ZEC for 0.0475 SOL on 2026-10-04) arrives in your Zcash wallet, and about 0.023 SOL at `--cloak-dest`.
 
@@ -297,7 +297,8 @@ Every step is resumable: after any failure, fix the cause and run the same comma
 ## Rollback and upgrades
 
 - **No state rollback.** An upgrade replaces code, not accounts. To undo a bad upgrade, redeploy the previous verifiable binary through Squads (keep every released `.so` and its hash).
-- **Layout.** `Vault` is final for mainnet: new fields must come out of `_reserved` (64 bytes) and keep `Vault::SPACE` at 1390, so existing accounts read with the new fields zeroed. Never reorder fields. `Config` has no padding: a Config change needs a migration instruction.
+- **Layout.** `Vault` is final for mainnet: new fields must come out of `_reserved` (64 bytes) and keep `Vault::SPACE` at 1390, so existing accounts read with the new fields zeroed. Never reorder fields. `_reserved_interval` (the former check-in interval) is zero only on plans created after the 2026-10-05 rename; older accounts keep their old bytes there, so do not reuse that slot without a migration.
+- **Instruction renames.** `create_vault` / `update_policy` became `create_plan` / `update_plan` without `interval_secs`. Their discriminators changed, so an old app build fails with `InstructionFallbackNotFound` (101) instead of misreading its arguments; ship the matching app and gateway together with the program. `Config` has no padding: a Config change needs a migration instruction.
 - **Pausing.** The program has no pause switch. Stopping the Kora nodes (`scripts/kora_stop.sh`) and the keeper stops sponsored check-ins, USDC fees and automatic execution; owners and beneficiaries can still act from their own wallets. Shipping an app build with `KORA_*` unset forces SOL fees.
 - **Freezing.** `solana program set-upgrade-authority $PROGRAM_ID --final` makes the program immutable forever, bugs included. Only after an audit and a long quiet period.
 - **Closing.** `solana program close` returns the program-data rent but bricks every vault and frees nothing inside them. Never on mainnet with live vaults.

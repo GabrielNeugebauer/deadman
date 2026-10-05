@@ -8,7 +8,6 @@ VaultState withPeriod(VaultState v, int periodSecs) => VaultState(
   label: v.label,
   guard: v.guard,
   guardian: v.guardian,
-  intervalSecs: v.intervalSecs,
   lockSecs: v.lockSecs,
   skipGraceSecs: v.skipGraceSecs,
   lastPulse: v.lastPulse,

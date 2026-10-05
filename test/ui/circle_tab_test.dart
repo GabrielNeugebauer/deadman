@@ -30,6 +30,8 @@ Future<FakeApi> _pump(
   Map<String, int> tokens = const {},
   FakeApi? fake,
   WalletBridge? wallet,
+  bool web = false,
+  Future<List<VaultState>> Function()? load,
 }) async {
   tester.view.physicalSize = const Size(1200, 4000);
   tester.view.devicePixelRatio = 1;
@@ -45,7 +47,10 @@ Future<FakeApi> _pump(
         prefsProvider.overrideWithValue(prefs),
         apiProvider.overrideWithValue(api),
         secureStoreProvider.overrideWithValue(FakeSecureStore()),
-        watchedVaultsProvider.overrideWith((ref) async => watched),
+        watchedVaultsProvider.overrideWith(
+          (ref) => load == null ? Future.value(watched) : load(),
+        ),
+        isWebProvider.overrideWithValue(web),
         zcashRouteProvider.overrideWithValue(zcash),
         cloakRouteProvider.overrideWith((ref) async => cloak),
         cloakStatusRouteProvider.overrideWithValue(cloak),
@@ -128,7 +133,6 @@ VaultState _with(VaultState v, {String? guardian, int lockedUntil = 0}) =>
       label: v.label,
       guard: v.guard,
       guardian: guardian,
-      intervalSecs: v.intervalSecs,
       lockSecs: v.lockSecs,
       skipGraceSecs: v.skipGraceSecs,
       lastPulse: v.lastPulse,
@@ -147,11 +151,28 @@ VaultState _with(VaultState v, {String? guardian, int lockedUntil = 0}) =>
       revokedAt: v.revokedAt,
     );
 
-/// The status chip whose label reads [label].
-Finder _chip(String label) => find.widgetWithText(StatusChip, label);
+/// The status sticker whose word reads [label].
+Finder _sticker(String label) => find.widgetWithText(StatusSticker, label);
 
-Color? _color(WidgetTester tester, String text) =>
-    tester.widget<Text>(find.text(text)).style?.color;
+/// The pixel figure drawn on the sticker reading [label]; null for none.
+PixelSprite? _figure(WidgetTester tester, String label) {
+  final art = find.descendant(
+    of: _sticker(label),
+    matching: find.byType(PixelArt),
+  );
+  return art.evaluate().isEmpty ? null : tester.widget<PixelArt>(art).sprite;
+}
+
+/// Pixel figures of [sprite] anywhere on screen.
+Finder _art(PixelSprite sprite) =>
+    find.byWidgetPredicate((w) => w is PixelArt && w.sprite == sprite);
+
+/// Color of the Text reading [text] (a String) or found by [text] (a
+/// Finder).
+Color? _color(WidgetTester tester, Object text) => tester
+    .widget<Text>(text is Finder ? text : find.text(text as String))
+    .style
+    ?.color;
 
 FilledButton _button(WidgetTester tester, String text) =>
     tester.widget<FilledButton>(find.widgetWithText(FilledButton, text));
@@ -168,6 +189,12 @@ void main() {
       find.text('Waiting for funds: this plan holds no USDC yet'),
       findsOneWidget,
     );
+    // Why the button is off reads in bone with an info mark, not amber.
+    expect(
+      _color(tester, 'Waiting for funds: this plan holds no USDC yet'),
+      DM.bone,
+    );
+    expect(find.byIcon(Icons.info_outline), findsOneWidget);
     expect(
       find.text(
         'Deadman skips it automatically after the grace period; '
@@ -311,6 +338,10 @@ void main() {
         find.text('Free: no SOL needed, Deadman pays the fee'),
         findsOneWidget,
       );
+      expect(
+        _color(tester, 'Free: no SOL needed, Deadman pays the fee'),
+        DM.ash,
+      );
     });
 
     testWidgets('a USDC tier shows the fee taken from the prize', (
@@ -369,6 +400,7 @@ void main() {
       );
       expect(_button(tester, 'Release this tier').onPressed, isNull);
       expect(find.text(why), findsOneWidget);
+      expect(_color(tester, why), DM.bone);
     });
 
     testWidgets('waiting for funds wins over the quote', (tester) async {
@@ -531,9 +563,8 @@ void main() {
   group('standing', () {
     int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-    testWidgets('a due tier: DUE chip, due time label, signal button', (
-      tester,
-    ) async {
+    testWidgets('a due tier: TIER DUE sticker with the due skull, the '
+        'tombstone on the tier, pulse button', (tester) async {
       final v = vault(
         label: 'Test',
         withdrawableLamports: 1000000000,
@@ -541,45 +572,77 @@ void main() {
       );
       await _pump(tester, [v]);
 
-      expect(_chip('DUE'), findsOneWidget);
-      expect(find.text('Test · ${short(addr(1))}'), findsOneWidget);
+      expect(_sticker('TIER DUE'), findsOneWidget);
+      expect(_figure(tester, 'TIER DUE'), PixelSprites.skullDue);
+      expect(find.text('Test'), findsOneWidget);
+      expect(find.text('Owner ${short(addr(1))}'), findsOneWidget);
       expect(find.text('Silent past a release tier'), findsOneWidget);
-      expect(_color(tester, 'Due now'), DM.due);
+      expect(find.text('TIER 1'), findsOneWidget);
+      expect(_color(tester, 'Due now'), DM.flatline);
+      expect(_art(PixelSprites.tombstone), findsOneWidget);
+      expect(
+        tester.widget<PixelArt>(_art(PixelSprites.tombstone)).color,
+        DM.flatline,
+      );
       expect(find.widgetWithText(DMTag, 'Solana'), findsOneWidget);
-      // Status color never fills the action: the theme's signal button.
+      // Status color never fills the action: the theme's pulse button.
       expect(_button(tester, 'Release this tier').style, isNull);
     });
 
-    testWidgets('checked in recently: ON TRACK, no status sentence', (
-      tester,
-    ) async {
+    testWidgets('checked in recently: ALIVE with the mark skull, a pulse '
+        'heart, no status sentence, no streak', (tester) async {
       final v = vault(lastPulse: now() - 60, rules: [rule()]);
       await _pump(tester, [v]);
 
-      expect(_chip('ON TRACK'), findsOneWidget);
+      expect(_sticker('ALIVE'), findsOneWidget);
+      expect(_figure(tester, 'ALIVE'), PixelSprites.skull);
       expect(find.textContaining('Last check-in 1m'), findsOneWidget);
-      expect(find.textContaining('-day streak'), findsOneWidget);
       expect(find.textContaining('Releases after 9d'), findsOneWidget);
       expect(
-        _color(
-          tester,
-          'Last check-in ${ago(v.lastPulse, now())} · '
-          '1-day streak',
-        ),
-        DM.sub,
+        _color(tester, 'Last check-in ${ago(v.lastPulse, now())}'),
+        DM.dust,
+      );
+      expect(_color(tester, find.textContaining('Releases after')), DM.dust);
+      expect(tester.widget<PixelArt>(_art(PixelSprites.heart)).color, DM.pulse);
+      expect(
+        find.textContaining(RegExp('streak', caseSensitive: false)),
+        findsNothing,
       );
       expect(find.text('Silent past a release tier'), findsNothing);
+      expect(_art(PixelSprites.tombstone), findsNothing);
       expect(find.byType(FilledButton), findsNothing);
     });
 
-    testWidgets('a missed check-in: attention chip with the silence', (
+    testWidgets('an unnamed plan is titled by its owner address', (
       tester,
     ) async {
+      await _pump(tester, [
+        vault(lastPulse: now() - 60, rules: [rule()]),
+      ]);
+
+      expect(find.text(short(addr(1))), findsOneWidget);
+      expect(find.textContaining('Owner '), findsNothing);
+    });
+
+    testWidgets('days of silence stay ALIVE while the next release counts '
+        'down: no amber, a pulse heart', (tester) async {
       final v = vault(lastPulse: now() - 8 * 86400 - 30, rules: [rule()]);
       await _pump(tester, [v]);
 
-      expect(_chip('8D 0H SILENT'), findsOneWidget);
-      expect(find.text('Missed a check-in'), findsOneWidget);
+      expect(_sticker('ALIVE'), findsOneWidget);
+      expect(_sticker('MISSED'), findsNothing);
+      expect(find.text('Missed a check-in'), findsNothing);
+      expect(_color(tester, 'Last check-in 8d 0h ago'), DM.dust);
+      expect(_color(tester, find.textContaining('Releases after 1d')), DM.dust);
+      expect(tester.widget<PixelArt>(_art(PixelSprites.heart)).color, DM.pulse);
+    });
+
+    testWidgets('a due tier greys the heart', (tester) async {
+      final v = vault(lastPulse: now() - 11 * 86400, rules: [rule()]);
+      await _pump(tester, [v]);
+
+      expect(_sticker('TIER DUE'), findsOneWidget);
+      expect(tester.widget<PixelArt>(_art(PixelSprites.heart)).color, DM.ash);
     });
 
     testWidgets('a locked vault names the lock and that releases run; '
@@ -591,7 +654,10 @@ void main() {
       );
       await _pump(tester, [v]);
 
-      expect(_chip('LOCKED'), findsOneWidget);
+      expect(_sticker('LOCKED'), findsOneWidget);
+      expect(_figure(tester, 'LOCKED'), PixelSprites.lock);
+      // Locked, but the owner checked in a minute ago: the heart stays pulse.
+      expect(tester.widget<PixelArt>(_art(PixelSprites.heart)).color, DM.pulse);
       expect(
         find.textContaining('Vault locked for 29d 0h · releases still run'),
         findsOneWidget,
@@ -605,7 +671,8 @@ void main() {
       final v = vault(rules: [rule(executedAt: now() - 3)]);
       await _pump(tester, [v]);
 
-      expect(_chip('RELEASED'), findsOneWidget);
+      expect(_sticker('RELEASED'), findsOneWidget);
+      expect(_figure(tester, 'RELEASED'), PixelSprites.ghost);
       expect(find.text('Plan fully released'), findsOneWidget);
       expect(
         find.textContaining(RegExp(r'^Released \d+s ago · ')),
@@ -623,7 +690,11 @@ void main() {
       );
       await _pump(tester, [v]);
 
-      expect(_chip('VESTING'), findsOneWidget);
+      expect(_sticker('VESTING'), findsOneWidget);
+      // Vesting is not a mood: the word only, no skull.
+      expect(_figure(tester, 'VESTING'), isNull);
+      expect(find.text('SCHEDULE 1'), findsOneWidget);
+      expect(_art(PixelSprites.heart), findsNothing);
       expect(
         find.text('Vesting plan · revocable by the owner'),
         findsOneWidget,
@@ -637,7 +708,15 @@ void main() {
       final v = vestingVault(revokedAt: 2000, schedules: [schedule(seed: 10)]);
       await _pump(tester, [v]);
 
-      expect(_chip('REVOKED'), findsOneWidget);
+      expect(_sticker('REVOKED'), findsOneWidget);
+      expect(_figure(tester, 'REVOKED'), isNull);
+      // Revoked is not a missed check-in: never amber.
+      expect(
+        tester
+            .widgetList<Text>(find.byType(Text))
+            .where((t) => t.style?.color == DM.missed),
+        isEmpty,
+      );
       expect(
         find.text('Vesting revoked; vested amounts stay claimable'),
         findsOneWidget,
@@ -650,7 +729,50 @@ void main() {
       expect(find.text('Family Circle'), findsOneWidget);
       expect(find.text('Nobody has named you yet.'), findsOneWidget);
       expect(find.widgetWithText(OutlinedButton, short(me)), findsOneWidget);
-      expect(find.byType(StatusChip), findsNothing);
+      expect(find.byType(StatusSticker), findsNothing);
+      expect(find.byType(PixelSkull), findsOneWidget);
+      // The phone pulls to refresh; only the web build shows a button.
+      expect(find.byTooltip('Refresh'), findsNothing);
+    });
+
+    testWidgets('on the web a square Refresh button reloads the plans', (
+      tester,
+    ) async {
+      var loads = 0;
+      await _pump(
+        tester,
+        const [],
+        web: true,
+        load: () async {
+          loads++;
+          return const [];
+        },
+      );
+      expect(loads, 1);
+      expect(
+        find.descendant(
+          of: find.byType(DMSquareButton),
+          matching: find.byIcon(Icons.refresh),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pumpAndSettle();
+      expect(loads, 2);
+    });
+
+    testWidgets('a failed lookup explains itself without status color', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        const [],
+        load: () async => throw const DeadmanException('RPC unreachable'),
+      );
+      expect(find.text('Could not load the plans naming you'), findsOneWidget);
+      expect(find.textContaining('RPC unreachable'), findsOneWidget);
+      expect(find.text('Pull down to try again.'), findsOneWidget);
+      expect(_color(tester, find.textContaining('RPC unreachable')), DM.dust);
     });
   });
 }

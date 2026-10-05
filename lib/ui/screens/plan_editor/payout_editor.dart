@@ -59,11 +59,12 @@ class PayoutEditorPage extends ConsumerStatefulWidget {
     this.initial,
     required this.number,
     required this.others,
-    required this.intervalSecs,
     required this.demo,
     required this.basis,
     required this.defaultMint,
     required this.defaultAfterSecs,
+    this.step = 1,
+    this.steps = 3,
   });
 
   /// Null for a new payout.
@@ -74,13 +75,18 @@ class PayoutEditorPage extends ConsumerStatefulWidget {
 
   /// The plan's other pending payouts with their display numbers.
   final List<(int, PayoutDraft)> others;
-  final int intervalSecs;
+
+  /// Demo timings: minute presets and units.
   final bool demo;
 
   /// The balance of an asset given all payouts; null while unknown.
   final BalanceBasis? Function(String? mint, List<PayoutDraft> all) basis;
   final String? defaultMint;
   final int defaultAfterSecs;
+
+  /// Where the plan editor that opened this is: "STEP 1/3".
+  final int step;
+  final int steps;
 
   @override
   ConsumerState<PayoutEditorPage> createState() => _PayoutEditorPageState();
@@ -108,8 +114,12 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         : amountInput(_init!.fixedAmount!, _init.mint),
   );
   late int _after = _init?.afterSecs ?? widget.defaultAfterSecs;
-  late bool _custom = !delayChoices(widget.intervalSecs).contains(_after);
-  late int _customUnit = widget.demo && _after % 86400 != 0 ? 60 : 86400;
+  late bool _custom = !delayChoices(demo: widget.demo).contains(_after);
+  late int _customUnit = _after % 86400 == 0
+      ? 86400
+      : _after % 3600 == 0
+      ? 3600
+      : 60;
   late final _customValue = TextEditingController(
     text: '${_after ~/ _customUnit}',
   );
@@ -256,7 +266,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
   void _done() {
     final d = _draft;
     final errors = [
-      ...d.validate(intervalSecs: widget.intervalSecs),
+      ...d.validate(),
       if (d.beneficiary == ref.read(sessionProvider).owner)
         const PlanIssue(IssueCode.b1, Severity.error, body: ''),
     ];
@@ -320,13 +330,15 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         if (!didPop) _cancel();
       },
       child: Scaffold(
-        appBar: AppBar(
+        appBar: editorAppBar(
           leading: IconButton(
             tooltip: 'Cancel',
             icon: const Icon(Icons.close),
             onPressed: _cancel,
           ),
-          title: Text(_init == null ? 'New payout' : 'Payout ${widget.number}'),
+          title: _init == null ? 'New payout' : 'Payout ${widget.number}',
+          step: widget.step,
+          steps: widget.steps,
           actions: [
             if (_init != null)
               TextButton(onPressed: _remove, child: const Text('Remove')),
@@ -336,7 +348,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
           controller: _scroll,
           padding: const EdgeInsets.fromLTRB(
             DMSpace.gutter,
-            DMSpace.sm,
+            DMSpace.xxl,
             DMSpace.gutter,
             DMSpace.xxxl,
           ),
@@ -353,10 +365,9 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                 loading: facts?.isLoading ?? false,
                 notice: b1,
               ),
-              const SizedBox(height: DMSpace.md),
-              SectionCard(
+              EditorSection(
                 key: _whatKey,
-                number: 2,
+                sprite: EditorSprites.coin,
                 title: 'What they get',
                 children: [
                   const FieldLabel('Which money'),
@@ -396,13 +407,11 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                     ),
                 ],
               ),
-              const SizedBox(height: DMSpace.md),
               _whenSection(draft),
             ],
           ),
         ),
         bottomNavigationBar: EditorBar(
-          color: DM.graphite,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -428,7 +437,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                   padding: const EdgeInsets.only(top: DMSpace.xxs),
                   child: Text(
                     "Couldn't load fees. Amounts shown before fees.",
-                    style: DMType.outfit(size: 13, color: DM.sub),
+                    style: DMType.outfit(size: 13, color: DM.ash),
                   ),
                 ),
               const SizedBox(height: DMSpace.md),
@@ -446,7 +455,8 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
     BalanceBasis? basis,
     FeeInfo fee,
   ) {
-    final tail = ' to ${d.who} after ${delayText(d.afterSecs)} of silence';
+    final tail =
+        ' to ${d.who} ${delayText(d.afterSecs)} after your last check-in';
     if (d.amount == null) {
       return const TextSpan(text: 'Enter an amount to see what they get.');
     }
@@ -463,7 +473,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
         ),
         TextSpan(
           text: moneyText(net, d.mint),
-          style: DMType.mono(size: 15, weight: FontWeight.w700),
+          style: DMType.mono(size: 17, weight: FontWeight.w700, color: DM.bone),
         ),
         TextSpan(text: '$tail ${fee.note(d.rail)}'),
       ],
@@ -471,21 +481,20 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
   }
 
   Widget _whenSection(PayoutDraft d) {
-    final interval = widget.intervalSecs;
-    final chips = delayChoices(interval);
-    final error = delayError(_after, interval);
+    final chips = delayChoices(demo: widget.demo);
+    final error = delayError(_after);
     final earlier = [
       for (final (n, p) in widget.others)
-        if (p.mint == _mint && p.afterSecs < _after)
+        if (p.mint == _mint && p.afterSecs <= _after)
           'Payout $n (${p.who}, ${delayText(p.afterSecs)})',
     ];
-    final muted = DMType.outfit(size: 14, color: DM.sub, height: 1.45);
-    return SectionCard(
+    final muted = DMType.outfit(size: 14, color: DM.dust, height: 1.45);
+    return EditorSection(
       key: _whenKey,
-      number: 3,
+      sprite: PixelSprites.tombstone,
       title: 'When',
       children: [
-        const FieldLabel('Send it after this long without a check-in'),
+        const FieldLabel('Send after this long since your last check-in'),
         Wrap(
           spacing: DMSpace.sm,
           runSpacing: DMSpace.xxs,
@@ -516,53 +525,56 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: TextField(
-                  controller: _customValue,
-                  onChanged: _setCustom,
-                  keyboardType: TextInputType.number,
-                  style: DMType.mono(size: 16),
-                  decoration: const InputDecoration(labelText: 'Number'),
+                child: LabeledField(
+                  label: 'Number',
+                  child: TextField(
+                    controller: _customValue,
+                    onChanged: _setCustom,
+                    keyboardType: TextInputType.number,
+                    style: DMType.mono(size: 16),
+                  ),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: DMSpace.md),
               Expanded(
-                child: DropdownButtonFormField<int>(
-                  initialValue: _customUnit,
-                  items: [
-                    const DropdownMenuItem(value: 86400, child: Text('days')),
-                    if (widget.demo)
-                      const DropdownMenuItem(value: 60, child: Text('minutes')),
-                  ],
-                  onChanged: (u) {
-                    _customUnit = u!;
-                    _setCustom(_customValue.text);
-                  },
+                child: LabeledField(
+                  label: 'Unit',
+                  child: DropdownButtonFormField<int>(
+                    initialValue: _customUnit,
+                    items: [
+                      const DropdownMenuItem(value: 86400, child: Text('days')),
+                      const DropdownMenuItem(value: 3600, child: Text('hours')),
+                      if (widget.demo || _customUnit == 60)
+                        const DropdownMenuItem(
+                          value: 60,
+                          child: Text('minutes'),
+                        ),
+                    ],
+                    onChanged: (u) {
+                      _customUnit = u!;
+                      _setCustom(_customValue.text);
+                    },
+                  ),
                 ),
               ),
             ],
           ),
         ],
-        if (error != null)
-          WarningTile.of(
-            error,
-            onAction: error.action == null
-                ? null
-                : () => setState(() {
-                    _custom = false;
-                    _after = chips.first;
-                    _dirty = true;
-                  }),
-          ),
-        const SizedBox(height: DMSpace.sm),
-        DelayStrip(intervalSecs: interval, delaySecs: _after),
+        if (error != null) WarningTile.of(error),
+        const SizedBox(height: DMSpace.lg),
+        DelayStrip(delaySecs: _after),
+        const SizedBox(height: DMSpace.md),
         Text(
-          'You check in every ${delayText(interval)}. If you stop, this is sent '
-          '${delayText(_after)} after your last check-in'
-          '${_after > interval ? ' (${delayText(_after - interval)} after you miss one)' : ''}.',
+          'If you stop checking in, this is sent ${delayText(_after)} after '
+          'your last check-in. Any check-in before then restarts the clock.',
           style: muted,
         ),
         const SizedBox(height: DMSpace.xxs),
-        Text('Any check-in before then restarts the clock.', style: muted),
+        Text(
+          'Payouts are sent in order of their wait, shortest first, so a '
+          "share is taken from what's left after the earlier ones.",
+          style: muted,
+        ),
         if (earlier.isNotEmpty) ...[
           const SizedBox(height: DMSpace.xxs),
           Text('Runs after: ${earlier.join(', ')}.', style: muted),

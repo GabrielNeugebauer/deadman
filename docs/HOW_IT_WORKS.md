@@ -24,7 +24,7 @@ flowchart LR
   SVW -- "same txs, fees in USDC" --> Paymaster["Kora paymaster\n(gateway :8081)"] --> Program
   Guard -- "pulse, lockdown" --> Sponsor["Kora sponsor\n(gateway :8080)"] --> Program
   Keeper["Keeper bot\n(tool/keeper.dart)"] -- "execute due tiers,\nrelease vested amounts" --> Program
-  Program -- "2% / 5% fee" --> Treasury["Treasury"]
+  Program -- "2% / 3% fee" --> Treasury["Treasury"]
   Program -- "Solana rail" --> Heir["Beneficiary wallet"]
   Program -- "private rails" --> Claim
   Claim -- "Zcash rail" --> NEAR["NEAR Intents 1Click"] --> ZEC["Shielded u1 address"]
@@ -50,7 +50,7 @@ The Solana program is the only component that holds funds. Everything else signs
 | Solana client  | **`solana` Dart 0.32** + a hand-written Borsh codec                             | RPC and keypairs come from the package. Instruction and account encoding is written against the IDL and tested byte by byte (`test/solana/codec_test.dart`; 333 Flutter tests in all).                                                                                                                                  |
 | Device secrets | **flutter_secure_storage** (Android Keystore)                                   | Holds the guard key, the claim-key recovery phrase (claim keys derive from it) and salted SHA-256 PIN hashes.                                                                                                                                                            |
 | Biometrics     | **local_auth**                                                                  | A fingerprint gates every pulse.                                                                                                                                                                                                                                         |
-| Reminders      | **workmanager** + **flutter_local_notifications**                               | An hourly background check notifies you before a check-in is due. Android may delay it in Doze, which is acceptable: the on-chain timer is the source of truth, and each tier has a margin after the check-in deadline.                                                  |
+| Reminders      | **workmanager** + **flutter_local_notifications**                               | An hourly background check reminds you 3 days, 1 day and 1 hour before the next tier releases, and at the release. Android may delay it in Doze, which is acceptable: the on-chain timer is the source of truth.                                                  |
 | Zcash rail     | **NEAR Intents 1Click API**                                                     | The only verified way (Oct 2026) to swap Solana assets into **shielded** ZEC (`u1` unified addresses) with a plain REST API, which works from Dart.                                                                                                                      |
 | Cloak rail     | **Cloak SDK 0.2.5** in a **headless WebView** (`flutter_inappwebview` 6.2 beta) | Every Cloak deposit needs a Groth16 zero-knowledge proof. The only prover is Cloak's TypeScript SDK (snarkjs + WebAssembly), and no Dart prover exists. We bundle it (3.4 MB) and run it in an invisible WebView on the phone, so the claim key never leaves the device. |
 | Yield          | **Jupiter Swap V2** (`/order` + `/execute`) into **JitoSOL**                    | Jupiter's current API returns an unsigned v0 transaction that MWA can sign, and supports an integrator referral fee. A direct Jito stake-pool deposit is cheaper for the user but earns the protocol nothing.                                                            |
@@ -86,7 +86,7 @@ beneficiary · rail (Solana | Cloak | Zcash) · after_secs of silence
 asset (SOL or a token mint) · Fixed amount or Percent of the balance at release time
 ```
 
-- **When a rule is due:** after `last_pulse + after_secs`. A check-in resets every pending rule, so if you come back after a long trip, the remaining tiers stop. Tiers that already paid stay paid, and editing the plan keeps them as history (they can never pay twice).
+- **When a rule is due:** after `last_pulse + after_secs`. There is no separate check-in schedule: each tier's wait (1 minute to about 3 years, `create_plan` / `update_plan`) is the timer, and the app shows the plan as alive (green) until the next tier's time runs out. A check-in resets every pending rule, so if you come back after a long trip, the remaining tiers stop. Tiers that already paid stay paid, and editing the plan keeps them as history (they can never pay twice).
 - **Who can check in:** the phone's guard key (fingerprint, free) for day-to-day check-ins, but only within **365 days of the owner's last wallet-signed action**, and never after a tier has released without the owner confirming since. After that, only a "Confirm with wallet" check-in counts, so someone holding the phone cannot keep a plan alive forever.
 - **Order:** rules are sorted by delay. For the _same asset_, a rule can't run before the earlier ones. Percent tiers apply to **what is left** of that asset when they run ("50% then 50%" pays 50% and 25%; make the last tier 100% so nothing is left behind). Different assets don't block each other.
 - **A tier that can't pay doesn't block the others:** payouts go to the beneficiary's standard token account (or another account it owns, if the beneficiary signs the release itself), and if a tier still can't pay after the plan's **grace period** (chosen by the owner, 1 minute to 366 days, 30 days by default), anyone can skip it: the later tiers may then run, but the skipped tier's share stays **reserved** for its own beneficiary, who can still claim it at any time. Skipping never moves value to anyone else.
@@ -115,7 +115,7 @@ plan-wide: start_at · revocable · period (installment length)
 
   So a schedule pays a fixed installment (`total * period / duration`) at each boundary and nothing in between: a claim right after an installment fails with `NothingToPay` until the next boundary. Missed installments add up and are paid together. When the duration is not a whole number of periods, the last installment is the remainder, paid exactly at `start_at + duration`. A cliff longer than one period unlocks every installment it covered at once, at the cliff itself.
 - **Period limits:** 60 seconds (`MIN_VEST_PERIOD_SECS`) up to the shortest schedule's duration; anything else is `InvalidVesting`. `period_secs = 0` keeps the original **continuous** (per-second) vesting, which is also how every plan created before installments existed reads (its reserved bytes are zero).
-- **Release:** anyone may call `release_vested_sol` / `release_vested_token`; the destination is fixed in the schedule. It pays what has vested and not yet been released, capped at the vault balance, minus **the same release fee as inheritance** (2% Solana rail, 5% private rails, rounded down). The keeper releases an installment plan as soon as something has unlocked; continuous plans at most once per `--vest-interval` (default 1 day), and always once fully vested.
+- **Release:** anyone may call `release_vested_sol` / `release_vested_token`; the destination is fixed in the schedule. It pays what has vested and not yet been released, capped at the vault balance, minus **the same release fee as inheritance** (2% Solana rail, 3% private rails, rounded down). The keeper releases an installment plan as soon as something has unlocked; continuous plans at most once per `--vest-interval` (default 1 day), and always once fully vested.
 - **Revocable or irrevocable**, chosen at creation. `revoke_vesting` (revocable plans only) stops future vesting; what had vested by then **stays claimable** by the beneficiary. With installments that is only the installments unlocked before the revocation; a partly elapsed period goes back to the owner.
 - **Committed funds:** the owner may deposit at any time but can withdraw only what the plan does not owe (`FundsCommitted`). The plan closes only when nothing is owed (fully released, or revoked and the vested part released).
 - **No check-ins:** vesting plans are not part of "I'm alive" (`pulse` refuses them) and have no tiers to reset. They **are** covered by lockdown: the duress PIN and Panic lock them too, which blocks withdraw, revoke and close (releases continue).
@@ -123,16 +123,16 @@ plan-wide: start_at · revocable · period (installment length)
 
 ### 3.5 Duress and lockdown
 
-`lockdown` freezes withdrawals, plan edits and closing for `lock_secs` (1 minute to 30 days, depending on your cadence preset). It **does not** stop inheritance: if you are coerced and then disappear, the tiers still fire. The duress PIN signs `lockdown` with the guard key in the background, while the app keeps looking normal. Withdrawals fail with a fake "Seed Vault timed out", so the attacker never sees a lock screen. Plan edits are blocked during a lockdown, so a coercer can't redirect the payouts to themselves.
+`lockdown` freezes withdrawals, plan edits and closing for `lock_secs` (1 minute to 30 days; the editor's Demo timings switch offers shorter locks). It **does not** stop inheritance: if you are coerced and then disappear, the tiers still fire. The duress PIN signs `lockdown` with the guard key in the background, while the app keeps looking normal. Withdrawals fail with a fake "Seed Vault timed out", so the attacker never sees a lock screen. Plan edits are blocked during a lockdown, so a coercer can't redirect the payouts to themselves.
 
 **Guardian rate limit:** when a guardian's lockdown expires, they can't lock again for another `lock_secs`. That guarantees you an unlocked window to remove a guardian who turned hostile.
 
 ### 3.6 Fees (your new pricing policy)
 
 - **Free to use.** Creating a vault, depositing, checking in and locking are free (Solana network fees only, paid in SOL, or in USDC through the paymaster, §3.8).
-- **Fee on release only**, charged on-chain from each payout, inheritance tier or vesting release: **2% on the Solana rail, 5% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
+- **Fee on release only**, charged on-chain from each payout, inheritance tier or vesting release: **2% on the Solana rail, 3% on private rails** (Cloak, Zcash). They are stored in the `Config` account; the admin can change them, but the program hard-caps both at **5%**.
 - **Why the private rails cost more:** the beneficiary gets privacy and cross-chain delivery, and a token payout also carries a SOL gas stipend (0.012 SOL on Cloak, 0.003 SOL on Zcash) so their claim key can route the funds.
-- **Why the fee lives in the program, not with the rail operators:** we measured NEAR Intents' `appFees` live. The fee you set is **split 50/50 with 1Click** and capped at 5% total, so a Deadman 5% through NEAR is impossible (2.5% maximum), and the fee would land inside NEAR, not in our Solana treasury. Charging on-chain is predictable and enforced the same way on every rail.
+- **Why the fee lives in the program, not with the rail operators:** we measured NEAR Intents' `appFees` live. The fee you set is **split 50/50 with 1Click** and capped at 5% total, so a Deadman 3% through NEAR is impossible (2.5% maximum), and the fee would land inside NEAR, not in our Solana treasury. Charging on-chain is predictable and enforced the same way on every rail.
 - If the treasury can't accept a tiny SOL fee (rent rules), the fee is waived to the beneficiary instead of blocking the payout.
 - **Or an optional monthly plan, for the whole account.** An owner can pay a flat price instead of the release fee: **10 USDC per 30 days on devnet**, set by the admin in the `SubscriptionConfig` PDA (`tool/set_subscription.dart`). A new or lapsed subscription buys at least **12 months** at once (so one cheap month cannot waive the fee on a large release); an active one can be extended by 1 to 36 months, from its current end date. One `Subscription` PDA per owner (`["sub", owner]`) covers **every plan of that owner, present and future, at 0% release fee**:
   - **Inheritance:** a tier releases fee-free if the owner's **last check-in happened while subscribed** (`paid_until >= last_pulse`). An owner who dies while subscribed leaves fee-free payouts even after the subscription runs out.
@@ -151,7 +151,7 @@ The program does no lending or staking calls (no CPI), so there is no extra smar
 **How Earn makes money:**
 
 - **Jupiter referral fee** on the swap: minimum **0.5%**, and Jupiter keeps 20% of it. The fee is off unless `JUP_REFERRAL_ACCOUNT` is set at build time, because a wrong referral account makes the swap fail.
-- **The normal 2–5% release fee**, which now applies to a balance that grew with the yield.
+- **The normal 2–3% release fee**, which now applies to a balance that grew with the yield.
 
 **Risks:** JitoSOL can trade below SOL in a crisis; swaps have slippage; and a 0.5% referral equals about 38 days of yield, so heavy fees make Earn worse than holding SOL for short periods.
 
@@ -179,7 +179,7 @@ On-chain, every rail pays a **Solana key**. For private rails that key is a **cl
 | Beneficiary sets up         | Security → Receive privately → a Zcash **unified `u1`** address (must be shielded-only)                                                                                                                                                                            | Security → Receive privately → a Solana address to receive privately, or a Cloak shielded address                                                            |
 | What they send the owner    | a claim code `zcash:<claim key>`                                                                                                                                                                                                                                   | a claim code `cloak:<claim key>`                                                                                                                             |
 | After the tier releases     | The app gets a 1Click quote (verifies 1Click's signature on it) and sends the SOL from the claim key to the quote's deposit address (the route also supports USDC/USDT, but the app's button forwards SOL only for now). ZEC arrives **shielded** in ~2–3 minutes. | The app starts the Cloak SDK in a hidden WebView, proves a deposit with zero knowledge on the phone (~6 s on desktop), and Cloak's relay delivers privately. |
-| Fees on top of Deadman's 5% | about 0.2% (1Click) + 0.00032 ZEC network fee                                                                                                                                                                                                                      | deposit free; private send to an address costs 0.3% + 0.005 SOL                                                                                              |
+| Fees on top of Deadman's 3% | about 0.2% (1Click) + 0.00032 ZEC network fee                                                                                                                                                                                                                      | deposit free; private send to an address costs 0.3% + 0.005 SOL                                                                                              |
 | Networks                    | mainnet only                                                                                                                                                                                                                                                       | mainnet only (Cloak has no devnet program)                                                                                                                   |
 
 **What stays visible** (judges will ask):
@@ -207,16 +207,16 @@ sequenceDiagram
   A->>W: MWA authorize (solana:devnet)
   W-->>A: your address
   U->>A: choose PIN, then a different duress PIN
-  U->>A: Build release plan (tiers, cadence, deposit)
+  U->>A: Build release plan (tiers with their wait after the last check-in, deposit)
   A->>A: create guard key in secure storage
-  A->>W: sign 1 tx: create_vault + deposit (+ fund guard 0.01 SOL only without Kora)<br/>(fees in USDC: Kora pays fee + rent, last ix pays 3 USDC)
+  A->>W: sign 1 tx: create_plan + deposit (+ fund guard 0.01 SOL only without Kora)<br/>(fees in USDC: Kora pays fee + rent, last ix pays 3 USDC)
   W-->>A: signed
   A->>P: send
 ```
 
 ### 5.2 Daily pulse
 
-Open the app → enter PIN → tap **I'm alive** → fingerprint → the guard key signs `pulse` (no wallet prompt) for every inheritance plan → the streak goes up and every pending tier's clock restarts. Vesting plans are not checked in. A reminder notification arrives when a check-in is due.
+Open the app → enter PIN → tap **I'm alive** → fingerprint → the guard key signs `pulse` (no wallet prompt) for every inheritance plan → every pending tier's clock restarts. Vesting plans are not checked in. Reminder notifications arrive before the next tier releases.
 
 ### 5.3 Duress
 
@@ -237,7 +237,7 @@ sequenceDiagram
   P->>P: check due, not executed, earlier same-asset tiers done, payout > 0
   Note over K,P: a tier that still can't pay after the plan's grace period<br/>can be skipped by anyone (skip_rule):<br/>later tiers continue, its share stays reserved and claimable
   P->>B: payout minus fee (+0.012/0.003 SOL stipend on Cloak/Zcash token tiers)
-  P->>T: 2% or 5% fee
+  P->>T: 2% or 3% fee
 ```
 
 The beneficiary sees it in **Family Circle**. Solana-rail funds are already in their wallet. On a private rail they tap **Route privately** and the app forwards the funds as in §4.
@@ -252,7 +252,7 @@ On the new phone: connect the same Seed Vault wallet, then Security → **Move g
 
 - **Solana rail:** give them your wallet address.
 - **Private rails:** Security → Receive privately, paste your Zcash or Cloak destination, and send them the claim code. The first time, the app shows a **12-word recovery phrase**: your claim keys are derived from it, so you can restore them on a new phone. Write it down; without it, a lost phone means payouts to those claim keys are lost.
-- **Family Circle** shows each person who named you: alive, missed a check-in, or past a release tier; their streak; and your tiers with countdowns. For a vesting plan it shows each schedule's progress, how many installments have unlocked and when the next one comes, whether it is revocable or revoked, and a **Claim vested** button once an installment has unlocked.
+- **Family Circle** shows each person who named you: alive (counting down to the next tier), a tier due, or released; when they last checked in; and your tiers with countdowns. For a vesting plan it shows each schedule's progress, how many installments have unlocked and when the next one comes, whether it is revocable or revoked, and a **Claim vested** button once an installment has unlocked.
 
 ### 5.7 Vesting plan
 
@@ -264,7 +264,7 @@ Pulse tab → **New plan** → **Vesting** → name, start (now or a date), revo
 
 | Stream        | Mechanism                                             | Illustration                                                                            |
 | ------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Release fee   | 2% (Solana) / 5% (private) of each payout, on-chain   | $10M of protected assets, 1% released per year, about half via private rails: ~$3.5k/yr |
+| Release fee   | 2% (Solana) / 3% (private) of each payout, on-chain   | $10M of protected assets, 1% released per year, about half via private rails: ~$2.5k/yr |
 | Monthly plan  | optional, account-wide: 10 USDC/month (devnet), 12-month minimum, replaces the release fee on all the owner's plans | 1,000 subscribers: ~$120k/yr, earned whether or not anything releases |
 | Earn referral | ≥0.5% of each SOL→JitoSOL swap, protocol keeps 80%    | ~$4,000 per $1M swapped at 0.5%                                                         |
 | Yield effect  | the release fee applies to a balance growing ~4.8%/yr | compounds the first stream                                                              |
@@ -277,7 +277,7 @@ An honest note, since you said you know the risks: releases are rare by nature (
 
 | Feature                                         | Devnet (default build) | Mainnet build (`--dart-define=CLUSTER=mainnet-beta`) |
 | ----------------------------------------------- | ---------------------- | ---------------------------------------------------- |
-| Vault, pulse, streak, duress lockdown, guardian | yes                    | yes                                                  |
+| Vault, pulse, duress lockdown, guardian         | yes                    | yes                                                  |
 | Release plan with Solana-rail tiers, keeper     | yes                    | yes                                                  |
 | Vesting plans (SOL, USDC), keeper releases      | yes                    | yes                                                  |
 | USDC deposits, withdrawals and tiers            | yes (Circle devnet USDC or `USDC_MINT`) | yes                                 |

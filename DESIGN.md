@@ -1,23 +1,26 @@
 ---
 name: Deadman
-description: The self-custody safety net for Seeker. Near-black instrument panel, one signal accent, status color only where time is running out.
+description: Check in, or check out. A void-black dead man's switch with a pixel skull for a mark, one pulse-green accent, and status color that means exactly one thing each.
 colors:
-  void: "#050707"
-  graphite: "#0F1615"
-  raise: "#141D1C"
-  line: "#1D2928"
-  track: "#17211F"
-  deep: "#0B3A36"
-  tide: "#1FA597"
-  signal: "#54F9E8"
-  bone: "#E8F1F0"
-  sub: "#8FA3A1"
-  mist: "#6F8482"
-  status-on-track: "#54F9E8"
-  status-attention: "#FFB547"
-  status-due: "#FF5D73"
-  status-locked: "#A493FF"
-  status-released: "#8FA3A1"
+  void: "#0A0B0D"
+  pit: "#131418"
+  grave: "#16181C"
+  raise: "#1F2227"
+  line: "#24272E"
+  seam: "#2E3138"
+  deep: "#0F2A21"
+  bone: "#F1F0EA"
+  haze: "#CED1D7"
+  dust: "#A7ABB3"
+  ash: "#8B8F98"
+  pulse: "#3EF5A8"
+  missed: "#FFB547"
+  flatline: "#FF4D5E"
+  status-alive: "#3EF5A8"
+  status-missed: "#FFB547"
+  status-due: "#FF4D5E"
+  status-released: "#8B8F98"
+  status-locked: "#F1F0EA"
 typography:
   headline:
     fontFamily: "Outfit"
@@ -50,38 +53,40 @@ typography:
   button:
     fontFamily: "Outfit"
     fontSize: "17px"
-    fontWeight: 700
+    fontWeight: 600
   countdown:
     fontFamily: "JetBrains Mono"
-    fontSize: "44px"
-    fontWeight: 400
-    letterSpacing: "-1px"
-  stat:
-    fontFamily: "JetBrains Mono"
-    fontSize: "22px"
-    fontWeight: 400
+    fontSize: "16.5% of the ring diameter, 32-104px"
+    fontWeight: 500
+    letterSpacing: "-0.02em"
   data:
     fontFamily: "JetBrains Mono"
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.5
-  chip:
-    fontFamily: "JetBrains Mono"
-    fontSize: "11px"
-    fontWeight: 500
-    letterSpacing: "1.3px"
   label:
     fontFamily: "JetBrains Mono"
     fontSize: "10.5px"
     fontWeight: 400
     letterSpacing: "1.5px"
+  sticker:
+    fontFamily: "Silkscreen"
+    fontSize: "10.5px"
+    fontWeight: 400
+    letterSpacing: "0.24em"
+  tagline:
+    fontFamily: "Silkscreen"
+    fontSize: "13px"
+    fontWeight: 400
+    letterSpacing: "0.3em"
 rounded:
   chip: "6px"
+  sticker: "8px"
   tile: "10px"
-  button: "12px"
-  card: "14px"
-  dialog: "16px"
-  sheet: "20px"
+  button: "14px"
+  card: "16px"
+  dialog: "18px"
+  sheet: "22px"
 spacing:
   xxs: "4px"
   xs: "6px"
@@ -95,222 +100,245 @@ spacing:
   card-padding: "18px"
 components:
   button-primary:
-    backgroundColor: "{colors.signal}"
+    backgroundColor: "{colors.pulse}"
     textColor: "{colors.void}"
     typography: "{typography.button}"
     rounded: "{rounded.button}"
     height: "56px"
   button-primary-disabled:
     backgroundColor: "{colors.raise}"
-    textColor: "{colors.mist}"
+    textColor: "{colors.ash}"
   button-secondary:
-    backgroundColor: "{colors.graphite}"
+    backgroundColor: "{colors.grave}"
     textColor: "{colors.bone}"
     rounded: "{rounded.button}"
     height: "48px"
   button-text:
-    textColor: "{colors.signal}"
+    textColor: "{colors.pulse}"
+  square-button:
+    backgroundColor: "{colors.grave}"
+    rounded: "{rounded.button}"
+    size: "44px in a 48px target"
   card:
-    backgroundColor: "{colors.graphite}"
+    backgroundColor: "{colors.grave}"
     rounded: "{rounded.card}"
     padding: "{spacing.card-padding}"
+  select-card-selected:
+    backgroundColor: "{colors.deep}"
+    borderColor: "{colors.pulse}"
+    rounded: "{rounded.card}"
   icon-tile:
-    backgroundColor: "{colors.raise}"
+    backgroundColor: "{colors.void}"
     textColor: "{colors.bone}"
-    rounded: "9px"
+    rounded: "25% of size"
     size: "36px"
-  status-chip:
-    typography: "{typography.chip}"
-    rounded: "{rounded.chip}"
-    padding: "6px 10px"
+  sticker:
+    typography: "{typography.sticker}"
+    backgroundColor: "status color at 13%"
+    rounded: "{rounded.sticker}"
+    padding: "7px 11px"
   input:
-    backgroundColor: "{colors.raise}"
+    backgroundColor: "{colors.pit}"
+    borderColor: "{colors.seam}"
     textColor: "{colors.bone}"
     rounded: "{rounded.button}"
     padding: "16px"
   nav-indicator:
     backgroundColor: "{colors.deep}"
-    textColor: "{colors.signal}"
-    rounded: "{rounded.tile}"
-  segment-selected:
-    backgroundColor: "{colors.deep}"
-    textColor: "{colors.signal}"
-    rounded: "{rounded.tile}"
+    textColor: "{colors.pulse}"
+    rounded: "stadium"
 ---
 
 # Design System: Deadman
 
 ## Overview
 
-**Creative North Star: "The Instrument Panel at Night"**
+**Creative North Star: "Proof of Life"**
 
-Deadman is read the way a pilot reads a cockpit after dark: a near-black field, a few calm readouts, and color only on the gauge that needs you. The owner opens it to prove they are alive, often one-handed and in seconds; a beneficiary opens it to learn exactly what will happen and when. Both want precision, not reassurance.
+Deadman is a dead man's switch, and it says so with a straight face and a pixel skull. The ground is void black, the cards are grave, and the one thing that glows is the pulse: a segmented ring of green ticks counting down to the next check-in. When the owner goes quiet the same ring turns amber, then red and starts to blink; when every tier has paid out it goes grey and the skull closes its eyes. The owner opens it to prove they are alive, often one-handed and in seconds; a beneficiary opens it to learn exactly what will happen and when.
 
-The canvas is void, cards are graphite with a 1px line, and there is one accent, **signal**, that marks the thing to do (Check in, Release this tier, + New plan) and the healthy state (on track). Every number that matters, from countdowns and amounts to addresses, durations and status words, is set in JetBrains Mono; everything a person reads as language is Outfit. Status colors live only on rings, chips and time labels, so the screen stays quiet until a window is closing.
+The brand book is docs/brand/v2 (13 pages). Pages 1-9 define the identity; pages 10-13 are app mockups and the binding reference for screens.
 
-This is an Operate surface. Brand lives in precise details: the offset two-half mark, butt-ended rings, square status dots, letter-spaced mono captions. Nothing glows, nothing is glass, nothing is a gradient.
+The type has three jobs and three faces. **Outfit** (the app's own type, kept from v1 as the book instructs) carries every word a person reads. **JetBrains Mono** carries addresses, amounts and timers. **Silkscreen** carries stickers, step counters and the tagline, and nothing else.
+
+This is an Operate surface. The pixel art is the brand, used in precise places: the mark, stickers, section figures, the app-bar button, empty states. Layout, controls and navigation stay Material 3.
 
 **Key Characteristics:**
 
-- Near-black canvas, graphite cards, 1px line borders, no shadows.
-- One accent (signal) for actions and the on-track state.
-- Status color confined to rings, chips and time labels.
-- Mono for data and status, Outfit for language.
-- Flat, butt-capped rings; dashed ring when a tier is due.
+- Void ground, grave cards, 1px line borders, no shadows.
+- One accent (pulse) for actions and the alive state.
+- Four status colors, each tied to one skull mood and one sticker word.
+- Pixel figures drawn from grids in whole device pixels; never scaled bitmaps, never antialiased.
+- The Pulse tab is the ring, the countdown and the button, and the ring takes all the height it can get.
 
 ## Colors
 
-A cold teal-black ladder with one electric cyan, plus four status hues that only appear when time is involved.
+Seven colors from the book (Void, Grave, Bone, Pulse, Missed, Flatline, Ash) plus the steps the mockups use between them. Tokens live in `DM` (`lib/ui/theme/tokens.dart`).
 
-### Primary
+### Ground and surfaces
 
-- **Signal** (#54F9E8): primary buttons (with void text), text actions, selected icons, the on-track ring and chip, focus borders, the caret. Its rarity is the point.
-- **Tide** (#1FA597): the lower half of the mark. Secondary brand color for the mark and the rare second series; never a button fill on its own screen next to signal.
+- **Void** (#0A0B0D): scaffold, app bar, navigation bar, icon tiles inside cards, text on pulse.
+- **Pit** (#131418): text inputs, sunk below the card.
+- **Grave** (#16181C): cards, dialogs, sheets, outlined buttons, the square app-bar button.
+- **Raise** (#1F2227): snackbars, tooltips, disabled primary buttons.
+- **Line** (#24272E): every 1px border and divider; the dim ticks of the ring.
+- **Seam** (#2E3138): input and tag outlines.
+- **Deep** (#0F2A21, pulse at 13% on void): selected containers: navigation pill, selected radio card, selected segment, alive sticker.
 
-### Neutral
+### Text
 
-- **Void** (#050707): scaffold, app bar, navigation bar, text on signal.
-- **Graphite** (#0F1615): cards, dialogs, sheets, outlined buttons.
-- **Raise** (#141D1C): icon tiles, inputs, chips, snackbars.
-- **Line** (#1D2928): every 1px border and divider.
-- **Track** (#17211F): empty part of rings and progress bars.
-- **Deep** (#0B3A36): selected containers: navigation pill, selected segment, selected chip, tonal button.
-- **Bone** (#E8F1F0): primary text and icons.
-- **Sub** (#8FA3A1): secondary text, body copy (`bodyMedium`), released status.
-- **Mist** (#6F8482): captions and mono labels only (4.6:1 on graphite, 4.3:1 on raise: never body text on raise).
+| Token            | Use                                                                      | on void | on grave | on raise |
+| ---------------- | ------------------------------------------------------------------------ | ------- | -------- | -------- |
+| **Bone** #F1F0EA | primary text, titles, addresses in the ring                              | 17.2    | 15.6     | 14.0     |
+| **Haze** #CED1D7 | ring captions, footnotes on unselected cards                             | 12.9    | 11.6     | 10.4     |
+| **Dust** #A7ABB3 | body copy (`bodyMedium`), data lines                                     | 8.5     | 7.7      | 6.9      |
+| **Ash** #8B8F98  | secondary text, captions, hints, plan name under the countdown, released | 6.1     | 5.5      | 4.9      |
 
 ### Status
 
-- **On track** (= signal): check-in inside its window.
-- **Attention** (#FFB547): check-in overdue, or the last 25% of a window.
-- **Due** (#FF5D73): a tier is due or releasing; panic lockdown.
-- **Locked** (#A493FF): duress lock / lockdown active. The only purple in the product.
-- **Released** (= sub): paid, history only.
+`DMStatus` maps one value to one color, one word, one figure:
 
-Chip and tile tints are the status color at 12–14% alpha over the surface.
+| Status     | Color                       | Sticker  | Figure            | Skull mood               | Means                                                   |
+| ---------- | --------------------------- | -------- | ----------------- | ------------------------ | ------------------------------------------------------- |
+| `alive`    | Pulse #3EF5A8               | ALIVE    | mark skull        | alive (wink + heartbeat) | checked in on time; nothing moves                       |
+| `missed`   | Missed #FFB547              | MISSED   | squinting skull   | missed                   | the check-in window ran out; the next tier counts down  |
+| `due`      | Flatline #FF4D5E            | TIER DUE | crossed-out skull | due                      | silent past a release tier; funds go to the beneficiary |
+| `released` | Ash #8B8F98                 | RELEASED | ghost             | released (eyes closed)   | every tier has paid out                                 |
+| `locked`   | Bone #F1F0EA on an ash tint | LOCKED   | pixel lock        | mark                     | lockdown (Panic or duress)                              |
+
+Locked is not in the book; it borrows bone and the lock so it never competes with the four moods. There is no purple anywhere.
+
+Sticker and tile tints are the status color at 13% (locked: ash at 18%). Unlit ring ticks are `line`, or flatline at 33% while a tier is due. `statusForWindow(remaining, releasing:, locked:)` returns `missed` once the window reaches 0, never earlier: amber means a check-in was actually missed.
 
 ### Named Rules
 
-**The One Signal Rule.** Signal is the only accent. A screen has one filled signal button at most; everything else is text actions, outlined graphite buttons, or neutral.
+**The One Pulse Rule.** Pulse is the only accent. One filled pulse button per screen; everything else is text actions, grave outlined buttons, or neutral.
 
-**The Status Lives on the Clock Rule.** Status colors appear only on rings, status chips, countdowns and time labels ("Due now", "IN 2M 40S"). Never as a card fill, a button fill or a full-width banner. The panic card may take a faint due border (`due` at 35%) and a due-tinted icon tile; its fill stays graphite.
+**The One Meaning Rule.** Missed, Flatline and Ash are statuses, not decoration. Amber never means "warning" in general, red never means "error" in general on a plan surface: errors in forms use flatline only on the field and its helper text.
 
-**The No-Purple-Selection Rule.** Selected and active states are deep + signal. Purple means locked and nothing else.
+**The Status Lives on the Clock Rule.** Status color appears on the ring, stickers, countdowns, skull faces and time labels. Never as a card fill, a button fill or a full-width banner. The panic card may take a faint flatline border (35%); its fill stays grave.
 
 ## Typography
 
-**Body Font:** Outfit (bundled in `assets/brand/fonts`, Regular to ExtraBold)
-**Data Font:** JetBrains Mono (bundled, Regular to Bold, ligatures off)
+**Text:** Outfit (bundled, 400-800). **Data:** JetBrains Mono (bundled, 400-700, ligatures off). **Pixel:** Silkscreen (bundled, 400 and 700). All three ship in `assets/brand/fonts` with their OFL licenses; `GoogleFonts.config.allowRuntimeFetching` is false. Outfit has no math symbols, so every Outfit style falls back to JetBrains Mono (`DMType.symbolFallback`) for glyphs like "≈".
 
-**Character:** Outfit is a geometric sans with tight, confident headlines; JetBrains Mono gives every number a fixed width, so countdowns don't jitter and addresses read character by character.
-
-Fonts ship with the app; `GoogleFonts.config.allowRuntimeFetching` is false. Only use weights 400–800 (Outfit) and 400–700 (Mono).
+The book's Schibsted Grotesk is for marketing and pitch copy only; "the app keeps its current type", and the mockups confirm Outfit.
 
 ### Hierarchy
 
 - **Headline** (Outfit 700, 30, -0.9): screen titles "Pulse", "Family Circle", "Security" (`headlineMedium`).
-- **Title large** (Outfit 700, 20, -0.4): section headers "Release plans" (`titleLarge`), dialog titles.
-- **Title medium** (Outfit 600, 17): card titles, plan names (`titleMedium`); list rows use 16/600.
-- **Body** (Outfit 400, 15, 1.45, sub): lead paragraphs, explanations (`bodyMedium`, which is **sub**, not bone). Use `bodyLarge` (16, bone) for primary prose.
-- **Body small** (Outfit 400, 13, mist): fine print under buttons (`bodySmall`).
-- **Button** (Outfit 700, 17) on primary; Outfit 600, 15 on secondary and text buttons.
-- **Countdown** (Mono 400, 44, -1): ring readout, colored by status (`DMType.countdown`).
-- **Stat** (Mono 400, 22): stat tile values (`DMType.stat`).
-- **Data** (Mono 400, 13, sub, 1.5): amounts, addresses, durations in running lines: "0.100 SOL · 0 USDC protected" (`DMType.data`).
-- **Chip** (Mono 500, 11, +1.3, caps): status chips (`DMType.chip`).
-- **Label** (Mono 400, 10.5, +1.5, caps, mist): "DAY STREAK", "BEST" (`DMType.label`, `MonoLabel`).
+- **Title large** (Outfit 700, 20): section headers, dialog titles, "New payout" (`titleLarge`).
+- **Title medium** (Outfit 600, 17): card titles, plan names (`titleMedium`). Radio-card titles are 17/700.
+- **Body** (Outfit 400, 15, 1.45, dust): lead paragraphs (`bodyMedium`). `bodyLarge` (16, bone) for primary prose.
+- **Body small** (Outfit 400, 13, ash): fine print (`bodySmall`).
+- **Button** (Outfit 600, 17) on primary; Outfit 600, 15 on secondary and text buttons.
+- **Countdown** (Mono 500, 16.5% of the ring diameter, 32-104): `DMType.countdown(color, size:)`; `PulseReadout` sizes it from the ring.
+- **Data** (Mono 400, 13, dust): amounts, addresses, durations in running lines (`DMType.data`).
+- **Label** (Mono 400, 10.5, +1.5, caps, ash): small mono captions (`DMType.label`, `MonoLabel`).
+- **Sticker** (Silkscreen 400, 10.5, +0.24em, caps): `DMType.sticker(color)`, via `Sticker`.
+- **Tagline** (Silkscreen 400, 13, +0.3em, caps, pulse): "CHECK IN, OR CHECK OUT." (`DMType.tagline()`).
 
 ### Named Rules
 
-**The Mono Means Measured Rule.** Mono is for things that are counted, timed, addressed or a status word. Never for headings, buttons or sentences.
+**The Silkscreen Is a Sticker Rule.** Silkscreen sets one to three short words in caps: sticker words, "STEP 1/3", the tagline, a splash headline. Never sentences, buttons, amounts, addresses or anything someone must read exactly.
+
+**The Mono Means Measured Rule.** Mono is for things counted, timed or addressed. Never headings, buttons or sentences.
+
+## Pixel art
+
+All figures are `PixelSprite` grids in `lib/ui/widgets/brand/pixel_art.dart`, transcribed cell by cell from the book and checked by tests. `PixelArt` draws them with a custom render object: the cell snaps down to whole device pixels (at least one), the origin snaps to the device grid, and nothing is antialiased. Pass the target height as `size`; the result may come out a pixel or two smaller, never blurred.
+
+- **Mark skull** (11×11): the logo and app icon. Neutral square eyes.
+- **Moods** (11×11, same outline and jaw): alive (one eye, heartbeat), missed (squint), due (X eyes), released (closed eyes).
+- **Heart** (11×10): check-ins. Section figure on the payout editor.
+- **Tombstone** (11×12, RIP): a release tier is due.
+- **Ghost** (11×11): plan fully released; the RELEASED sticker.
+- **Lock** (9×10): lockdown. Drawn for the app on the cast's grid.
+- **Wordmark** (41×7): DEADMAN.
+
+### Usage rules
+
+- Figures appear in one color at a time (the status color, bone, or void on pulse). No outlines, gradients, shadows or two-tone fills.
+- Sizes: 11-13 in stickers, 20-22 in the app-bar button and section headers, 40-64 in empty states, 96+ only on the splash.
+- Use a mood skull for notifications, widgets and empty states; use the cast figure for the thing it names (heart beside check-in history, tombstone beside a due tier, ghost on a finished plan).
+- The skull never wears a status it does not have. The alive face is for the alive state only.
+- Pixel figures are decorative (excluded from semantics) unless they stand alone; then give `semanticLabel`.
 
 ## Layout
 
-Phone-first single column. Horizontal gutter 20 (`DMSpace.gutter`). Card padding 18; list rows 16 × 14. Vertical rhythm on a 4pt scale: 8 between a section header and its first card, 12–16 between cards, 24 above a new section. Screens open with a `PageHeader` (title + trailing mark or status chip, optional lead paragraph in sub), then content. On web the app stays phone-shaped inside `WebFrame`.
+Phone-first single column, gutter 20, card padding 18, 4pt rhythm. On web the app stays phone-shaped inside `WebFrame`, but the Pulse ring still sizes from the space it gets.
 
-The Pulse tab order is fixed: header → ring → Check in → stat tiles → Release plans. The check-in button is always the most prominent element.
+**The Pulse tab** is: header ("Pulse" + square app-bar buttons: release plans with a count badge, then the skull button), the ring filling every remaining pixel of height (`SegmentedRing` with no `size`, inside an `Expanded`), and the Check in button under it. Nothing else: no stat tiles, no plan list, no streak. Release plans have their own screen.
 
 ## Elevation & Depth
 
-Flat. No shadows anywhere (`elevation: 0` on every component). Depth comes from the tonal ladder void → graphite → raise and from 1px line borders. Scrims are void at 80%.
+Flat. No shadows (`elevation: 0` everywhere). Depth is the ladder pit → void → grave → raise and 1px line borders. Scrims are void at 80%.
 
 ## Shapes
 
-Soft rectangles: chip 6, icon tile 9–10, button and input 12, card 14, dialog 16, bottom sheet 20 (top corners). Status dots are **squares** (6px), never circles. Rings are butt-capped, 10px stroke. The mark is two offset half-annuli; never redraw it round-capped, rotated or glowing.
+Soft rectangles: chip 6, sticker 8, tile 10, button and input 14, card 16, dialog 18, sheet 22 (top corners), navigation pill stadium. Ring ticks are square-ended. Pixel figures are only squares.
 
 ## Components
 
 All shared pieces live in `lib/ui/widgets/brand/` (import `brand.dart`).
 
+### Segmented ring (signature)
+
+`SegmentedRing(progress:, status:, child:, size:, ticks: 56, phase:)`. 56 square ticks; tick length 5% of the diameter, each tick 62% of its step. Lit ticks are the time left, from 12 o'clock clockwise; spent ticks go dim at the end of the sweep. Progress eases over 600ms (instant with reduced motion). While `status` is `due` the ring alternates lit and dim ticks; pass a once-a-second counter as `phase` to flip them. The ring never runs an endless animation of its own. With `size: null` it takes the largest circle that fits, and exposes the diameter through `RingScope.of(context)`.
+
+`PulseReadout(status:, countdown:, caption:, address:, detail:)` stacks the status sticker, the mono countdown in the status color, a haze caption ("until next check-in", "until tier 1 releases", "past due, releasing to"), an optional mono bone address ("4Ywp…KMbF") and the plan name in ash. Its type scales with the ring.
+
+### Stickers
+
+`Sticker(label, color:, sprite:, dense:)`: Silkscreen caps on the color at 13%, radius 8, optional leading pixel figure. `StatusSticker(status, label:, dense:, showSprite:)` takes the status's color, word and figure; turn `showSprite` off for outcomes that are not a plan state (PASS, FAIL, DONE). The editor's "STEP 1/3" is a plain `Sticker`.
+
 ### Buttons
 
-- **Primary** (`FilledButton`): signal fill, void text, 56 high, radius 12, Outfit 17/700, optional leading icon 20. Disabled: raise fill, mist text. One per screen.
-- **Secondary** (`OutlinedButton`): graphite fill, 1px line, bone text, 48 high, radius 12. Pairs like Deposit / Withdraw sit side by side with 10 between.
-- **Text** (`TextButton`): signal, Outfit 15/500. Section actions use an add icon: "+ New plan".
-- **Tonal** (`FilledButton.tonal`): deep fill, signal text, for a secondary call in a selected context.
+- **Primary** (`FilledButton`): pulse fill, void text, 56 high, radius 14, Outfit 17/600, leading icon 22 ("Check in" with the fingerprint). Disabled: raise fill, ash text. One per screen.
+- **Secondary** (`OutlinedButton`): grave fill, 1px line, bone text, 48 high.
+- **Text** (`TextButton`): pulse, Outfit 15/500.
+- **Square app-bar button** (`DMSquareButton`): grave, 1px line, radius 14, 44 inside a 48 target, holds a pixel figure or icon at 20-22, optional pulse count badge. The skull button and the release-plans button.
 
-### Status chips
+### Cards and selection
 
-`StatusChip(status, label:)`: square dot + mono caps on the status tint, radius 6. Dense variant inside rows. Label states facts: "TIER IN 56S", "2 H SILENT", "DUE NOW", "UNLOCKED".
+- `DMCard`: grave, radius 16, 1px line, padding 18. Cards never nest.
+- `DMListGroup` + `DMListRow`: rows split by full-width lines; `IconTile` (void square, bone icon) + Outfit title + mono detail.
+- `SelectCard`: radio card for a choice with a sentence of explanation (delivery rail). Selected: deep fill, 1.5px pulse border, pulse radio dot, pulse mono footnote. Unselected: grave, line border, ash ring, haze footnote. Optional `DMTag(mono: true)` beside the title ("mainnet only").
 
-### Tags
+### Inputs
 
-`DMTag`: 1px line outline, radius 6, icon 14 + Outfit 13/500 bone. Used for rails (Solana, Cloak, Zcash).
-
-### Cards / Containers
-
-- `DMCard`: graphite, radius 14, 1px line, padding 18, flat. Optional tap ink.
-- `DMListGroup`: one card holding `DMListRow`s split by full-width 1px lines, with an optional header block. Use it instead of stacking small cards.
-- Cards never nest. Inside a card, separate blocks with a `Divider`, not a second card.
-
-### List rows
-
-`DMListRow`: `IconTile` (36, raise, bone icon) + title (Outfit 16/600) + mono detail (12.5, sub) + trailing value, chip or icon action. Minimum height 56.
-
-### Stat tiles
-
-`StatTiles`: one graphite card split into equal cells by 1px lines; each `StatTile` is a mono value (22) over a mono caps label (mist).
-
-### Inputs / Fields
-
-Raise fill, 1px line, radius 12, padding 16. Focus: 1.5px signal border, label turns signal. Error: due border and due helper text. Hint text is sub.
+Pit fill, 1px seam, radius 14, padding 16. Focus: 1.5px pulse border. Error: flatline border and helper. Hints in ash.
 
 ### Navigation
 
-`NavigationBar`: void background (add a 1px line above it), height 72, deep rounded pill (radius 10) behind the selected icon, signal selected icon, bone selected label, mist unselected.
+`NavigationBar`: void, height 72, deep stadium pill behind the selected icon, pulse selected icon, bone selected label (600), ash unselected.
 
-### Selection controls
+### Mark and wordmark
 
-Switch: signal track with void thumb when on; raise track, mist thumb, line outline when off. Checkbox and radio: signal. Segmented buttons: deep + signal when selected, graphite + sub otherwise.
+`SkullMark(size:, color:)` is the mark (pulse on void; `color: DM.void_` on a pulse field for the inverse). `DeadmanWordmark(height:)` draws the pixel DEADMAN. `DeadmanLockup(height:, stacked:)` pairs them: horizontal with the wordmark 7/11 of the skull (page 1), or stacked for the splash (page 6). The v1 `DeadmanMark` is a deprecated alias that draws the skull.
 
-### Dialogs, sheets, snackbars
+### App icon
 
-Graphite, 1px line, radius 16 (sheets 20 top), no elevation, void scrim. Snackbars float on raise with a line border and a signal action.
-
-### Pulse ring (signature)
-
-`PulseRing(progress:, status:, child: PulseReadout(...))`. Track color `track`; arc in the status color from 12 o'clock clockwise, butt ends, no glow; progress eases over 600ms. When `status` is due, the whole ring becomes 48 dashes on a due-tinted track. `PulseReadout` stacks the status chip, the mono countdown (scales down to fit) and a sub caption ("until next check-in", "releasing to AppA…9PbA").
-
-### Mark
-
-`DeadmanMark` (painted, signal over tide; `.mono` for single-color), `DeadmanWordmark` (Outfit 800), `DeadmanLockup`. In app headers the mark sits top-right at about 28–30.
+Pixel skull, pulse on void, whole pixels at every density: adaptive foreground on a 108dp canvas with 4dp cells (skull 44dp, inside the 66dp safe circle), void background layer, white monochrome layer for themed icons. Web favicon and PWA icons are rendered from the same grid; maskable icons keep the skull inside the 80% safe zone.
 
 ## Do's and Don'ts
 
 ### Do:
 
-- **Do** keep one filled signal button per screen and make it the action the screen exists for.
-- **Do** put every amount, address, duration, countdown and status word in mono.
-- **Do** pair every status color with a word or a countdown.
-- **Do** group related rows in one `DMListGroup` with 1px dividers.
-- **Do** use `DM.*` tokens and `DMType.*` styles; `DmColors` is a deprecated alias kept only for migration.
+- **Do** let the ring fill the Pulse tab's height and keep Check in directly under it.
+- **Do** pair every status color with its sticker word and skull face.
+- **Do** put every amount, address, duration and countdown in mono.
+- **Do** read fees from the FeeSchedule; where copy is static, Solana is 2% and private rails are 3%.
+- **Do** use `DM.*`, `DMType.*` and the brand widgets; the v1 names (`DM.signal`, `DM.graphite`, `DMStatus.onTrack`, `StatusChip`, `DeadmanMark`, `PulseRing`) are aliases kept only for migration. The stat strip (`StatTiles`) left with the day streak.
 
 ### Don't:
 
+- **Don't** show a streak, a best streak or any check-in counter. The product does not reward check-ins.
+- **Don't** set sentences, buttons or numbers in Silkscreen.
+- **Don't** scale, blur or antialias pixel figures, or draw them from bitmaps.
 - **Don't** fill cards, buttons or banners with a status color.
-- **Don't** use purple for selection or decoration; purple means locked.
-- **Don't** add gradients, glows, blur, glass or shadows.
+- **Don't** use purple, gradients, glows, glass or shadows.
 - **Don't** nest cards, or build screens out of identical icon + heading + text cards.
-- **Don't** use emoji or Unicode glyphs as icons; use Material outlined icons at one weight.
+- **Don't** use emoji or Unicode glyphs as icons; use Material outlined icons or the pixel cast.
 - **Don't** put a kicker or eyebrow label above a heading.
 - **Don't** show any lock, duress or "frozen" indicator in a duress session; it must look normal.
