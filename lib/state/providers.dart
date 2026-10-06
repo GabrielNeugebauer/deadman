@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +16,9 @@ import '../solana/deadman_client.dart';
 import '../wallet/mwa_wallet_bridge.dart';
 import '../wallet/wallet_bridge.dart';
 import '../wallet/web_wallet_bridge.dart';
+import 'boney_widget_host_stub.dart'
+    if (dart.library.io) 'boney_widget_host.dart';
+import 'boney_widget_sync.dart';
 import 'fee_settings.dart';
 import 'lockdown_retry.dart';
 import 'plan_math.dart';
@@ -132,8 +137,12 @@ final sessionProvider = NotifierProvider<SessionController, Session>(
 /// Every release plan of the connected owner, sorted by plan id.
 final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
-  if (owner == null) return const [];
+  if (owner == null) {
+    _syncBoney(ref, const []);
+    return const [];
+  }
   final vaults = await ref.watch(apiProvider).fetchVaults(owner);
+  _syncBoney(ref, vaults);
   // Vesting plans need no check-ins, so they never drive reminders.
   final active = activeSwitchPlans(vaults);
   if (active.isNotEmpty) {
@@ -149,6 +158,25 @@ final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   }
   return vaults;
 });
+
+/// The Boney home-screen widget; null where there is none (web).
+final boneyHostProvider = Provider<BoneyWidgetHost?>(
+  (ref) => ref.watch(isWebProvider) ? null : platformBoneyHost(),
+);
+
+/// Pushes Boney for [plans] to the home-screen widget, in the background.
+void _syncBoney(Ref ref, List<VaultState> plans) {
+  final host = ref.read(boneyHostProvider);
+  if (host == null) return;
+  final prefs = ref.read(prefsProvider);
+  final guard = ref.read(guardAddressProvider.future);
+  unawaited(
+    () async {
+      await BoneyWidgetSync(host)
+          .syncPlans(plans, prefs: prefs, guard: await guard);
+    }().catchError((Object _) {}),
+  );
+}
 
 /// Plans of the connected owner left in an older account layout by a
 /// program upgrade: unreadable as plans, but their SOL can be recovered.

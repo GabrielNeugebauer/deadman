@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand tokens (docs/brand/v3-assets/06-colors-and-type/tokens.json) used by the Boney widget. -->
+    <color name="boney_void">#0A0B0D</color>
+    <color name="boney_grave">#16181C</color>
+    <color name="boney_grave_raised">#1F2227</color>
+    <color name="boney_line">#24272D</color>
+    <color name="boney_bone">#F1F0EA</color>
+    <color name="boney_bone_muted">#C9CCD1</color>
+    <color name="boney_sub">#A3A7AF</color>
+    <color name="boney_ash">#8B8F98</color>
+    <color name="boney_pulse">#3EF5A8</color>
+    <color name="boney_pulse_tint">#0F2A21</color>
+    <color name="boney_flatline">#FF4D5E</color>
+    <color name="boney_flatline_tint">#2B1418</color>
+</resources>

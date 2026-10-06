@@ -49,3 +49,4 @@ app.*.map.json
 
 # Cloak SDK bundle build inputs
 /tool/cloak_bundle/node_modules/
+vanity-keys/

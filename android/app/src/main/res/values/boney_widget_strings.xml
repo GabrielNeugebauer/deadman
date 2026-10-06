@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boney_widget_label">Boney</string>
+    <string name="boney_widget_description">Boney shows how your Deadman plans are doing and lets you check in from the home screen.</string>
+    <string name="boney_button_check_in">Check in</string>
+    <string name="boney_button_check_in_to_stop">Check in to stop</string>
+    <string name="boney_button_open_app">Open Deadman</string>
+    <string name="boney_checking">Checking in…</string>
+    <string name="boney_label_checked_in">Pulse recorded!</string>
+    <string name="boney_label_on_track">On track</string>
+    <string name="boney_label_check_in_soon">Check in soon?</string>
+    <string name="boney_label_tier_due">Tier releasing</string>
+    <string name="boney_label_tier_releasing">%1$s releasing</string>
+    <string name="boney_label_last_tier">Last chance</string>
+    <string name="boney_label_released">Plan released</string>
+    <string name="boney_label_no_plan">Make a plan</string>
+    <string name="boney_sticker_alive">ALIVE</string>
+    <string name="boney_sticker_tier_due">TIER DUE</string>
+    <string name="boney_sticker_last_tier">LAST TIER</string>
+    <string name="boney_sticker_released">RELEASED</string>
+    <string name="boney_sticker_no_plan">NO PLAN</string>
+    <string name="boney_due_caption">tier due, releasing</string>
+    <string name="boney_until_next_release">until the next release</string>
+    <string name="boney_days_hours">%1$dd %2$02dh</string>
+    <string name="boney_preview_count">12</string>
+    <string name="boney_count_label">check-ins</string>
+    <plurals name="boney_count_description">
+        <item quantity="one">%1$s check-in recorded</item>
+        <item quantity="other">%1$s check-ins recorded</item>
+    </plurals>
+    <string name="boney_image_description">Boney: %1$s</string>
+</resources>

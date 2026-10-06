@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Boney, medium (4x2): Boney beside the status, countdown and action. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/background"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/boney_bg_alive"
+    android:clipToOutline="true"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="0.42">
+
+            <ImageView
+                android:id="@+id/boney_image"
+                android:contentDescription="@string/boney_widget_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:scaleType="fitXY"
+                android:src="@drawable/boney_px_on_track" />
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="0.58"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/boney_sticker"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/boney_pill_void"
+                android:fontFamily="@font/jetbrains_mono_medium"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:text="@string/boney_sticker_alive"
+                android:textColor="@color/boney_pulse"
+                android:textSize="11sp" />
+
+            <FrameLayout
+                android:id="@+id/boney_title_box"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="4dp">
+
+                <TextView
+                    android:id="@+id/boney_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:autoSizeMaxTextSize="32sp"
+                    android:autoSizeMinTextSize="16sp"
+                    android:autoSizeTextType="uniform"
+                    android:fontFamily="@font/jetbrains_mono_medium"
+                    android:gravity="start|center_vertical"
+                    android:maxLines="1"
+                    android:textColor="@color/boney_pulse"
+                    android:textSize="30sp" />
+
+                <Chronometer
+                    android:id="@+id/boney_chrono"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:autoSizeMaxTextSize="32sp"
+                    android:autoSizeMinTextSize="16sp"
+                    android:autoSizeTextType="uniform"
+                    android:fontFamily="@font/jetbrains_mono_medium"
+                    android:gravity="start|center_vertical"
+                    android:maxLines="1"
+                    android:textColor="@color/boney_pulse"
+                    android:textSize="30sp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/boney_caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:fontFamily="@font/outfit_regular"
+                android:maxLines="2"
+                android:textColor="@color/boney_sub"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/boney_button"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/boney_button_pulse"
+                android:ellipsize="end"
+                android:fontFamily="@font/outfit_semibold"
+                android:gravity="center"
+                android:maxLines="1"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="@string/boney_button_open_app"
+                android:textColor="@color/boney_void"
+                android:textSize="15sp" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

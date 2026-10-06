@@ -14,6 +14,7 @@ import 'dart:ui' as ui;
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
+import 'package:deadman/state/boney.dart';
 import 'package:deadman/state/lockdown_retry.dart';
 import 'package:deadman/state/private_rails.dart';
 import 'package:deadman/state/providers.dart';
@@ -26,6 +27,7 @@ import 'package:deadman/ui/screens/rules_editor.dart';
 import 'package:deadman/ui/screens/vesting_editor.dart';
 import 'package:deadman/ui/screens/welcome_screen.dart';
 import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:deadman/ui/widgets/editor/plan_steps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -419,6 +421,77 @@ void main() {
       await tester.tap(find.byKey(const Key('open-plans')));
       await tester.pumpAndSettle();
     }
+
+    // Boney in every mood and every idle frame, on the tiles of the
+    // "Meet Boney" board (09-reference-boards/mascot-concept.png).
+    testWidgets('boney board', (tester) async {
+      Widget tile(String label, Widget art, Color background, Color ink) =>
+          SizedBox(
+            width: 128,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  height: 150,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: background,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: DM.line),
+                  ),
+                  child: art,
+                ),
+                const SizedBox(height: 8),
+                Text(label, style: DMType.outfit(size: 13, color: ink)),
+              ],
+            ),
+          );
+      await _screen(
+        tester,
+        size: const Size(1200, 520),
+        Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 16,
+                  children: [
+                    for (final m in BoneyMood.values)
+                      tile(
+                        m.wire,
+                        BoneyFigure(mood: m, size: 96, animate: false),
+                        m.background,
+                        m.status.color,
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Wrap(
+                  spacing: 16,
+                  children: [
+                    for (final (i, f) in boneyIdle.indexed)
+                      tile(
+                        'idle $i · ${f.ms} ms',
+                        PixelArt(
+                          f.sprite,
+                          size: 96,
+                          color: DMStatus.alive.color,
+                        ),
+                        DM.deep,
+                        DM.pulse,
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await _shot(tester, 'boney_board');
+      await _unmount(tester);
+    });
 
     for (final MapEntry(key: suffix, value: size) in _sizes.entries) {
       testWidgets('pulse states$suffix', (tester) async {
