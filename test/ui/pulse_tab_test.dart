@@ -1,5 +1,8 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/actions.dart';
+import 'package:deadman/state/boney_widget_sync.dart';
+import 'package:deadman/state/plan_math.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/format.dart';
 import 'package:deadman/ui/screens/plans_screen.dart';
@@ -24,16 +27,20 @@ Future<void> _pump(
   List<int> legacy = const [],
   String guard = '',
   Size size = _phone,
+  Map<String, Object> saved = const {},
+  VaultActions Function(Ref ref)? actions,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  SharedPreferences.setMockInitialValues({'owner': addr(1)});
+  SharedPreferences.setMockInitialValues({'owner': addr(1), ...saved});
   final prefs = await SharedPreferences.getInstance();
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         prefsProvider.overrideWithValue(prefs),
+        boneyHostProvider.overrideWithValue(null),
+        if (actions != null) actionsProvider.overrideWith(actions),
         vaultsProvider.overrideWith((ref) async => plans),
         legacyPlansProvider.overrideWith((ref) async => legacy),
         guardAddressProvider.overrideWith(
@@ -76,6 +83,30 @@ String? _countdown(WidgetTester tester) =>
 
 double _ringDiameter(WidgetTester tester) =>
     tester.widget<RingScope>(find.byType(RingScope)).diameter;
+
+/// Boney's pose on the Pulse screen header, as his widget key names it.
+Finder _boney(String wire) => find.descendant(
+  of: find.byKey(const Key('skull-button')),
+  matching: find.byKey(ValueKey('boney-$wire')),
+);
+
+/// "Check in" that only records the pulse.
+class _PulseActions extends VaultActions {
+  _PulseActions(super.ref, this.plans);
+
+  final List<VaultState> plans;
+  var pulses = 0;
+
+  @override
+  Future<PlanCoverage> pulse() async {
+    pulses++;
+    return PlanCoverage(
+      guarded: plans,
+      needsWallet: const [],
+      otherGuard: const [],
+    );
+  }
+}
 
 /// Disposes the tab so its 1 s ticker stops.
 Future<void> _unmount(WidgetTester tester) =>
@@ -327,6 +358,143 @@ void main() {
 
       await _pump(tester, [locked], duress: true);
       expect(find.text('LOCKED'), findsNothing);
+      await _unmount(tester);
+    });
+  });
+
+  group('Boney', () {
+    testWidgets('sits top right in the status colour of the plans', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)]);
+      expect(_boney('on_track'), findsOneWidget);
+      expect(find.bySemanticsLabel('Boney: On track'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, [
+        kids(
+          now,
+          silentFor: 2 * 86400,
+          rules: [
+            rule(seed: 10, afterSecs: 86400, amount: 2500),
+            rule(seed: 11, afterSecs: 3 * 86400),
+          ],
+        ),
+      ]);
+      expect(_boney('tier_due'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, [
+        kids(now, silentFor: 2 * 86400, rules: [rule(afterSecs: 86400)]),
+      ]);
+      expect(_boney('last_tier'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, [
+        kids(
+          now,
+          silentFor: 3600,
+          rules: [rule(seed: 10, executedAt: now - 60, amount: 100)],
+        ),
+      ]);
+      expect(_boney('released'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, [vesting]);
+      expect(_boney('no_plan'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(tester, const []);
+      expect(_boney('no_plan'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('one hour before a release he asks to check in, still alive', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 10 * 86400 - 1800)]);
+      expect(_boney('check_in_soon'), findsOneWidget);
+      expect(_countdownColor(tester), DM.pulse);
+      await _unmount(tester);
+    });
+
+    testWidgets('Check in makes him celebrate', (tester) async {
+      final now = _nowSecs();
+      final plans = [kids(now, silentFor: 600)];
+      late _PulseActions actions;
+      await _pump(
+        tester,
+        plans,
+        actions: (ref) => actions = _PulseActions(ref, plans),
+      );
+      expect(_boney('on_track'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('check-in')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(actions.pulses, 1);
+      final prefs = ProviderScope.containerOf(
+        tester.element(find.byType(PulseTab)),
+      ).read(prefsProvider);
+      expect(BoneyWidgetSync.lastCheckIn(prefs), closeTo(_nowSecs(), 2));
+      expect(_boney('checked_in'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('a check-in from this phone five minutes ago has passed', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(
+        tester,
+        [kids(now, silentFor: 0)],
+        saved: {BoneyWidgetSync.lastCheckInKey: now - 30},
+      );
+      expect(_boney('checked_in'), findsOneWidget);
+      await _unmount(tester);
+
+      await _pump(
+        tester,
+        [kids(now, silentFor: 0)],
+        saved: {BoneyWidgetSync.lastCheckInKey: now - 301},
+      );
+      expect(_boney('on_track'), findsOneWidget);
+      await _unmount(tester);
+    });
+
+    testWidgets('tapping him introduces him above the skull legend', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [kids(now, silentFor: 0)]);
+      await tester.tap(find.byKey(const Key('skull-button')));
+      await tester.pumpAndSettle();
+      expect(find.text('MEET BONEY'), findsOneWidget);
+      expect(find.byKey(const Key('boney-title')), findsOneWidget);
+      expect(find.text('On track'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.byType(BoneyFigure),
+        ),
+        findsOneWidget,
+      );
+      await _unmount(tester);
+    });
+
+    testWidgets('the header keeps the ring layout on a small phone', (
+      tester,
+    ) async {
+      final now = _nowSecs();
+      await _pump(tester, [
+        kids(now, silentFor: 0),
+      ], size: const Size(360, 640));
+      expect(tester.takeException(), isNull);
+      final boney = tester.getRect(find.byKey(const Key('skull-button')));
+      final ring = tester.getRect(find.byType(RingScope));
+      expect(boney.bottom, lessThanOrEqualTo(ring.top));
+      expect(boney.right, lessThanOrEqualTo(360));
       await _unmount(tester);
     });
   });

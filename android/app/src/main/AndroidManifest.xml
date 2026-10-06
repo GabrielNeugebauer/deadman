@@ -50,6 +50,27 @@
         <receiver
             android:exported="false"
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
+        <!-- Boney home-screen widget (small 2x2 / medium 4x2 / large 4x4 from one provider). -->
+        <receiver
+            android:name=".BoneyWidgetProvider"
+            android:exported="false"
+            android:label="@string/boney_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/boney_widget_info" />
+        </receiver>
+        <!-- home_widget background callback (deadman://boney/checkin). Only our own
+             PendingIntents reach it, so it is not exported. -->
+        <receiver
+            android:name="es.antonborri.home_widget.HomeWidgetBackgroundReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="es.antonborri.home_widget.action.BACKGROUND" />
+            </intent-filter>
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

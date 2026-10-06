@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/assets.dart';
+import '../../state/boney.dart';
+import '../../state/boney_widget_sync.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
 import '../../state/subscription.dart';
@@ -138,6 +140,12 @@ class _Pulse extends ConsumerWidget {
     final anyDue = switches.any(
       (v) => v.nextReleaseAt != null && now > v.nextReleaseAt!,
     );
+    final boney = boneyFor(
+      plans,
+      now: now,
+      lastCheckInAt: BoneyWidgetSync.lastCheckIn(ref.read(prefsProvider)),
+      guard: guard.value,
+    );
 
     final _Readout ring;
     if (urgent == null) {
@@ -226,7 +234,7 @@ class _Pulse extends ConsumerWidget {
                     color: DM.bone,
                   ),
           ),
-          const _SkullButton(),
+          _BoneyButton(boney),
         ],
       ),
     );
@@ -361,27 +369,68 @@ class _IdleReadout extends StatelessWidget {
   }
 }
 
-/// The mark in its square, top right. Opens what each skull means.
-class _SkullButton extends StatelessWidget {
-  const _SkullButton();
+const _noPlan = Boney(
+  mood: BoneyMood.noPlan,
+  title: 'Make a plan',
+  caption: 'Build a release plan in Deadman.',
+  sticker: 'NO PLAN',
+  button: BoneyButton.openApp,
+);
+
+/// Boney on his tile, top right, in the plan's status colour; he idles
+/// while the plans are alive. Opens who he is and what each skull means.
+class _BoneyButton extends StatelessWidget {
+  const _BoneyButton(this.boney);
+
+  final Boney boney;
 
   @override
-  Widget build(BuildContext context) => DMSquareButton(
-    key: const Key('skull-button'),
-    tooltip: 'What the skull means',
-    onPressed: () => showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (_) => const _MoodSheet(),
-    ),
-    child: const SkullMark(size: 22),
-  );
+  Widget build(BuildContext context) {
+    final mood = boney.mood;
+    return Tooltip(
+      message: 'Boney',
+      child: Semantics(
+        button: true,
+        label: 'Boney: ${boney.title}',
+        excludeSemantics: true,
+        child: Material(
+          key: const Key('skull-button'),
+          color: mood.background,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(DMRadius.button),
+            side: BorderSide(
+              color: mood.status == DMStatus.alive
+                  ? DM.pulse.withValues(alpha: 0.25)
+                  : DM.line,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => showModalBottomSheet<void>(
+              context: context,
+              showDragHandle: true,
+              isScrollControlled: true,
+              builder: (_) => _MoodSheet(boney: boney),
+            ),
+            // Wider than tall: his hearts, "?" and "z" reach the drawing's
+            // edge columns and would touch the rounded corner.
+            child: SizedBox(
+              width: 60,
+              height: 56,
+              child: Center(child: BoneyFigure(mood: mood, size: 48)),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// The skull's moods the ring shows (brand book page 3), as a legend.
 class _MoodSheet extends StatelessWidget {
-  const _MoodSheet();
+  const _MoodSheet({required this.boney});
+
+  final Boney boney;
 
   static const _moods = [
     (
@@ -417,6 +466,41 @@ class _MoodSheet extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Row(
+              children: [
+                BoneyFigure(mood: boney.mood, size: 72),
+                const SizedBox(width: DMSpace.lg),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('MEET BONEY', style: DMType.label(color: DM.pulse)),
+                      const SizedBox(height: 2),
+                      Text(
+                        boney.title,
+                        key: const Key('boney-title'),
+                        style: DMType.outfit(
+                          size: 17,
+                          weight: FontWeight.w700,
+                          color: boney.mood.status.color,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Your skeleton on the Pulse screen and the home '
+                        'screen. He wears the colour of your plans.',
+                        style: DMType.outfit(
+                          size: 14.5,
+                          color: DM.dust,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: DMSpace.xxl),
             Text('One skull, three moods', style: t.titleLarge),
             const SizedBox(height: DMSpace.xs),
             Text(
@@ -499,10 +583,11 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
     if (widget.wallet) return _pulseWithWallet();
     setState(() => _busy = true);
     PlanCoverage? cover;
-    final ok = await runGuarded(
-      context,
-      () async => cover = await ref.read(actionsProvider).pulse(),
-    );
+    final prefs = ref.read(prefsProvider);
+    final ok = await runGuarded(context, () async {
+      cover = await ref.read(actionsProvider).pulse();
+      await BoneyWidgetSync.markCheckedIn(prefs, nowSecs());
+    });
     if (!mounted) return;
     setState(() => _busy = false);
     if (ok && cover != null) {
@@ -518,10 +603,11 @@ class _PulseButtonState extends ConsumerState<_PulseButton> {
   Future<void> _pulseWithWallet() async {
     setState(() => _busy = true);
     List<VaultState>? done;
-    await runGuarded(
-      context,
-      () async => done = await ref.read(actionsProvider).pulseWithWallet(),
-    );
+    final prefs = ref.read(prefsProvider);
+    await runGuarded(context, () async {
+      done = await ref.read(actionsProvider).pulseWithWallet();
+      await BoneyWidgetSync.markCheckedIn(prefs, nowSecs());
+    });
     if (!mounted) return;
     setState(() => _busy = false);
     if (done != null) {
@@ -653,13 +739,13 @@ class _ArmIntro extends ConsumerWidget {
         DMSpace.xxxl,
       ),
       children: [
-        const PageHeader(
+        PageHeader(
           title: 'Arm your switch',
           subtitle:
               'Build a release plan: who receives what, after how long without '
               'a check-in, and how it gets there. Create as many plans as you '
               'like; one check-in keeps them all alive.',
-          trailing: _SkullButton(),
+          trailing: _BoneyButton(_noPlan),
         ),
         const LegacyPlansCard(margin: EdgeInsets.only(top: DMSpace.xl)),
         const SizedBox(height: DMSpace.xxl),

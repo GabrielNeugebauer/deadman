@@ -4,6 +4,7 @@ library;
 
 export '../../theme/tokens.dart';
 export '../pulse_ring.dart';
+export 'boney.dart';
 export 'deadman_mark.dart';
 export 'dm_icon.dart';
 export 'headers.dart';

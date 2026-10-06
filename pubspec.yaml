@@ -48,6 +48,7 @@ dependencies:
   crypto: ^3.0.7
   flutter_inappwebview: 6.2.0-beta.3
   web: ^1.1.1
+  home_widget: ^0.10.0
 
 dev_dependencies:
   flutter_test:

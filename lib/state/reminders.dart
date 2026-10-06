@@ -3,6 +3,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
+import 'boney_widget_host.dart';
 import 'lockdown_retry.dart';
 import 'reminder_schedule.dart';
 
@@ -24,6 +25,9 @@ void reminderDispatcher() {
   Workmanager().executeTask((task, _) async {
     WidgetsFlutterBinding.ensureInitialized();
     if (task == _lockdownTask) return runPendingLockdownInBackground();
+    // Keeps the Boney home-screen widget current even if the app never
+    // opens; its failure never blocks the reminder.
+    await refreshBoneyInBackground().catchError((Object _) {});
     final prefs = await SharedPreferences.getInstance();
     final releaseAt = prefs.getInt(_releaseKey);
     final delay = prefs.getInt(_delayKey);
