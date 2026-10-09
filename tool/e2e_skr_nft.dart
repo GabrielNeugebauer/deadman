@@ -319,20 +319,16 @@ Future<void> _skrPlan(
   final heir = await Ed25519HDKeyPair.random();
   final guard = await Ed25519HDKeyPair.random();
   final gross = skr.gross;
+  // Mint to the CLI wallet, then send with --fund-recipient: spl-token 5.5
+  // refuses `create-account --owner` without an explicit --fee-payer.
+  await _run('spl-token', ['mint', skr.mint, '$skrTokens', '--url', a.rpc]);
   await _run('spl-token', [
-    'create-account',
-    skr.mint,
-    '--owner',
-    owner.address,
-    '--url',
-    a.rpc,
-  ]);
-  await _run('spl-token', [
-    'mint',
+    'transfer',
     skr.mint,
     '$skrTokens',
-    '--recipient-owner',
     owner.address,
+    '--fund-recipient',
+    '--allow-unfunded-recipient',
     '--url',
     a.rpc,
   ]);
