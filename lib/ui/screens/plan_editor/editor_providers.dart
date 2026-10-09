@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/config.dart';
-import '../../../solana/deadman_api.dart';
 import '../../../state/fee_settings.dart';
 import '../../../state/plan_draft.dart';
 import '../../../state/providers.dart';
@@ -29,29 +28,10 @@ final beneficiaryFactsProvider = FutureProvider.autoDispose
       );
     });
 
-/// The connected owner's account-wide monthly plan; null when none or
-/// unknown.
-final ownerSubscriptionProvider =
-    FutureProvider.autoDispose<AccountSubscription?>((ref) async {
-      final owner = ref.watch(sessionProvider.select((s) => s.owner));
-      if (owner == null) return null;
-      try {
-        return await ref.watch(apiProvider).fetchSubscription(owner);
-      } on Object {
-        return null;
-      }
-    });
-
-/// The release fee for payouts saved now. Saving is a check-in, so the
-/// monthly plan covers them exactly while it is paid.
+/// The release fee for payouts saved now.
 FeeInfo watchFeeInfo(WidgetRef ref) {
   final fees = ref.watch(feesProvider);
-  final sub = ref.watch(ownerSubscriptionProvider).value;
-  return FeeInfo(
-    fees: fees.value,
-    waived: sub?.active(nowSecs()) ?? false,
-    failed: fees.hasError,
-  );
+  return FeeInfo(fees: fees.value, failed: fees.hasError);
 }
 
 /// SOL the owner should keep for fees when funding a plan.

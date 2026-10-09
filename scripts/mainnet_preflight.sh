@@ -82,10 +82,10 @@ if [[ -f "$PROGRAM_KEYPAIR" ]]; then
 else
   fail "missing $PROGRAM_KEYPAIR (needed to deploy at $PROGRAM_ID)"
 fi
-for f in lib/core/config.dart tool/init_config.dart; do
-  grep -q "$PROGRAM_ID" "$ROOT/$f" && pass "$f uses $PROGRAM_ID" \
-    || fail "$f does not reference $PROGRAM_ID"
-done
+# The tools (init_config, set_config, keeper, gateway) take it from here.
+grep -q "$PROGRAM_ID" "$ROOT/lib/core/config.dart" \
+  && pass "lib/core/config.dart uses $PROGRAM_ID" \
+  || fail "lib/core/config.dart does not reference $PROGRAM_ID"
 
 section "Build artifacts"
 if [[ -f "$SO" ]]; then
@@ -194,7 +194,7 @@ if [[ "$SO_BYTES" -gt 0 && "$genesis" == "$MAINNET_GENESIS" ]]; then
   programdata=$(rent $((MAX_LEN + 45)))       # ProgramData header 45 bytes
   buffer=$(rent $((SO_BYTES + 37)))           # Buffer header 37 bytes; refunded
   program=$(rent 36)
-  config=$(rent 77)                           # 8 + Config::INIT_SPACE
+  config=$(rent 209)                          # 8 + Config::INIT_SPACE
   idl=$(rent "$(stat -c %s "$IDL")")          # upper bound: uncompressed IDL
   writes=$(( (SO_BYTES + 999) / 1000 + 4 ))
   fees=$(( writes * (5000 + CU_PRICE * 200000 / 1000000) ))

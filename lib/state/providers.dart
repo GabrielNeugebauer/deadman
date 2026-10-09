@@ -18,7 +18,9 @@ import '../wallet/wallet_bridge.dart';
 import '../wallet/web_wallet_bridge.dart';
 import 'boney_widget_host_stub.dart'
     if (dart.library.io) 'boney_widget_host.dart';
+import 'boney_skin.dart';
 import 'boney_widget_sync.dart';
+import 'decoy_wallet.dart';
 import 'fee_settings.dart';
 import 'lockdown_retry.dart';
 import 'plan_math.dart';
@@ -44,6 +46,9 @@ final walletProvider = Provider<WalletBridge>(
       ? ref.watch(webWalletProvider)
       : MwaWalletBridge(),
 );
+
+/// The chain. Owner actions and the duress lockdown use it; screens read
+/// through [viewApiProvider].
 final apiProvider = Provider<DeadmanApi>((ref) => DeadmanClient());
 final zcashRouteProvider = Provider((ref) => ZcashRoute());
 
@@ -79,18 +84,27 @@ final earnProvider = Provider<EarnService>((ref) => JupiterEarn());
 int nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
 class Session {
-  const Session({this.owner, this.unlocked = false, this.duress = false});
+  const Session({String? owner, this.unlocked = false, this.duress = false})
+    : realOwner = owner;
 
-  /// Base58 wallet address of the connected owner.
-  final String? owner;
+  /// Base58 wallet address of the connected owner, even under duress. Only
+  /// the silent duress lockdown may use it then.
+  final String? realOwner;
   final bool unlocked;
 
   /// Opened with the duress PIN: the vault is already locked on-chain and
-  /// the UI keeps up appearances.
+  /// the app shows a decoy wallet ([decoyWalletProvider]) instead.
   final bool duress;
 
+  /// The owner the app shows and reads: the connected wallet, or under
+  /// duress the decoy wallet's address.
+  String? get owner {
+    final real = realOwner;
+    return duress && real != null ? decoyOwnerOf(real) : real;
+  }
+
   Session copyWith({String? owner, bool? unlocked, bool? duress}) => Session(
-    owner: owner ?? this.owner,
+    owner: owner ?? realOwner,
     unlocked: unlocked ?? this.unlocked,
     duress: duress ?? this.duress,
   );
@@ -111,12 +125,19 @@ class SessionController extends Notifier<Session> {
   void unlock({required bool duress}) =>
       state = state.copyWith(unlocked: true, duress: duress);
 
-  void lock() => state = Session(owner: state.owner);
+  void lock() => state = Session(owner: state.realOwner);
 
   /// "Forget this device": PINs and the guard key go; receiving keys stay
   /// unless [deleteReceivingKeys] (funds sent to them are then lost unless
-  /// the recovery phrase was saved).
+  /// the recovery phrase was saved). Under duress nothing is deleted (the
+  /// pending lockdown needs the guard key) and nothing is read: the app
+  /// forgets the owner for this session only, so it lands on Welcome as a
+  /// real reset does, and stays a duress session until a PIN is entered.
   Future<void> reset({bool deleteReceivingKeys = false}) async {
+    if (state.duress) {
+      state = const Session(duress: true);
+      return;
+    }
     final store = ref.read(secureStoreProvider);
     await ref.read(prefsProvider).remove(_ownerKey);
     if (deleteReceivingKeys) {
@@ -134,14 +155,37 @@ final sessionProvider = NotifierProvider<SessionController, Session>(
   SessionController.new,
 );
 
+/// The decoy wallet a duress session shows, made once per session from the
+/// real owner; null outside duress (or with no wallet connected).
+final decoyWalletProvider = Provider<DecoyWallet?>((ref) {
+  final real = ref.watch(
+    sessionProvider.select((s) => s.duress ? s.realOwner : null),
+  );
+  if (real == null) return null;
+  // It holds the skin Boney wears, so he looks the same under duress.
+  final skin = BoneySkin.byId(ref.read(prefsProvider).getString(boneySkinKey));
+  return DecoyWallet.forOwner(real, now: nowSecs())..ownSkins([?skin]);
+});
+
+/// What screens read: the chain, or under duress the decoy wallet (whose
+/// public, owner-independent reads still come from the chain).
+final viewApiProvider = Provider<DeadmanApi>((ref) {
+  final chain = ref.watch(apiProvider);
+  final decoy = ref.watch(decoyWalletProvider);
+  return decoy == null ? chain : DecoyApi(decoy, chain, clock: nowSecs);
+});
+
 /// Every release plan of the connected owner, sorted by plan id.
 final vaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
+  final duress = ref.watch(sessionProvider.select((s) => s.duress));
   if (owner == null) {
-    _syncBoney(ref, const []);
+    if (!duress) _syncBoney(ref, const []);
     return const [];
   }
-  final vaults = await ref.watch(apiProvider).fetchVaults(owner);
+  final vaults = await ref.watch(viewApiProvider).fetchVaults(owner);
+  // The decoy's plans never reach the home screen or the reminders.
+  if (duress) return vaults;
   _syncBoney(ref, vaults);
   // Vesting plans need no check-ins, so they never drive reminders.
   final active = activeSwitchPlans(vaults);
@@ -183,13 +227,16 @@ void _syncBoney(Ref ref, List<VaultState> plans) {
 final legacyPlansProvider = FutureProvider<List<int>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return const [];
-  return ref.watch(apiProvider).fetchLegacyPlanIds(owner);
+  return ref.watch(viewApiProvider).fetchLegacyPlanIds(owner);
 });
 
-/// This device's guard key address, or null when it has none.
-final guardAddressProvider = FutureProvider<String?>(
-  (ref) async => (await ref.watch(secureStoreProvider).loadGuard())?.address,
-);
+/// This device's guard key address, or null when it has none (the decoy's
+/// under duress).
+final guardAddressProvider = FutureProvider<String?>((ref) async {
+  final decoy = ref.watch(decoyWalletProvider);
+  if (decoy != null) return decoy.guard;
+  return (await ref.watch(secureStoreProvider).loadGuard())?.address;
+});
 
 /// Duress lockdown with persisted retry; one per app.
 final lockdownRetrierProvider = Provider(
@@ -209,24 +256,27 @@ final lockdownRetrierProvider = Provider(
 );
 
 final feesProvider = FutureProvider(
-  (ref) => ref.watch(apiProvider).fetchFees(),
+  (ref) => ref.watch(viewApiProvider).fetchFees(),
 );
 
-final claimProfilesProvider = FutureProvider(
-  (ref) => ref.watch(secureStoreProvider).loadClaims(),
-);
+/// This device's receiving profiles (the decoy's under duress).
+final claimProfilesProvider = FutureProvider<List<ClaimProfile>>((ref) async {
+  final decoy = ref.watch(decoyWalletProvider);
+  if (decoy != null) return decoy.claims.values.toList();
+  return ref.watch(secureStoreProvider).loadClaims();
+});
 
 final walletBalanceProvider = FutureProvider<int>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return 0;
-  return ref.watch(apiProvider).balance(owner);
+  return ref.watch(viewApiProvider).balance(owner);
 });
 
 /// USDC (base units) in the connected wallet.
 final walletUsdcProvider = FutureProvider<int>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return 0;
-  return ref.watch(apiProvider).tokenBalance(owner, AppConfig.usdcMint);
+  return ref.watch(viewApiProvider).tokenBalance(owner, AppConfig.usdcMint);
 });
 
 /// [mint] (base units) in the connected wallet.
@@ -236,7 +286,7 @@ final walletTokenProvider = FutureProvider.family<int, String>((
 ) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return 0;
-  return ref.watch(apiProvider).tokenBalance(owner, mint);
+  return ref.watch(viewApiProvider).tokenBalance(owner, mint);
 });
 
 /// Token balances of [plans]' vaults for every token an unpaid tier uses
@@ -266,7 +316,7 @@ Future<Map<String, Map<String, int>>> planTokenBalances(
 /// [planTokenBalances] of the connected owner's inheritance plans.
 final planTokenBalancesProvider = FutureProvider<Map<String, Map<String, int>>>(
   (ref) async => planTokenBalances(
-    ref.watch(apiProvider),
+    ref.watch(viewApiProvider),
     switchPlans(await ref.watch(vaultsProvider.future)),
   ),
 );
@@ -275,7 +325,7 @@ final planTokenBalancesProvider = FutureProvider<Map<String, Map<String, int>>>(
 final watchedTokenBalancesProvider =
     FutureProvider<Map<String, Map<String, int>>>(
       (ref) async => planTokenBalances(
-        ref.watch(apiProvider),
+        ref.watch(viewApiProvider),
         await ref.watch(watchedVaultsProvider.future),
       ),
     );
@@ -284,7 +334,7 @@ final watchedTokenBalancesProvider =
 /// owned by the vault PDA).
 final planUsdcProvider = FutureProvider.family<int, String>(
   (ref, vaultAddress) =>
-      ref.watch(apiProvider).tokenBalance(vaultAddress, AppConfig.usdcMint),
+      ref.watch(viewApiProvider).tokenBalance(vaultAddress, AppConfig.usdcMint),
 );
 
 /// A Kora paymaster is configured, so owners may pay fees in USDC.
@@ -324,7 +374,7 @@ final feeModeProvider = NotifierProvider<FeeModeController, FeeMode>(
 final watchedVaultsProvider = FutureProvider<List<VaultState>>((ref) async {
   final owner = ref.watch(sessionProvider.select((s) => s.owner));
   if (owner == null) return const [];
-  final api = ref.watch(apiProvider);
+  final api = ref.watch(viewApiProvider);
   final claims = await ref.watch(claimProfilesProvider.future);
   final seen = <String, VaultState>{};
   for (final who in [owner, ...claims.map((c) => c.key.address)]) {
@@ -354,7 +404,7 @@ final claimQuoteProvider = FutureProvider.autoDispose
       if (owner == null) return null;
       try {
         return await ref
-            .watch(apiProvider)
+            .watch(viewApiProvider)
             .quoteClaim(
               claimer: owner,
               vaultOwner: target.vaultOwner,
@@ -366,61 +416,8 @@ final claimQuoteProvider = FutureProvider.autoDispose
       }
     });
 
-/// The monthly-plan terms; null when not offered (no config on chain, or
-/// disabled).
-final subscriptionTermsProvider = FutureProvider<SubscriptionTerms?>(
-  (ref) => ref.watch(apiProvider).fetchSubscriptionTerms(),
-);
-
-/// The connected owner's account-wide monthly plan, which covers all of
-/// their plans; null when never subscribed (or no wallet is connected).
-final accountSubscriptionProvider = FutureProvider<AccountSubscription?>((
-  ref,
-) async {
-  final owner = ref.watch(sessionProvider.select((s) => s.owner));
-  if (owner == null) return null;
-  return ref.watch(apiProvider).fetchSubscription(owner);
-});
-
-/// The subscriptions of [owners], in one batched read where the API allows.
-Future<Map<String, AccountSubscription?>> fetchSubscriptionsOf(
-  DeadmanApi api,
-  Iterable<String> owners,
-) async {
-  final distinct = owners.toSet().toList();
-  if (distinct.isEmpty) return const {};
-  if (api is DeadmanClient) return api.fetchSubscriptions(distinct);
-  final got = await Future.wait(distinct.map(api.fetchSubscription));
-  return {for (final (i, o) in distinct.indexed) o: got[i]};
-}
-
-/// The subscription of each owner of a plan in the Family Circle, keyed by
-/// owner address; re-read when the watched plans are.
-final watchedSubscriptionsProvider =
-    FutureProvider<Map<String, AccountSubscription?>>(
-      (ref) async => fetchSubscriptionsOf(ref.watch(apiProvider), [
-        for (final v in await ref.watch(watchedVaultsProvider.future)) v.owner,
-      ]),
-    );
-
-/// What each of the connected owner's plans holds of [mint], keyed by
-/// vault address, in one batched lookup; plans with no tier or schedule in
-/// [mint] are left out.
-final ownerPlanHoldingsProvider =
-    FutureProvider.family<Map<String, int>, String>((ref, mint) async {
-      final plans = [
-        for (final v in await ref.watch(vaultsProvider.future))
-          if (v.rules.any((r) => r.mint == mint)) v.address,
-      ];
-      if (plans.isEmpty) return const {};
-      final got = await ref.watch(apiProvider).tokenBalances([
-        for (final a in plans) (a, mint),
-      ]);
-      return {for (final (i, a) in plans.indexed) a: got[i]};
-    });
-
 /// [mint] (base units) held by the plan vault at `vault`.
 final planTokenProvider =
     FutureProvider.family<int, ({String vault, String mint})>(
-      (ref, k) => ref.watch(apiProvider).tokenBalance(k.vault, k.mint),
+      (ref, k) => ref.watch(viewApiProvider).tokenBalance(k.vault, k.mint),
     );

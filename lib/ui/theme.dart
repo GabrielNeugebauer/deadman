@@ -19,9 +19,6 @@ abstract final class DmColors {
   static const alive = DM.pulse;
   static const warn = DM.missed;
   static const danger = DM.flatline;
-
-  /// Was a purple "Plus" accent. The brand has one accent, Pulse.
-  static const plus = DM.pulse;
 }
 
 ThemeData buildTheme() => DeadmanTheme.dark();

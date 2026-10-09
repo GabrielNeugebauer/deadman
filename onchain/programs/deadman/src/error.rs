@@ -54,14 +54,19 @@ pub enum DeadmanError {
     AlreadyRevoked,
     #[msg("Those funds are committed to vesting beneficiaries")]
     FundsCommitted,
-    #[msg("Treasury must be set")]
+    #[msg("Treasury must be a system-owned wallet, and the SKR burn share at most 100%")]
     InvalidConfig,
     #[msg("Arithmetic overflow")]
     MathOverflow,
     #[msg("Not a plan account in an older layout")]
     NotLegacyVault,
-    #[msg("Subscriptions are disabled")]
-    SubscriptionDisabled,
-    #[msg("Invalid subscription parameters or accounts")]
-    InvalidSubscription,
+    /// Former subscription errors, kept so later codes do not shift.
+    #[msg("Unused")]
+    DeprecatedSubscriptionDisabled,
+    #[msg("Unused")]
+    DeprecatedInvalidSubscription,
+    #[msg("Only classic SPL Token mints can be put in a plan")]
+    UnsupportedMint,
+    #[msg("This payout charges a fee, so the treasury's token account is required")]
+    TreasuryAccountRequired,
 }

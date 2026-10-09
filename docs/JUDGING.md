@@ -1,5 +1,7 @@
 # Deadman — Judging Report (2026-10-02)
 
+> **Historical report.** Its pricing ideas (subscription, Plus in SKR) were not kept: since 2026-10-08 Deadman charges 2% on release, or 1.5% for payouts in $SKR with 10% of that fee burned, and has no subscription.
+
 Four judge passes (architect, ecosystem researcher, mobile/Seeker, DeFi/business) plus Colosseum Copilot evidence.
 
 ## Hackathon facts (verified 2026-10-02)

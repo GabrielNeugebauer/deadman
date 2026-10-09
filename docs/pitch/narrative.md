@@ -2,6 +2,8 @@
 
 Written 2026-10-04. Replaces the slide content of [`../PITCH_OUTLINE.md`](../PITCH_OUTLINE.md), which still describes the removed Plus/SKR subscription.
 
+> **Pricing updated 2026-10-08.** There is no subscription any more (the Plus plan described in earlier notes is gone). The deck (`Deadman pitch deck.html`, changes in [`../../research/mudancas-deck.md`](../../research/mudancas-deck.md)) and the app use: a 2% fee only on release (withdrawals, closing and revoking free); 1.5% when the payout is in $SKR, with 10% of that SKR fee burned; a duress PIN that shows a decoy wallet **and** time-locks the real vault; check-in windows of 7 days / 30 days / Custom; Boney skins unlocked by NFT. Where this script says "not a decoy wallet", follow the deck.
+
 - **Targets:**
   - Solana Mobile CLOCK IN: APK + GitHub + demo video + deck, due **2026-10-08**. Judged on stickiness/PMF, UX, innovation and presentation. $125k USDC across 10 places, plus a $10k SKR track ([`../JUDGING.md`](../JUDGING.md)).
   - Colosseum Crypto World's Fair, Solana track: due **2026-10-13 06:59 UTC** (Oct 12 in the Americas). One product per builder. Judged on founder-market fit, insight, product and execution, and market size ([`../JUDGING.md`](../JUDGING.md)).
@@ -241,7 +243,7 @@ The split of authority only works on a phone. The cold key sits in Seed Vault ha
 
 | Stream                   | Rate                                                         |
 | ------------------------ | ------------------------------------------------------------ |
-| **Release fee**          | 2% Solana rail, 3% private rails; 5% hard cap in the program |
+| **Release fee**          | 2% on every rail; 1.5% for $SKR payouts, 10% of it burned; 5% hard cap in the program |
 | **Earn** (SOL → JitoSOL) | Jupiter referral, at least 0.5%; Jupiter keeps 20%           |
 | **Later**                | Margin on the USDC fee paymaster                             |
 
@@ -250,7 +252,7 @@ The split of authority only works on a phone. The cold key sits in Seed Vault ha
 **Visual:** A clean table on a dark card. Put "5% hard cap" in alive green as the trust signal.
 
 **Speaker notes:**
-No subscription: setup is where inheritance products lose people. The fee lives in the program and is capped in code at 5%. Estimates only: $10M protected, 1% released a year, half of it privately, is about $2.5k a year (`HOW_IT_WORKS.md` §6). Earn makes about $4,000 per $1M swapped at 0.5% (`earn-jupiter-jito.md`). At $100M protected the release fee comes to about $20k–30k a year, plus Earn (`PITCH_OUTLINE.md` §7). To be candid, releases are rare, so the release fee stays small until protected assets are large. Earn and vesting releases happen on a schedule and bring revenue earlier. [No vesting revenue estimate exists yet.]
+No subscription: setup is where inheritance products lose people. The fee lives in the program and is capped in code at 5%. Estimates only: $10M protected, 1% released a year, is about $2k a year at 2% (`HOW_IT_WORKS.md` §6 uses 5% released, about $10k). Earn makes about $4,000 per $1M swapped at 0.5% (`earn-jupiter-jito.md`). At $100M protected the release fee comes to about $20k–30k a year, plus Earn (`PITCH_OUTLINE.md` §7). To be candid, releases are rare, so the release fee stays small until protected assets are large. Earn and vesting releases happen on a schedule and bring revenue earlier. [No vesting revenue estimate exists yet.]
 
 ---
 
@@ -338,7 +340,7 @@ Before mainnet we need Trident fuzzing of the rules engine, a verifiable build, 
 
 ## Open decisions before the deck is final
 
-- **SKR track ($10k, CLOCK IN):** nothing in the product is tied to SKR since the subscription was removed. The options are to skip the track, to note that vaults and tiers accept any SPL mint including SKR, or to add an SKR feature before 2026-10-08 (`../PITCH_OUTLINE.md` §7).
+- **SKR track ($10k, CLOCK IN):** since 2026-10-08 the product ties SKR to the fee: a payout in $SKR pays 1.5% instead of 2%, and 10% of every SKR fee is burned on-chain in the same instruction (`FeeBurned`).
 - **Zcash track (World's Fair):** it's unverified whether a Solana app that delivers shielded ZEC through NEAR Intents counts as "building on Zcash". One product per builder applies. Ask the organizers before positioning for it.
 - **Vesting fee:** the program applies the per-rail release fee to vesting releases (`vesting_tokens_release_with_fee` test). Decide whether 2% is right for vesting before presenting it.
 - **Docs drift:** `docs/KORA.md` says owners never pay fees in tokens (product decision, 2026-10-03). The USDC paymaster in `lib/core/config.dart` supersedes that, so update `KORA.md` before judges read it.

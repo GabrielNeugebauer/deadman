@@ -72,9 +72,22 @@ pub struct LegacyVaultRecovered {
     pub lamports: u64,
 }
 
+/// The burned share of an SKR payout fee.
 #[event]
-pub struct AccountSubscribed {
-    pub owner: Pubkey,
-    pub paid_until: i64,
+pub struct FeeBurned {
+    pub vault: Pubkey,
+    pub mint: Pubkey,
     pub amount: u64,
+}
+
+#[event]
+pub struct AdminProposed {
+    pub admin: Pubkey,
+    pub pending_admin: Pubkey,
+}
+
+#[event]
+pub struct AdminChanged {
+    pub old_admin: Pubkey,
+    pub new_admin: Pubkey,
 }

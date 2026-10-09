@@ -3,10 +3,12 @@ import 'dart:math';
 
 import 'package:bip39/bip39.dart' as bip39;
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:solana/solana.dart';
 
 import '../rails/rails.dart';
+import 'secure_store_web.dart';
 
 enum PinCheck { normal, duress, wrong }
 
@@ -46,19 +48,29 @@ class RestoreResult {
   final List<Rail> kept;
 }
 
-/// Device-local secrets, encrypted by the Android Keystore.
+/// Device-local secrets, encrypted by the Android Keystore. On the web they
+/// go to [WebSecrets] instead: wrapped under a key derived from the PIN and
+/// sealed by a non-extractable WebCrypto key, never in localStorage.
 ///
 /// The guard key can only pulse and lock down the vault on-chain, so keeping
 /// it on the device (behind biometrics in the UI) never puts funds at risk.
 /// Claim keys do receive funds, so they derive from a 12-word recovery
 /// phrase the beneficiary writes down.
 class SecureStore {
-  SecureStore([FlutterSecureStorage? storage])
-    : _storage = storage ?? const FlutterSecureStorage();
+  SecureStore([FlutterSecureStorage? storage, WebSecrets? web])
+    : _storage = storage ?? const FlutterSecureStorage(),
+      _web = web ?? (kIsWeb ? WebSecrets.shared : null);
 
   final FlutterSecureStorage _storage;
+  final WebSecrets? _web;
 
-  static const _guardKey = 'guard_private_key';
+  Future<String?> _read(String key) =>
+      _web?.read(key) ?? _storage.read(key: key);
+
+  Future<void> _write(String key, String value) =>
+      _web?.write(key, value) ?? _storage.write(key: key, value: value);
+
+  static const _guardKey = WebSecrets.guardKey;
   static const _pinKey = 'pin_hash';
   static const _duressKey = 'duress_hash';
   static const _saltKey = 'pin_salt';
@@ -85,7 +97,7 @@ class SecureStore {
   }
 
   Future<Ed25519HDKeyPair?> loadGuard() async {
-    final encoded = await _storage.read(key: _guardKey);
+    final encoded = await _read(_guardKey);
     if (encoded == null) return null;
     return Ed25519HDKeyPair.fromPrivateKeyBytes(
       privateKey: base64Decode(encoded),
@@ -95,14 +107,17 @@ class SecureStore {
   Future<Ed25519HDKeyPair> createGuard() async {
     final pair = await Ed25519HDKeyPair.random();
     final data = await pair.extract();
-    await _storage.write(key: _guardKey, value: base64Encode(data.bytes));
+    await _write(_guardKey, base64Encode(data.bytes));
     return pair;
   }
 
-  Future<bool> hasPins() async => await _storage.read(key: _pinKey) != null;
+  Future<bool> hasPins() async =>
+      await _web?.hasPins() ?? await _storage.read(key: _pinKey) != null;
 
   Future<void> setPins({required String pin, required String duressPin}) async {
     assert(pin != duressPin);
+    final web = _web;
+    if (web != null) return web.setPins(pin: pin, duressPin: duressPin);
     final rnd = Random.secure();
     final salt = base64Encode(List<int>.generate(16, (_) => rnd.nextInt(256)));
     await _storage.write(key: _saltKey, value: salt);
@@ -110,7 +125,10 @@ class SecureStore {
     await _storage.write(key: _duressKey, value: _hash(salt, duressPin));
   }
 
+  /// On the web a match also unlocks that PIN's keys for this page.
   Future<PinCheck> checkPin(String pin) async {
+    final web = _web;
+    if (web != null) return web.checkPin(pin);
     final salt = await _storage.read(key: _saltKey);
     if (salt == null) return PinCheck.wrong;
     final h = _hash(salt, pin);
@@ -119,25 +137,24 @@ class SecureStore {
     return PinCheck.wrong;
   }
 
-  Future<String?> loadPhrase() => _storage.read(key: _phraseKey);
+  Future<String?> loadPhrase() => _read(_phraseKey);
 
   /// The user confirmed writing the phrase down.
   Future<bool> phraseConfirmed() async =>
-      await _storage.read(key: _phraseConfirmedKey) != null;
+      await _read(_phraseConfirmedKey) != null;
 
-  Future<void> markPhraseConfirmed() =>
-      _storage.write(key: _phraseConfirmedKey, value: '1');
+  Future<void> markPhraseConfirmed() => _write(_phraseConfirmedKey, '1');
 
   Future<String> _ensurePhrase() async {
     final existing = await loadPhrase();
     if (existing != null) return existing;
     final phrase = bip39.generateMnemonic();
-    await _storage.write(key: _phraseKey, value: phrase);
+    await _write(_phraseKey, phrase);
     return phrase;
   }
 
   Future<ClaimProfile?> loadClaim(Rail rail) async {
-    final raw = await _storage.read(key: _claimKey(rail));
+    final raw = await _read(_claimKey(rail));
     if (raw == null) return null;
     final m = jsonDecode(raw) as Map<String, dynamic>;
     return ClaimProfile(
@@ -157,9 +174,9 @@ class SecureStore {
     required bool recoverable,
   }) async {
     final sk = (await key.extract()).bytes;
-    await _storage.write(
-      key: _claimKey(rail),
-      value: jsonEncode({
+    await _write(
+      _claimKey(rail),
+      jsonEncode({
         'sk': base64Encode(sk),
         'dest': destination,
         if (recoverable) 'src': 'phrase',
@@ -206,7 +223,7 @@ class SecureStore {
         );
       }
     }
-    await _storage.write(key: _phraseKey, value: p);
+    await _write(_phraseKey, p);
     await markPhraseConfirmed();
     final restored = <Rail>[];
     final kept = <Rail>[];
@@ -231,13 +248,15 @@ class SecureStore {
 
   /// "Forget this device": PINs and the guard key only. Receiving keys stay.
   Future<void> wipeDevice() async {
+    final web = _web;
+    if (web != null) return web.wipeDevice();
     for (final k in [_pinKey, _duressKey, _saltKey, _guardKey]) {
       await _storage.delete(key: k);
     }
   }
 
   /// Everything, including receiving keys and the recovery phrase.
-  Future<void> wipeAll() => _storage.deleteAll();
+  Future<void> wipeAll() => _web?.wipeAll() ?? _storage.deleteAll();
 
   static String _hash(String salt, String pin) =>
       sha256.convert(utf8.encode('$salt:$pin')).toString();

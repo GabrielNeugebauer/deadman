@@ -10,6 +10,7 @@ import '../../state/assets.dart';
 import '../../state/fee_settings.dart';
 import '../../state/plan_draft.dart';
 import '../../state/plan_math.dart';
+import '../../state/protocol_fees.dart';
 import '../../state/providers.dart';
 import '../../state/vesting.dart';
 import '../format.dart' show installmentDate;
@@ -201,7 +202,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
     return deliveryIssues(
       p: scheduleAsPayout(s),
       gross: s.total,
-      feeBps: fee.bpsFor(s.rail),
+      feeBps: fee.bpsFor(s.rail, s.mint),
       facts: ref.watch(beneficiaryFactsProvider((s.beneficiary, s.mint))).value,
     );
   }
@@ -742,13 +743,9 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
           ),
           CostRow(
             'Release fee',
-            fee.waived
-                ? 'None: monthly plan active'
-                : fee.fees == null
+            fee.fees == null
                 ? 'fee loading…'
-                : '${percentText(fee.fees!.feeBpsPublic / 10000)} of each normal '
-                      'release, ${percentText(fee.fees!.feeBpsPrivate / 10000)} '
-                      'of each private one, taken when it runs.',
+                : releaseFeeTerms(fee.fees!, 'release'),
           ),
           CostRow(
             'Network & setup',

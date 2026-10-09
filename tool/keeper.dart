@@ -1,22 +1,22 @@
 // Protocol keeper: executes due rules in every Deadman vault. Execution is
 // permissionless and destinations are fixed on-chain, so the keeper can't
-// redirect funds; the payout fee is what pays for running it.
+// redirect funds; the release fee (2%, 1.5% in SKR) is what pays for running
+// it.
 //
-// Policy (audit M-3): never pay for an empty or unpayable tier, and never pay
-// ATA rent the protocol fee does not cover. Tiers that cannot pay are skipped
-// once their grace period is over; a skipped tier keeps its share reserved and
-// stays claimable, so the keeper executes it (same policy) once it can pay,
-// and never skips it again. At most one action per vault per sweep.
-//
-// Plans of a subscribed owner (fee waived, `feeWaivedFor`; one batched read
-// of the owners' subscriptions per sweep) carry a 0 fee, so the keeper pays
-// no ATA rent for them; it still executes SOL tiers and token tiers whose
-// ATAs exist.
+// Policy (audits M-3, M-4): the keeper releases a tier or a vesting
+// installment only when the fee the treasury earns from it covers what the
+// keeper pays: the network fee and any ATA rent. Anything smaller (dust,
+// NFTs, tokens without a known price) is left for the beneficiary to
+// claim. Of an SKR fee only the share that is not burned counts. Tiers
+// that cannot pay at all are skipped once their grace period is over, but
+// only when that unblocks a later tier of the same asset; a skipped tier
+// keeps its share reserved and stays claimable, so the keeper executes it
+// (same policy) once it can pay, and never skips it again. At most one
+// action per vault per sweep.
 //
 // Vesting plans: releases what has vested on each schedule under the same
-// payability rules. Installment plans release each installment as soon as it
-// unlocks; continuous (legacy) plans at most once per --vest-interval per
-// schedule (and always once fully vested). Inheritance-only actions never
+// rules, at most once per --vest-interval per schedule (and always once
+// fully vested), installments included. Inheritance-only actions never
 // touch them.
 //
 // dart run tool/keeper.dart --keypair <path> [--cluster devnet|mainnet-beta]
@@ -27,6 +27,13 @@
 //
 // --cluster picks the default RPC and USDC mint, and the keeper refuses to
 // start when the RPC's genesis hash belongs to another cluster.
+//
+// Only USDC has a default --price (--usdc-price-lamports). Other plan
+// tokens, SKR and ORE included, have no known price unless passed (e.g.
+// --price <SKR mint>=<lamports per base unit>): their fee is then worth 0
+// and the keeper leaves their tiers to the beneficiary. The same holds for
+// NFT tiers (amount 1, whose fee rounds down to 0); such a payout leaves
+// out the treasury token account (FUNDS-5).
 import 'dart:convert';
 import 'dart:io';
 
@@ -43,14 +50,41 @@ const tokenAccountSize = 165;
 
 enum KeeperAction { execute, skip, wait }
 
+/// Base fee per signature; the keeper's transactions have one.
+const lamportsPerSignature = 5000;
+
+/// Compute units the runtime allows each instruction when no limit is set.
+const defaultCuPerIx = 200000;
+
+/// What the keeper pays to send [instructions] instructions (compute budget
+/// excluded) at [cuPrice] micro-lamports per compute unit.
+int networkFeeLamports({int instructions = 1, int cuPrice = 0}) {
+  final micro = BigInt.from(1000000);
+  final priority =
+      (BigInt.from(instructions * defaultCuPerIx) * BigInt.from(cuPrice) +
+          micro -
+          BigInt.one) ~/
+      micro;
+  return lamportsPerSignature + priority.toInt();
+}
+
 class Decision {
-  const Decision(this.action, this.reason, {this.createAtasFor = const []});
+  const Decision(
+    this.action,
+    this.reason, {
+    this.createAtasFor = const [],
+    this.treasuryFee = true,
+  });
 
   final KeeperAction action;
   final String reason;
 
   /// Owners whose ATA the keeper creates (and pays rent for) on execute.
   final List<String> createAtasFor;
+
+  /// Whether the payout leaves a fee for the treasury, so its token account
+  /// must be passed (FUNDS-5).
+  final bool treasuryFee;
 
   @override
   String toString() =>
@@ -70,11 +104,7 @@ int ruleGross(RuleSpec rule, int available) => switch (rule.mode) {
 
 /// Mirrors the program's `split_fee`: (net, fee).
 (int, int) splitFee(int gross, int bps) {
-  final fee =
-      (BigInt.from(gross) *
-              BigInt.from(bps) ~/
-              BigInt.from(Limits.bpsDenominator))
-          .toInt();
+  final fee = bpsShare(gross, bps);
   return (gross - fee, fee);
 }
 
@@ -104,7 +134,26 @@ int tierGross(RuleSpec rule, int balance, {int otherReserved = 0}) {
 
 Decision _cannotPay(String why, bool canSkip) => canSkip
     ? Decision(KeeperAction.skip, '$why; grace period over')
-    : Decision(KeeperAction.wait, '$why; not skippable yet');
+    : Decision(KeeperAction.wait, '$why; not skippable');
+
+/// Whether skipping tier [index] lets a later tier of the same asset run:
+/// only then is a skip worth its network fee (a skip also reserves the
+/// tier's share, which the owner can no longer withdraw).
+bool skipUnblocks(VaultState v, int index) {
+  final mint = v.rules[index].mint;
+  for (var j = index + 1; j < v.rules.length; j++) {
+    final r = v.rules[j];
+    if (r.mint == mint && !r.executed && !r.skipped) return true;
+  }
+  return false;
+}
+
+Decision _leaveToBeneficiary(String payout, int earned, int cost, String of) =>
+    Decision(
+      KeeperAction.wait,
+      '$payout: fee worth ~$earned lamports does not cover $cost lamports '
+      'of $of; left for the beneficiary to claim',
+    );
 
 class SolFacts {
   const SolFacts({
@@ -115,10 +164,14 @@ class SolFacts {
     required this.treasuryLamports,
     required this.treasuryRentMin,
     this.otherReserved = 0,
+    this.networkFee = lamportsPerSignature,
   });
 
   /// Vault lamports above its rent-exempt minimum.
   final int available;
+
+  /// What sending the release costs the keeper.
+  final int networkFee;
 
   /// Lamports reserved for other skipped, unpaid SOL tiers.
   final int otherReserved;
@@ -129,9 +182,10 @@ class SolFacts {
   final int treasuryRentMin;
 }
 
-/// A due or skipped SOL rule: execute unless the payout is 0 or would leave
+/// A due or skipped SOL rule: cannot pay when the payout is 0 or would leave
 /// the beneficiary below rent exemption (the program rejects that with
-/// BeneficiaryCannotReceive).
+/// BeneficiaryCannotReceive); executes only when the fee covers the
+/// network fee (audit M-4).
 Decision decideSol(RuleSpec rule, SolFacts f, {required bool canSkip}) {
   final gross = tierGross(rule, f.available, otherReserved: f.otherReserved);
   if (gross <= 0) return _cannotPay('nothing to pay', canSkip);
@@ -146,7 +200,11 @@ Decision decideSol(RuleSpec rule, SolFacts f, {required bool canSkip}) {
       canSkip,
     );
   }
-  return Decision(KeeperAction.execute, 'pays $net lamports, fee $fee');
+  final payout = 'pays $net lamports, fee $fee';
+  if (fee < f.networkFee) {
+    return _leaveToBeneficiary(payout, fee, f.networkFee, 'network fee');
+  }
+  return Decision(KeeperAction.execute, payout);
 }
 
 enum AtaStatus { missing, usable, unusable }
@@ -161,6 +219,8 @@ class TokenFacts {
     required this.ataRent,
     this.lamportsPerUnit,
     this.otherReserved = 0,
+    this.burnBps = 0,
+    this.networkFee = lamportsPerSignature,
   });
 
   /// The mint is owned by the classic SPL Token program (the only one the
@@ -179,12 +239,20 @@ class TokenFacts {
 
   /// Units reserved for other skipped, unpaid tiers of this mint.
   final int otherReserved;
+
+  /// Share of the fee that is burned (SKR); the treasury gets the rest.
+  final int burnBps;
+
+  /// What sending the release costs the keeper, ATA creates included.
+  final int networkFee;
 }
 
-/// A due or skipped token rule: execute only when the vault holds the mint and either
-/// both ATAs exist or the protocol fee is worth at least the ATA rent the
-/// keeper would pay. A payable tier is never skipped just because it does
-/// not pay the keeper; the beneficiary can create its ATA or execute itself.
+/// A due or skipped token rule: execute only when the vault holds the mint
+/// and the treasury's share of the fee is worth at least the network fee
+/// plus the ATA rent the keeper would pay (audit M-4). A payable tier is
+/// never skipped just because it does not pay the keeper; the beneficiary
+/// can claim it. A payout that leaves the treasury nothing needs no
+/// treasury ATA (FUNDS-5).
 Decision decideToken(
   RuleSpec rule,
   String treasury,
@@ -199,49 +267,52 @@ Decision decideToken(
   if (f.beneficiaryAta == AtaStatus.unusable) {
     return _cannotPay('beneficiary ATA is frozen or reassigned', canSkip);
   }
-  if (f.treasuryAta == AtaStatus.unusable) {
+  final (net, fee) = splitFee(gross, f.feeBps);
+  final burned = bpsShare(fee, f.burnBps);
+  final toTreasury = fee - burned;
+  final treasuryFee = toTreasury > 0;
+  if (treasuryFee && f.treasuryAta == AtaStatus.unusable) {
     return const Decision(KeeperAction.wait, 'treasury ATA unusable');
   }
-  final (net, fee) = splitFee(gross, f.feeBps);
   final missing = [
     if (f.beneficiaryAta == AtaStatus.missing) rule.beneficiary,
-    if (f.treasuryAta == AtaStatus.missing) treasury,
+    if (treasuryFee && f.treasuryAta == AtaStatus.missing) treasury,
   ];
-  if (missing.isEmpty) {
-    return Decision(KeeperAction.execute, 'pays $net, fee $fee');
-  }
   final rent = missing.length * f.ataRent;
+  final cost = f.networkFee + rent;
   final price = f.lamportsPerUnit;
-  final feeValue = price == null ? 0 : (fee * price).floor();
-  if (feeValue < rent) {
-    return Decision(
-      KeeperAction.wait,
-      'fee worth ~$feeValue lamports does not cover $rent lamports of ATA '
-      'rent',
+  final feeValue = price == null ? 0 : (toTreasury * price).floor();
+  final payout = 'pays $net, fee $fee${burned > 0 ? ' ($burned burned)' : ''}';
+  if (feeValue < cost) {
+    return _leaveToBeneficiary(
+      payout,
+      feeValue,
+      cost,
+      rent > 0 ? 'network fee and ATA rent' : 'network fee',
     );
   }
   return Decision(
     KeeperAction.execute,
-    'pays $net, fee $fee (~$feeValue lamports) covers $rent rent',
+    '$payout (~$feeValue lamports) covers $cost lamports'
+    '${rent > 0 ? ' with $rent rent' : ''}',
     createAtasFor: missing,
+    treasuryFee: treasuryFee,
   );
 }
 
 /// Whether to release a vesting schedule now: never with nothing new
-/// vested; right away for [installments] (each unlock is already a whole
-/// installment); otherwise (continuous vesting) at most once per [interval]
-/// (unix seconds since [lastRelease]), except once [fullyVested] so the
-/// last part never waits.
+/// vested; at most once per [interval] (unix seconds since [lastRelease]),
+/// installment schedules included (audit M-4), except once [fullyVested]
+/// so the last part never waits.
 bool vestingReleaseDue({
   required int claimable,
   required bool fullyVested,
   required int now,
   required int interval,
   int? lastRelease,
-  bool installments = false,
 }) {
   if (claimable <= 0) return false;
-  if (installments || fullyVested || lastRelease == null) return true;
+  if (fullyVested || lastRelease == null) return true;
   return now - lastRelease >= interval;
 }
 
@@ -292,8 +363,8 @@ class Keeper {
   final bool dryRun;
   final Map<String, double> prices;
 
-  /// Seconds between releases of one continuously vesting schedule
-  /// (installment schedules release at each unlock).
+  /// Seconds between releases of one vesting schedule (the last part never
+  /// waits).
   final int vestInterval;
 
   /// Priority fee (micro-lamports per compute unit) on execute and release
@@ -335,24 +406,20 @@ class Keeper {
   }
 
   /// For a vesting plan pass [asTier] (see [vestingAsTier]); it is never
-  /// skippable and reserves nothing. [sub] is the owner's subscription
-  /// (null = none).
+  /// skippable and reserves nothing.
   Future<Decision> decide(
     VaultState v,
     int i,
     FeeSchedule fees,
     int now, {
     RuleSpec? asTier,
-    AccountSubscription? sub,
   }) async {
     final rule = asTier ?? v.rules[i];
     // False for an already-skipped tier: it waits until it can pay.
-    final canSkip = asTier == null && v.canSkip(i, now);
+    final canSkip = asTier == null && v.canSkip(i, now) && skipUnblocks(v, i);
     final otherReserved = asTier == null ? reservedFor(v, i) : 0;
-    // 0 while the owner's subscription waives the fee: the keeper then
-    // pays no ATA rent for it, but still executes payable tiers.
-    final bps = payoutFeeBps(fees, v, sub, rule.rail, now);
     final mint = rule.mint;
+    final bps = fees.bpsFor(rule.rail, mint);
     if (mint == null) {
       final [ben, tre] = await _accounts([rule.beneficiary, fees.treasury]);
       return decideSol(
@@ -365,6 +432,7 @@ class Keeper {
           treasuryLamports: tre?.lamports ?? 0,
           treasuryRentMin: await _rentMin(_data(tre)?.length ?? 0),
           otherReserved: otherReserved,
+          networkFee: networkFeeLamports(cuPrice: cuPrice),
         ),
         canSkip: canSkip,
       );
@@ -393,6 +461,9 @@ class Keeper {
         ataRent: await _rentMin(tokenAccountSize),
         lamportsPerUnit: prices[mint] ?? (mint == nativeMint ? 1 : null),
         otherReserved: otherReserved,
+        burnBps: fees.isSkr(mint) ? fees.skrBurnBps : 0,
+        // Up to two ATA creates and the payout.
+        networkFee: networkFeeLamports(instructions: 3, cuPrice: cuPrice),
       ),
       canSkip: canSkip,
     );
@@ -418,6 +489,7 @@ class Keeper {
         rule: v.rules[i],
         index: i,
         treasury: fees.treasury,
+        treasuryFee: d.treasuryFee,
       ))
         if (ix.programId.toBase58() != ataProgramId ||
             d.createAtasFor.contains(ix.accounts[2].pubKey.toBase58()))
@@ -434,12 +506,10 @@ class Keeper {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final vaults = await client.fetchAllVaults();
     final fees = await client.fetchFees();
-    final subs = await client.fetchSubscriptions(vaults.map((v) => v.owner));
     var acted = 0;
     for (final v in vaults) {
-      final sub = subs[v.owner];
       if (v.isVesting) {
-        if (await _sweepVesting(v, fees, now, sub)) acted++;
+        if (await _sweepVesting(v, fees, now)) acted++;
         continue;
       }
       // Index order respects the program's per-asset ordering; skipped
@@ -449,7 +519,7 @@ class Keeper {
         final rule = v.rules[i];
         final tag = '${v.address} rule $i -> ${rule.beneficiary}';
         try {
-          final d = await decide(v, i, fees, now, sub: sub);
+          final d = await decide(v, i, fees, now);
           if (d.action == KeeperAction.wait || dryRun) {
             stdout.writeln('${dryRun ? 'DRY ' : ''}$tag: $d');
             if (d.action == KeeperAction.wait) continue;
@@ -482,12 +552,7 @@ class Keeper {
 
 extension on Keeper {
   /// Releases the first schedule of [v] that is due; true if it acted.
-  Future<bool> _sweepVesting(
-    VaultState v,
-    FeeSchedule fees,
-    int now,
-    AccountSubscription? sub,
-  ) async {
+  Future<bool> _sweepVesting(VaultState v, FeeSchedule fees, int now) async {
     for (var i = 0; i < v.rules.length; i++) {
       final rule = v.rules[i];
       if (rule.executed) continue;
@@ -499,7 +564,6 @@ extension on Keeper {
         now: now,
         interval: vestInterval,
         lastRelease: _lastRelease[slot],
-        installments: v.vestPeriodSecs > 0,
       )) {
         continue;
       }
@@ -511,7 +575,6 @@ extension on Keeper {
           fees,
           now,
           asTier: vestingAsTier(rule, claimable),
-          sub: sub,
         );
         if (d.action != KeeperAction.execute || dryRun) {
           stdout.writeln('${dryRun ? 'DRY ' : ''}$tag: $d');
@@ -533,7 +596,8 @@ const _usage =
     'usage: --keypair <path> [--cluster devnet|mainnet-beta] [--rpc <url>] '
     '[--every <seconds>] [--dry-run] '
     '[--price <mint>=<lamports per base unit>]... '
-    '[--vest-interval <seconds, default 86400; continuous vesting only>] '
+    '[--vest-interval <seconds between releases of a schedule, default '
+    '86400>] '
     '[--usdc-price-lamports <per USDC base unit, default 6 = 0.006 SOL/USDC>] '
     '[--cu-price <micro-lamports per compute unit, default 0>]';
 

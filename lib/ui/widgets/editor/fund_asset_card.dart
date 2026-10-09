@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../state/assets.dart';
 import '../../../state/plan_draft.dart';
 import '../brand/brand.dart';
+import '../nft.dart';
 import 'plan_steps.dart';
 
 /// One line of a Fund breakdown.
@@ -64,8 +65,44 @@ class FundAssetCard extends StatelessWidget {
   final FocusNode? focusNode;
   final Key? fieldKey;
 
+  /// An NFT goes in whole: a switch instead of an amount.
+  Widget _nftField() {
+    final inWallet = (wallet.value ?? 0) > 0;
+    final on = controller.text.trim() == '1';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SwitchListTile(
+          key: fieldKey,
+          focusNode: focusNode,
+          contentPadding: EdgeInsets.zero,
+          value: on,
+          onChanged: inWallet || on
+              ? (v) {
+                  controller.text = v ? '1' : '';
+                  onChanged();
+                }
+              : null,
+          title: Text(
+            'Put it in this plan now',
+            style: DMType.outfit(size: 15, weight: FontWeight.w500),
+          ),
+          subtitle: Text(switch (wallet) {
+            AsyncData() when inWallet => 'In your wallet',
+            AsyncData() => 'Not in this wallet',
+            AsyncError() => "Couldn't read your wallet.",
+            _ => 'Checking your wallet…',
+          }, style: DMType.data(size: 12, color: DM.dust)),
+        ),
+        if (errorText != null)
+          Text(errorText!, style: DMType.outfit(size: 13, color: DM.flatline)),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final nft = isNft(mint);
     final symbol = unitLabel(mint);
     final helper = switch (wallet) {
       AsyncData(:final value) => 'In your wallet: ${moneyText(value, mint)}',
@@ -78,6 +115,10 @@ class FundAssetCard extends StatelessWidget {
         children: [
           Row(
             children: [
+              if (nft) ...[
+                NftThumb(mint, size: 40),
+                const SizedBox(width: DMSpace.md),
+              ],
               Expanded(
                 child: Semantics(
                   header: true,
@@ -88,44 +129,48 @@ class FundAssetCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: DMSpace.md),
-              TextButton(
-                onPressed: useAll == null ? null : () => onUseAll(useAll!),
-                child: const Text('Use all'),
-              ),
+              if (!nft)
+                TextButton(
+                  onPressed: useAll == null ? null : () => onUseAll(useAll!),
+                  child: const Text('Use all'),
+                ),
             ],
           ),
           Text(
             needs,
             style: DMType.outfit(size: 14, color: DM.dust, height: 1.4),
           ),
-          const SizedBox(height: DMSpace.xl),
-          LabeledField(
-            label: 'Put in this plan',
-            child: TextField(
-              key: fieldKey,
-              controller: controller,
-              focusNode: focusNode,
-              onChanged: (_) => onChanged(),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
-              ],
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              style: DMType.mono(size: 18, weight: FontWeight.w500),
-              decoration: InputDecoration(
-                hintText: '0',
-                hintStyle: DMType.mono(size: 18, color: DM.ash),
-                suffixText: symbol,
-                suffixStyle: DMType.mono(size: 14, color: DM.dust),
-                helperText: helper,
-                helperStyle: DMType.mono(size: 12, color: DM.dust),
-                helperMaxLines: 2,
-                errorText: errorText,
-                errorMaxLines: 3,
+          SizedBox(height: nft ? DMSpace.sm : DMSpace.xl),
+          if (nft)
+            _nftField()
+          else
+            LabeledField(
+              label: 'Put in this plan',
+              child: TextField(
+                key: fieldKey,
+                controller: controller,
+                focusNode: focusNode,
+                onChanged: (_) => onChanged(),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                ],
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                style: DMType.mono(size: 18, weight: FontWeight.w500),
+                decoration: InputDecoration(
+                  hintText: '0',
+                  hintStyle: DMType.mono(size: 18, color: DM.ash),
+                  suffixText: symbol,
+                  suffixStyle: DMType.mono(size: 14, color: DM.dust),
+                  helperText: helper,
+                  helperStyle: DMType.mono(size: 12, color: DM.dust),
+                  helperMaxLines: 2,
+                  errorText: errorText,
+                  errorMaxLines: 3,
+                ),
               ),
             ),
-          ),
           if (lines.isNotEmpty) ...[
             const SizedBox(height: DMSpace.lg),
             const Divider(height: 1),

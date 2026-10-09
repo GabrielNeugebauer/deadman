@@ -5,6 +5,7 @@ import '../../../core/config.dart';
 import '../../../solana/deadman_api.dart';
 import '../../../state/actions.dart';
 import '../../../state/assets.dart';
+import '../../../state/plan_draft.dart' show assetOrder;
 import '../../../state/plan_math.dart';
 import '../../../state/providers.dart';
 import '../../format.dart';
@@ -14,12 +15,12 @@ import '../../widgets/feedback.dart';
 import '../rules_editor.dart';
 import '../vesting_editor.dart';
 
-/// Re-reads plans, balances and the monthly plan.
+/// Re-reads plans and balances.
 void refreshPlans(WidgetRef ref) {
   ref.invalidate(vaultsProvider);
   ref.invalidate(planUsdcProvider);
   ref.invalidate(planTokenBalancesProvider);
-  ref.invalidate(accountSubscriptionProvider);
+  ref.invalidate(planTokenProvider);
 }
 
 void openEditor(BuildContext context, {VaultState? vault}) => Navigator.push(
@@ -120,8 +121,8 @@ Future<int?> askAmount(BuildContext context, String title) {
   );
 }
 
-/// Deposits SOL or USDC from the wallet into plan [planId]; only [asset]
-/// when given.
+/// Deposits from the wallet into plan [planId]: SOL, a preset token, any
+/// other token or an NFT; only [asset] when given.
 Future<void> depositToPlan(
   BuildContext context,
   WidgetRef ref,
@@ -132,21 +133,33 @@ Future<void> depositToPlan(
     null: ?ref.read(walletBalanceProvider).value,
     AppConfig.usdcMint: ?ref.read(walletUsdcProvider).value,
   };
-  final mint = asset?.mint;
-  if (mint != null && !wallet.containsKey(mint)) {
-    try {
-      wallet[mint] = await ref.read(walletTokenProvider(mint).future);
-    } catch (_) {
-      // The hint is optional; the deposit itself reports real failures.
+  final mints = [
+    if (asset == null)
+      for (final a in presetAssets) ?a.mint
+    else
+      ?asset.mint,
+  ].where((m) => !wallet.containsKey(m)).toList();
+  if (mints.isNotEmpty) {
+    // The hints are optional; the deposit itself reports real failures.
+    final got = await Future.wait([
+      for (final m in mints)
+        ref
+            .read(walletTokenProvider(m).future)
+            .then<int?>((v) => v, onError: (Object _) => null),
+    ]);
+    for (final (i, m) in mints.indexed) {
+      if (got[i] case final v?) wallet[m] = v;
     }
     if (!context.mounted) return;
   }
   final pick = await askAssetAmount(
     context,
     asset == null ? 'Deposit' : 'Deposit ${asset.symbol}',
-    assets: asset == null ? const [solAsset, usdcAsset] : [asset],
+    assets: asset == null ? presetAssets : [asset],
     available: wallet,
     availableLabel: 'in your wallet',
+    allowOther: asset == null,
+    allowNft: asset == null,
   );
   if (pick == null || !context.mounted) return;
   final actions = ref.read(actionsProvider);
@@ -159,6 +172,14 @@ Future<void> depositToPlan(
   );
 }
 
+/// Under the Withdraw amount: Deadman takes nothing on the way out.
+const withdrawFreeNote =
+    'Withdrawals are free: Deadman takes no fee, only the network fee '
+    'applies.';
+
+/// Under Cancel and Close: Deadman takes nothing on the way out.
+const closeFreeNote = 'No Deadman fee: cancelling a plan is free.';
+
 /// Withdraws up to [available] (base units per mint; for vesting plans
 /// only what is not committed to beneficiaries).
 Future<void> withdrawFromPlan(
@@ -170,9 +191,11 @@ Future<void> withdrawFromPlan(
   final pick = await askAssetAmount(
     context,
     'Withdraw',
+    assets: [for (final m in assetOrder(available.keys)) assetInfo(m)],
     available: available,
     availableLabel: vault.isVesting ? 'not committed' : 'withdrawable',
     capped: true,
+    note: withdrawFreeNote,
   );
   if (pick == null || !context.mounted) return;
   final actions = ref.read(actionsProvider);
@@ -185,12 +208,21 @@ Future<void> withdrawFromPlan(
   );
 }
 
-/// "0.500 SOL · 250 USDC": what a plan holds, SOL first, empty assets left
-/// out; [tokens] maps mint -> base units.
+/// "0.500 SOL · 250 USDC · 1200 SKR": what a plan holds, SOL first, empty
+/// assets left out; [tokens] maps mint -> base units.
 String holdingsText(VaultState vault, Map<String, int> tokens) => [
   if (vault.withdrawableLamports > 0) '${sol(vault.withdrawableLamports)} SOL',
-  for (final MapEntry(key: mint, value: amount) in tokens.entries)
-    if (amount > 0) amountText(amount, mint),
+  for (final mint in assetOrder(tokens.keys).nonNulls)
+    if (tokens[mint]! > 0) amountText(tokens[mint]!, mint),
+].join(' · ');
+
+/// A plan card's summary amounts: SOL always, USDC when read, other tokens
+/// and NFTs while held; [tokens] maps mint -> base units.
+String balancesText(VaultState vault, Map<String, int> tokens) => [
+  '${sol(vault.withdrawableLamports)} SOL',
+  for (final mint in assetOrder(tokens.keys).nonNulls)
+    if (mint == AppConfig.usdcMint || tokens[mint]! > 0)
+      amountText(tokens[mint]!, mint),
 ].join(' · ');
 
 /// A plan under panic lockdown cannot move funds, so it cannot be
@@ -269,9 +301,9 @@ Future<void> closePlanFlow(
     body: cancel
         ? '$back Its tiers will never release to anyone.'
               '${paid ? ' Tiers that already released stay with their beneficiaries.' : ''}'
-              ' This can\'t be undone.'
+              ' This can\'t be undone.\n\n$closeFreeNote'
         : '$back The plan and its history leave the app. This can\'t be '
-              'undone.',
+              'undone.\n\nNo Deadman fee: closing a plan is free.',
     confirm: cancel ? 'Cancel plan' : 'Close plan',
   );
   if (!ok || !context.mounted) return;

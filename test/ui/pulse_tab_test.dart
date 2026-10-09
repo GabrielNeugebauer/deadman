@@ -1,6 +1,7 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
+import 'package:deadman/state/boney_skins.dart';
 import 'package:deadman/state/boney_widget_sync.dart';
 import 'package:deadman/state/plan_math.dart';
 import 'package:deadman/state/providers.dart';
@@ -8,6 +9,7 @@ import 'package:deadman/ui/format.dart';
 import 'package:deadman/ui/screens/plans_screen.dart';
 import 'package:deadman/ui/screens/pulse_tab.dart';
 import 'package:deadman/ui/theme.dart';
+import 'package:deadman/ui/widgets/boney_skins.dart';
 import 'package:deadman/ui/widgets/brand/brand.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,7 +24,6 @@ const _phone = Size(393, 760);
 Future<void> _pump(
   WidgetTester tester,
   List<VaultState> plans, {
-  SubscriptionTerms? terms,
   bool duress = false,
   List<int> legacy = const [],
   String guard = '',
@@ -40,6 +41,7 @@ Future<void> _pump(
       overrides: [
         prefsProvider.overrideWithValue(prefs),
         boneyHostProvider.overrideWithValue(null),
+        ownedSkinsProvider.overrideWith((ref) async => const {}),
         if (actions != null) actionsProvider.overrideWith(actions),
         vaultsProvider.overrideWith((ref) async => plans),
         legacyPlansProvider.overrideWith((ref) async => legacy),
@@ -48,8 +50,6 @@ Future<void> _pump(
         ),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
         planTokenBalancesProvider.overrideWith((ref) async => const {}),
-        subscriptionTermsProvider.overrideWith((ref) async => terms),
-        accountSubscriptionProvider.overrideWith((ref) async => null),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
@@ -476,10 +476,13 @@ void main() {
       expect(
         find.descendant(
           of: find.byType(BottomSheet),
-          matching: find.byType(BoneyFigure),
+          matching: find.byType(SkinnedBoney),
         ),
         findsOneWidget,
       );
+      // Skins, all locked without a Boney NFT.
+      expect(find.text('SKINS'), findsOneWidget);
+      expect(find.bySemanticsLabel('Crown, locked'), findsOneWidget);
       await _unmount(tester);
     });
 
@@ -528,7 +531,8 @@ void main() {
       expect(find.text('Build release plan'), findsOneWidget);
       expect(
         find.text(
-          'No subscription. Deadman only charges when a tier releases funds.',
+          'Deadman only charges when a tier releases funds (2% (3% private '
+          'rails) on release · withdrawals free).',
         ),
         findsOneWidget,
       );
@@ -562,27 +566,10 @@ void main() {
       await _unmount(tester);
     });
 
-    testWidgets('the intro mentions the monthly plan when offered', (
-      tester,
-    ) async {
-      await _pump(
-        tester,
-        const [],
-        size: const Size(393, 2000),
-        terms: const SubscriptionTerms(
-          pricePerPeriod: 10000000,
-          periodSecs: 30 * 86400,
-          mint: AppConfig.usdcMint,
-          minPeriods: 12,
-        ),
-      );
-      expect(
-        find.textContaining(
-          'Or pay a flat 10 USDC a month for all your plans instead (12 months '
-          'minimum).',
-        ),
-        findsOneWidget,
-      );
+    testWidgets('the intro offers no subscription', (tester) async {
+      await _pump(tester, const [], size: const Size(393, 2000));
+      expect(find.textContaining('Plus'), findsNothing);
+      expect(find.textContaining('subscri'), findsNothing);
       await _unmount(tester);
     });
   });

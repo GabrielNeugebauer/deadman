@@ -172,7 +172,6 @@ Future<void> _app(
   List<VaultState> watched = const [],
   String owner = '',
   int tab = 0,
-  SubscriptionTerms? terms,
   List<int> legacy = const [],
   FakeApi? api,
   Map<String, int> tokens = const {},
@@ -199,8 +198,6 @@ Future<void> _app(
           guardAddressProvider.overrideWith((ref) async => addr(2)),
           planUsdcProvider.overrideWith((ref, address) async => 250000000),
           planTokenBalancesProvider.overrideWith((ref) async => const {}),
-          subscriptionTermsProvider.overrideWith((ref) async => terms),
-          accountSubscriptionProvider.overrideWith((ref) async => null),
           walletTokenProvider.overrideWith((ref, mint) async => 7000000),
           walletBalanceProvider.overrideWith((ref) async => 1000000000),
           walletUsdcProvider.overrideWith((ref) async => 0),
@@ -411,12 +408,6 @@ void main() {
           ),
         ],
         legacy: const [7],
-        terms: const SubscriptionTerms(
-          pricePerPeriod: 4990000,
-          periodSecs: 30 * 86400,
-          mint: usdc,
-          minPeriods: 12,
-        ),
       );
       await tester.tap(find.byKey(const Key('open-plans')));
       await tester.pumpAndSettle();

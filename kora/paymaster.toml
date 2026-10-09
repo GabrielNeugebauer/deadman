@@ -78,8 +78,11 @@ amount = 3000000                      # 3.00 USDC (6 decimals)
 token = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 strict = false
 
-# The fee payer may only fund account creation (Anchor `init` CPI with
-# payer = Kora in create_plan / create_vesting). Everything else is denied.
+# The fee payer may only fund account creation (System create_account CPI
+# with payer = Kora in create_plan / create_vesting). Everything else is
+# denied, including the System transfer the program uses to top up a
+# pre-funded plan address: the gateway sends Kora only plans at an empty
+# address.
 [validation.fee_payer_policy.system]
 allow_transfer = false
 allow_assign = false

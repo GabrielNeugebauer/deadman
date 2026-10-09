@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/assets.dart';
+import '../../state/nfts.dart';
 import '../../state/plan_math.dart';
 import '../../state/private_rails.dart';
 import '../../state/providers.dart';
@@ -14,6 +15,7 @@ import '../rules_format.dart';
 import '../web/web_ui.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
+import '../widgets/nft.dart';
 import '../widgets/pack_icons.dart';
 import '../widgets/private_funds.dart';
 import '../widgets/vesting_progress.dart';
@@ -241,12 +243,7 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
       for (final (i, r) in v.rules.indexed)
         if (widget.keys.contains(r.beneficiary)) (i, r),
     ];
-    // The owner's account-wide monthly plan waives the protocol fee.
-    final waived = feeWaivedFor(
-      v,
-      ref.watch(watchedSubscriptionsProvider).value?[v.owner],
-      now,
-    );
+    watchNftNames(ref, [for (final (_, r) in mine) r.mint]);
     final standing = _standing(v, now);
 
     final tokens = ref
@@ -318,7 +315,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     v.claimable(i, now) > 0 &&
                         tierFunded(v, i, tokens) != false,
                   ),
-                  waived: waived,
                   onClaim: () => _claim(i, 'Vested amount claimed'),
                   onRoute: () => _route(r),
                 ),
@@ -328,6 +324,7 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                 const Divider(height: DMSpace.xxxl),
                 _TierLine(
                   index: i,
+                  mint: r.mint,
                   amount: amountLabel(r),
                   rail: r.rail,
                   due: !r.executed && !r.skipped && v.ruleDueAt(i) <= now,
@@ -365,7 +362,6 @@ class _PersonCardState extends ConsumerState<_PersonCard> {
                     const FinePrint(
                       'Releasing from your wallet links it to this payout. The Deadman keeper releases due tiers automatically.',
                     ),
-                  if (waived) FinePrint(feeWaivedText(_quote(i, true))),
                 ],
                 // Tiers past due and grace that cannot pay: the keeper
                 // skips them; nobody does it by hand.
@@ -464,6 +460,7 @@ class _LastCheckIn extends StatelessWidget {
 class _TierLine extends StatelessWidget {
   const _TierLine({
     required this.index,
+    required this.mint,
     required this.amount,
     required this.rail,
     required this.when,
@@ -471,6 +468,7 @@ class _TierLine extends StatelessWidget {
   });
 
   final int index;
+  final String? mint;
   final String amount;
   final Rail rail;
   final String when;
@@ -490,7 +488,14 @@ class _TierLine extends StatelessWidget {
             children: [
               MonoLabel('Tier ${index + 1}'),
               const SizedBox(height: DMSpace.xs),
-              Text(amount, style: Theme.of(context).textTheme.bodyLarge),
+              WithNftThumb(
+                mint: mint,
+                size: 28,
+                child: Text(
+                  amount,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
+              ),
               const SizedBox(height: DMSpace.xxs),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -559,7 +564,6 @@ class _VestingClaim extends StatelessWidget {
     required this.web,
     required this.funded,
     required this.quote,
-    required this.waived,
     required this.onClaim,
     required this.onRoute,
   });
@@ -577,9 +581,6 @@ class _VestingClaim extends StatelessWidget {
 
   /// What claiming costs this wallet; null when unknown.
   final ClaimQuote? quote;
-
-  /// The owner's monthly plan waives the protocol fee.
-  final bool waived;
   final VoidCallback onClaim;
   final VoidCallback onRoute;
 
@@ -636,7 +637,6 @@ class _VestingClaim extends StatelessWidget {
             const FinePrint(
               'Claiming from your wallet links it to this payout.',
             ),
-          if (waived) FinePrint(feeWaivedText(quote)),
         ],
         if (rule.paid > 0 &&
             rule.rail != Rail.solana &&
@@ -675,14 +675,6 @@ class _ClaimCost extends StatelessWidget {
         };
     return FinePrint(text, problem: problem != null);
   }
-}
-
-/// Next to a claim from a plan whose protocol fee the owner's monthly plan
-/// waives; with [quote], what the claim pays.
-String feeWaivedText(ClaimQuote? quote) {
-  const text = "No protocol fee (owner's monthly plan)";
-  if (quote == null || quote.problem != null) return text;
-  return '$text · you receive ${amountText(quote.net, quote.mint)}';
 }
 
 String waitingForFunds(String? mint) =>

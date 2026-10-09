@@ -75,7 +75,6 @@ class _Harness {
               feeBpsPrivate: 300,
             ),
           ),
-          subscriptionTermsProvider.overrideWith((ref) async => null),
           walletBalanceProvider.overrideWith((ref) async => 1000000000),
           walletUsdcProvider.overrideWith((ref) async => 0),
           vaultsProvider.overrideWith((ref) async => plans),

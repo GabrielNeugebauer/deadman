@@ -169,7 +169,7 @@ class _PlanList extends ConsumerWidget {
           const SizedBox(height: DMSpace.lg),
         ],
         for (final v in vestings) ...[card(v), gap],
-        const MonthlyPlanCard(
+        const FeeModelCard(
           compact: true,
           margin: EdgeInsets.only(top: DMSpace.md),
         ),

@@ -2,87 +2,68 @@ use anchor_lang::prelude::*;
 
 use crate::{constants::*, error::DeadmanError};
 
+/// Layout v2. v1 accounts (77 bytes, up to `bump`) are migrated by
+/// `set_config`, which reallocates them; until then only `set_config` can
+/// read them. New fields must be carved out of `_reserved`.
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
     pub admin: Pubkey,
+    /// System-owned wallet that receives fees (and owns the fee ATAs).
     pub treasury: Pubkey,
-    /// Payout fee for the plain Solana rail.
+    /// Release fee for the plain Solana rail.
     pub fee_bps_public: u16,
-    /// Payout fee for private rails (Cloak, Zcash).
+    /// Release fee for private rails (Cloak, Zcash).
+    pub fee_bps_private: u16,
+    pub bump: u8,
+    /// Payouts in this mint pay `fee_bps_skr` on any rail, and
+    /// `skr_burn_bps` of that fee is burned. Default = no SKR discount.
+    pub skr_mint: Pubkey,
+    pub fee_bps_skr: u16,
+    pub skr_burn_bps: u16,
+    /// Proposed next admin until it accepts; default = none.
+    pub pending_admin: Pubkey,
+    /// Zeroed space for future fields.
+    pub _reserved: [u8; 64],
+}
+
+/// The first `Config` layout, read only to migrate it.
+#[derive(AnchorDeserialize)]
+pub struct ConfigV1 {
+    pub admin: Pubkey,
+    pub treasury: Pubkey,
+    pub fee_bps_public: u16,
     pub fee_bps_private: u16,
     pub bump: u8,
 }
 
 impl Config {
-    pub fn fee_bps(&self, rail: Rail) -> u16 {
+    /// Total account size, discriminator included.
+    pub const SPACE: usize = 8 + Config::INIT_SPACE;
+
+    /// Release fee for a payout of `mint` (None = SOL) on `rail`.
+    pub fn fee_bps(&self, rail: Rail, mint: Option<Pubkey>) -> u16 {
+        if self.is_skr(mint) {
+            return self.fee_bps_skr;
+        }
         match rail {
             Rail::Solana => self.fee_bps_public,
             Rail::Cloak | Rail::Zcash => self.fee_bps_private,
         }
     }
-}
 
-/// Optional flat subscription that waives the payout fee on all of an
-/// owner's plans (see [`Subscription`]).
-#[account]
-#[derive(InitSpace)]
-pub struct SubscriptionConfig {
-    /// Price of one period in base units of `mint`.
-    pub price_per_period: u64,
-    pub period_secs: i64,
-    pub mint: Pubkey,
-    pub enabled: bool,
-    pub bump: u8,
-    /// Periods a new (or lapsed) subscription must buy at once, so one
-    /// cheap period cannot waive the fee on a large release.
-    pub min_periods: u16,
-}
-
-/// An owner's account-wide subscription, PDA `[SUBSCRIPTION_SEED, owner]`.
-/// While paid it waives the payout fee on every plan of `owner`.
-#[account]
-#[derive(InitSpace)]
-pub struct Subscription {
-    pub owner: Pubkey,
-    /// End of the paid coverage; 0 if never paid.
-    pub paid_until: i64,
-    pub bump: u8,
-    /// Zeroed space for future fields.
-    pub _reserved: [u8; 32],
-}
-
-impl Subscription {
-    pub const SPACE: usize = 8 + Subscription::INIT_SPACE;
-
-    /// Loads `owner`'s subscription from `info`, which must be its PDA.
-    /// `None` while the account was never created (no coverage).
-    pub fn load(info: &AccountInfo, owner: &Pubkey) -> Result<Option<Self>> {
-        if info.owner != &crate::ID || info.data_is_empty() {
-            let (expected, _) =
-                Pubkey::find_program_address(&[SUBSCRIPTION_SEED, owner.as_ref()], &crate::ID);
-            require_keys_eq!(info.key(), expected, DeadmanError::InvalidSubscription);
-            return Ok(None);
-        }
-        let sub = Subscription::try_deserialize(&mut &info.try_borrow_data()?[..])?;
-        require_keys_eq!(sub.owner, *owner, DeadmanError::InvalidSubscription);
-        let expected = Pubkey::create_program_address(
-            &[SUBSCRIPTION_SEED, owner.as_ref(), &[sub.bump]],
-            &crate::ID,
-        )
-        .map_err(|_| error!(DeadmanError::InvalidSubscription))?;
-        require_keys_eq!(info.key(), expected, DeadmanError::InvalidSubscription);
-        Ok(Some(sub))
+    pub fn is_skr(&self, mint: Option<Pubkey>) -> bool {
+        self.skr_mint != Pubkey::default() && mint == Some(self.skr_mint)
     }
 
-    /// Covers a payout of `vault`: for inheritance, the owner's last
-    /// check-in fell within a paid period; for vesting, it is paid now.
-    pub fn covers(&self, vault: &Vault, now: i64) -> bool {
-        self.paid_until != 0
-            && match vault.kind {
-                PlanKind::Inheritance => self.paid_until >= vault.last_pulse,
-                PlanKind::Vesting => self.paid_until >= now,
-            }
+    /// Splits a token fee of `mint` into (burned, to treasury).
+    pub fn split_burn(&self, fee: u64, mint: Option<Pubkey>) -> Result<(u64, u64)> {
+        if !self.is_skr(mint) {
+            return Ok((0, fee));
+        }
+        let burned = bps_of(fee, self.skr_burn_bps)?;
+        let rest = fee.checked_sub(burned).ok_or(DeadmanError::MathOverflow)?;
+        Ok((burned, rest))
     }
 }
 
@@ -238,6 +219,46 @@ impl Vault {
     /// Total account size, discriminator included.
     pub const SPACE: usize = 8 + Vault::INIT_SPACE;
 
+    /// A fresh plan with no rules yet.
+    pub fn new(
+        owner: Pubkey,
+        plan_id: u16,
+        guard: Pubkey,
+        kind: PlanKind,
+        rent_payer: Pubkey,
+        rent_paid: u64,
+        bump: u8,
+    ) -> Self {
+        Self {
+            owner,
+            plan_id,
+            guard,
+            guardian: None,
+            _reserved_interval: [0; 8],
+            lock_secs: 0,
+            skip_grace_secs: 0,
+            last_pulse: 0,
+            owner_last_seen: 0,
+            locked_until: 0,
+            guardian_ready_at: 0,
+            total_pulses: 0,
+            streak: 0,
+            best_streak: 0,
+            kind,
+            start_at: 0,
+            revocable: false,
+            revoked_at: 0,
+            rent_payer,
+            rent_paid,
+            rules: Vec::new(),
+            label: String::new(),
+            bump,
+            stipend_paid: 0,
+            vest_period_secs: 0,
+            _reserved: [0; 55],
+        }
+    }
+
     /// Lamports that must stay in the account: the rent actually paid, or
     /// the current minimum if that is higher.
     pub fn rent_reserve(&self, data_len: usize) -> Result<u64> {
@@ -306,6 +327,21 @@ impl Vault {
             }
         }
         Ok(total)
+    }
+
+    /// Amount of `mint` the owner may not withdraw: vesting commitments
+    /// plus the shares reserved for skipped, still unpaid tiers.
+    pub fn locked_for_owner(&self, mint: Option<Pubkey>) -> Result<u64> {
+        self.committed(mint)?
+            .checked_add(self.reserved_for(mint, usize::MAX)?)
+            .ok_or_else(|| error!(DeadmanError::MathOverflow))
+    }
+
+    /// Some skipped tier still holds a reserved share.
+    pub fn has_pending_reserve(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.executed_at == 0 && r.skipped_at != 0 && r.reserved > 0)
     }
 
     /// Validates and installs vesting schedules. Caller enforces auth.
@@ -538,12 +574,18 @@ impl Vault {
                 && (MIN_SKIP_GRACE_SECS..=MAX_SKIP_GRACE_SECS).contains(&skip_grace_secs),
             DeadmanError::InvalidDuration
         );
-        let history: Vec<Rule> = self
-            .rules
-            .iter()
-            .filter(|r| r.executed_at != 0 || r.skipped_at != 0)
-            .copied()
-            .collect();
+        // History keeps its order; each kept tier carries its stipend bit
+        // to its new index, and every new tier starts with a clear bit.
+        let mut history: Vec<Rule> = Vec::with_capacity(MAX_RULES);
+        let mut stipend_paid = 0u8;
+        for (i, r) in self.rules.iter().enumerate() {
+            if r.executed_at != 0 || r.skipped_at != 0 {
+                if self.stipend_paid & stipend_bit(i)? != 0 {
+                    stipend_paid |= stipend_bit(history.len())?;
+                }
+                history.push(*r);
+            }
+        }
         let total = history
             .len()
             .checked_add(rules.len())
@@ -582,6 +624,7 @@ impl Vault {
         self.lock_secs = lock_secs;
         self.skip_grace_secs = skip_grace_secs;
         self.guardian = guardian;
+        self.stipend_paid = stipend_paid;
         self.rules = history;
         self.rules.extend(rules.iter().map(|r| Rule {
             beneficiary: r.beneficiary,
@@ -615,13 +658,26 @@ pub fn rule_gross(rule: &Rule, available: u64) -> Result<u64> {
     })
 }
 
-/// Splits `gross` into (net, fee) at `fee_bps`.
-pub fn split_fee(gross: u64, fee_bps: u16) -> Result<(u64, u64)> {
-    let fee = u128::from(gross)
-        .checked_mul(u128::from(fee_bps))
+/// `bps` of `amount`, rounded down.
+pub fn bps_of(amount: u64, bps: u16) -> Result<u64> {
+    let v = u128::from(amount)
+        .checked_mul(u128::from(bps))
         .and_then(|v| v.checked_div(u128::from(BPS_DENOMINATOR)))
         .ok_or(DeadmanError::MathOverflow)?;
-    let fee = u64::try_from(fee).map_err(|_| DeadmanError::MathOverflow)?;
+    u64::try_from(v).map_err(|_| error!(DeadmanError::MathOverflow))
+}
+
+/// Splits `gross` into (net, fee) at `fee_bps`.
+pub fn split_fee(gross: u64, fee_bps: u16) -> Result<(u64, u64)> {
+    let fee = bps_of(gross, fee_bps)?;
     let net = gross.checked_sub(fee).ok_or(DeadmanError::MathOverflow)?;
     Ok((net, fee))
+}
+
+/// Bit of rule `index` in [`Vault::stipend_paid`].
+pub fn stipend_bit(index: usize) -> Result<u8> {
+    u32::try_from(index)
+        .ok()
+        .and_then(|i| 1u8.checked_shl(i))
+        .ok_or_else(|| error!(DeadmanError::InvalidRuleIndex))
 }

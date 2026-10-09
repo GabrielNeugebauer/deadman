@@ -1,5 +1,7 @@
 # Deadman Pitch Outline
 
+> **Pricing current as of 2026-10-08:** 2% only on release, 1.5% for payouts in $SKR with 10% of that fee burned, no subscription. The SKR open question below is answered by that SKR rate; older mentions of Plus are historical.
+
 This is a working outline for the founder. Rewrite it in your own words before recording. Bracketed items such as `[source]` are placeholders: fill them in, or cut the claim.
 
 - **Targets:**

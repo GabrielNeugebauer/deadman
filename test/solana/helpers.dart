@@ -105,11 +105,18 @@ List<int> _padVault(List<int> bytes) => [
   ...List<int>.filled(vaultAccountSize - bytes.length, 0),
 ];
 
+/// `Config` account: the current 209-byte layout, or with [v1] the first
+/// 77-byte one (no SKR rate, not yet migrated by `set_config`).
 List<int> configBytes({
   required String admin,
   required String treasury,
   int feeBpsPublic = 200,
   int feeBpsPrivate = 300,
+  String? skrMint,
+  int feeBpsSkr = 150,
+  int skrBurnBps = 1000,
+  String? pendingAdmin,
+  bool v1 = false,
 }) => [
   ...Disc.configAccount,
   ...keyBytes(admin),
@@ -117,35 +124,13 @@ List<int> configBytes({
   ...le(2, feeBpsPublic),
   ...le(2, feeBpsPrivate),
   253,
-];
-
-List<int> subConfigBytes({
-  int pricePerPeriod = 5000000,
-  int periodSecs = 30 * 86400,
-  required String mint,
-  bool enabled = true,
-  int minPeriods = 12,
-}) => [
-  ...Disc.subscriptionConfigAccount,
-  ...le(8, pricePerPeriod),
-  ...le(8, periodSecs),
-  ...keyBytes(mint),
-  if (enabled) 1 else 0,
-  252,
-  ...le(2, minPeriods),
-];
-
-/// `Subscription` account of [owner] (81 bytes).
-List<int> subscriptionBytes({
-  required String owner,
-  required int paidUntil,
-  int bump = 251,
-}) => [
-  ...Disc.subscriptionAccount,
-  ...keyBytes(owner),
-  ...le(8, paidUntil),
-  bump,
-  ...List<int>.filled(32, 0), // _reserved
+  if (!v1) ...[
+    ...keyBytes(skrMint ?? defaultPubkey),
+    ...le(2, feeBpsSkr),
+    ...le(2, skrBurnBps),
+    ...keyBytes(pendingAdmin ?? defaultPubkey),
+    ...List<int>.filled(64, 0), // _reserved
+  ],
 ];
 
 List<int> mintBytes(int decimals) => List<int>.filled(82, 0)
@@ -180,6 +165,117 @@ class FakeAccount {
   };
 }
 
+/// A token account as getTokenAccountsByOwner returns it with jsonParsed.
+class FakeTokenAccount {
+  const FakeTokenAccount(
+    this.mint, {
+    this.amount = 1,
+    this.decimals = 0,
+    this.frozen = false,
+    this.address,
+  });
+
+  final String mint;
+  final int amount;
+  final int decimals;
+  final bool frozen;
+  final String? address;
+
+  Map<String, dynamic> toJson(String owner) => {
+    'pubkey': address ?? ataAddress(owner, mint),
+    'account': {
+      'lamports': 2039280,
+      'owner': tokenProgramId,
+      'data': {
+        'program': 'spl-token',
+        'parsed': {
+          'type': 'account',
+          'info': {
+            'isNative': false,
+            'mint': mint,
+            'owner': owner,
+            'state': frozen ? 'frozen' : 'initialized',
+            'tokenAmount': {
+              'amount': '$amount',
+              'decimals': decimals,
+              'uiAmountString': '$amount',
+            },
+          },
+        },
+        'space': 165,
+      },
+      'executable': false,
+      'rentEpoch': 0,
+      'space': 165,
+    },
+  };
+}
+
+/// Mint account bytes with [supply].
+List<int> mintWithSupply(int decimals, int supply) =>
+    mintBytes(decimals)..setRange(36, 44, le(8, supply));
+
+/// Token account bytes in [state] (1 initialized, 2 frozen).
+List<int> tokenAccountWithState({
+  required String mint,
+  required String owner,
+  required int amount,
+  int state = 1,
+}) =>
+    tokenAccountBytes(mint: mint, owner: owner, amount: amount)..[108] = state;
+
+/// A Token Metadata `MetadataV1` account, padded like the real ones
+/// (fixed-width name, symbol and uri). [tokenStandard] null = None;
+/// [legacy] stops after `is_mutable` like accounts from before editions.
+List<int> metadataBytes({
+  required String mint,
+  String name = 'Boney #1',
+  String symbol = 'BONE',
+  String uri = 'https://example.com/1.json',
+  int? tokenStandard = 0,
+  bool legacy = false,
+  int creators = 1,
+}) {
+  List<int> padded(String v, int width) {
+    final b = utf8.encode(v);
+    return [...le(4, width), ...b, ...List<int>.filled(width - b.length, 0)];
+  }
+
+  final bytes = [
+    4, // Key::MetadataV1
+    ...keyBytes(key(77)), // update_authority
+    ...keyBytes(mint),
+    ...padded(name, 32),
+    ...padded(symbol, 10),
+    ...padded(uri, 200),
+    ...le(2, 500),
+    if (creators == 0)
+      0
+    else ...[
+      1,
+      ...le(4, creators),
+      for (var i = 0; i < creators; i++) ...[
+        ...keyBytes(key(78 + i)),
+        1,
+        100 ~/ creators,
+      ],
+    ],
+    1, // primary_sale_happened
+    1, // is_mutable
+  ];
+  if (legacy) return bytes;
+  return [
+    ...bytes,
+    1, 255, // edition_nonce Some(255)
+    if (tokenStandard == null) 0 else ...[1, tokenStandard],
+    0, // collection
+    0, // uses
+    0, // collection_details
+    0, // programmable_config
+    ...List<int>.filled(679 - bytes.length - 8, 0),
+  ];
+}
+
 /// Minimal JSON-RPC server for the read paths the client uses.
 class FakeRpc {
   FakeRpc._(this._server);
@@ -201,6 +297,13 @@ class FakeRpc {
 
   /// Keys of each getMultipleAccounts call.
   final multiReads = <List<String>>[];
+
+  /// Classic SPL Token accounts per wallet, answered by
+  /// getTokenAccountsByOwner (jsonParsed).
+  final tokenAccountsByOwner = <String, List<FakeTokenAccount>>{};
+
+  /// Params of each getTokenAccountsByOwner call.
+  final tokenAccountQueries = <List<dynamic>>[];
 
   /// Transactions passed to sendTransaction (wire bytes).
   final sent = <Uint8List>[];
@@ -284,6 +387,16 @@ class FakeRpc {
         ],
       },
       'getProgramAccounts' => _programAccounts(params),
+      'getTokenAccountsByOwner' => {
+        'context': ctx,
+        'value': [
+          for (final t
+              in tokenAccountsByOwner[(tokenAccountQueries..add(params))
+                      .last[0]] ??
+                  const <FakeTokenAccount>[])
+            t.toJson(params[0] as String),
+        ],
+      },
       'getBalance' => {
         'context': ctx,
         'value': accounts[params[0]]?.lamports ?? 0,

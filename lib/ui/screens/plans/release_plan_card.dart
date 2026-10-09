@@ -7,12 +7,14 @@ import '../../../core/config.dart';
 import '../../../solana/deadman_api.dart';
 import '../../../state/actions.dart';
 import '../../../state/assets.dart';
+import '../../../state/nfts.dart';
 import '../../../state/plan_math.dart';
 import '../../../state/providers.dart';
 import '../../format.dart';
 import '../../rules_format.dart';
 import '../../widgets/brand/brand.dart';
 import '../../widgets/feedback.dart';
+import '../../widgets/nft.dart';
 import '../../widgets/plan_pricing.dart';
 import 'plan_actions.dart';
 import 'plan_card_shell.dart';
@@ -89,6 +91,7 @@ class ReleasePlanCard extends ConsumerWidget {
         .watch(planTokenBalancesProvider)
         .whenOrNull(data: (b) => b[vault.address] ?? const <String, int>{});
     final held = <String, int>{...?tokens, AppConfig.usdcMint: ?usdc};
+    watchNftNames(ref, [for (final r in vault.rules) r.mint, ...held.keys]);
     final unfunded = released
         ? const <String?>[]
         : unfundedAssets(vault, tokens);
@@ -106,9 +109,16 @@ class ReleasePlanCard extends ConsumerWidget {
       await runGuarded(context, () => action(lamports), success: done);
     }
 
+    // A skipped tier's reserved share stays for its beneficiary.
+    int free(String? mint, int held) {
+      final left = held - vault.reservedFor(mint);
+      return left > 0 ? left : 0;
+    }
+
     void withdraw() => withdrawFromPlan(context, ref, vault, {
-      null: vault.withdrawableLamports,
-      AppConfig.usdcMint: ?usdc,
+      null: free(null, vault.withdrawableLamports),
+      for (final MapEntry(:key, :value) in held.entries)
+        if (value > 0 || key == AppConfig.usdcMint) key: free(key, value),
     });
 
     const button = Size.fromHeight(48);
@@ -137,7 +147,7 @@ class ReleasePlanCard extends ConsumerWidget {
             ),
           ]
         : [
-            PlanFeeLine(vault: vault, now: now),
+            PlanFeeLine(vault: vault),
             const SizedBox(height: DMSpace.lg),
             Row(
               children: [
@@ -209,9 +219,7 @@ class ReleasePlanCard extends ConsumerWidget {
           : _planSticker(vault, now),
       summary: released
           ? (leftovers.isEmpty ? 'Nothing left in the plan' : '$leftovers left')
-          : '${sol(vault.withdrawableLamports)} SOL'
-                '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'}'
-                ' protected',
+          : '${balancesText(vault, held)} protected',
       next: next,
       nextColor: nextColor,
       body: Column(
@@ -353,9 +361,12 @@ class _TierRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '${amountLabel(r)} → ${short(r.beneficiary)}',
-                  style: DMType.outfit(size: 15.5, height: 1.3),
+                WithNftThumb(
+                  mint: r.mint,
+                  child: Text(
+                    '${amountLabel(r)} → ${short(r.beneficiary)}',
+                    style: DMType.outfit(size: 15.5, height: 1.3),
+                  ),
                 ),
                 const SizedBox(height: 3),
                 Text(

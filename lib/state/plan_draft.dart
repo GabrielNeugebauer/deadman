@@ -47,7 +47,7 @@ const solFeeReserveLamports = 20000000;
 }
 
 /// Smallest gross payout of [mint] whose protocol fee pays the keeper for
-/// opening the heir's token account; null when it never does (fee waived,
+/// opening the heir's token account; null when it never does (no fee,
 /// or no price for the token).
 int? keeperAutoDeliverMin(String? mint, int feeBps) {
   if (feeBps <= 0 || mint == null || mint != AppConfig.usdcMint) return null;
@@ -88,7 +88,7 @@ String whoText(String name, String address) => name.trim().isNotEmpty
 /// "0.00": "0.0098 USDC", "0.00049 SOL", "98 USDC".
 String moneyText(int base, String? mint) {
   final info = knownAsset(mint);
-  if (info == null) return amountText(base, mint);
+  if (info == null || info.nft) return amountText(base, mint);
   final digits = base <= 0
       ? info.displayDigits
       : math.max(
@@ -131,20 +131,11 @@ String? shareWords(int? bps, String asset) => switch (bps) {
 
 const _year = 365 * 86400;
 
-/// "Send after" presets: time since the last check-in. Demo timings swap
-/// in minutes so a payout can release on camera.
-List<int> delayChoices({required bool demo}) => demo
-    ? const [60, 120, 300, 600]
-    : const [
-        86400,
-        3 * 86400,
-        7 * 86400,
-        14 * 86400,
-        30 * 86400,
-        90 * 86400,
-        180 * 86400,
-        _year,
-      ];
+/// "Send after" presets: time since the last check-in, 7 or 30 days (any
+/// other wait is Custom, in days, hours or minutes). Demo timings swap in
+/// minutes so a payout can release on camera.
+List<int> delayChoices({required bool demo}) =>
+    demo ? const [60, 120, 300, 600] : const [7 * 86400, 30 * 86400];
 
 /// The first payout's default wait.
 int defaultDelay({required bool demo}) => demo ? 120 : 30 * 86400;
@@ -203,6 +194,9 @@ class PayoutDraft {
   /// Basis points or base units, per [mode].
   int? get amount => mode == AmountMode.percent ? shareBps : fixedAmount;
 
+  /// Sends one NFT whole.
+  bool get nft => isNft(mint);
+
   bool get takesAll =>
       mode == AmountMode.percent && shareBps == Limits.bpsDenominator;
 
@@ -237,9 +231,10 @@ class PayoutDraft {
     amount: amount!,
   );
 
-  /// Problems that block Done (A2-A4, B2, D1).
+  /// Problems that block Done (A2-A5, B2, D1).
   List<PlanIssue> validate() => [
     if (!isAddress(beneficiary)) _b2,
+    if (nft && rail != Rail.solana) a5,
     ...amountErrors(
       mode: mode,
       shareBps: shareBps,
@@ -339,6 +334,7 @@ enum IssueCode {
   a2,
   a3,
   a4,
+  a5,
   b1,
   b2,
   d1,
@@ -397,6 +393,15 @@ const _b2 = PlanIssue(
   IssueCode.b2,
   Severity.error,
   body: "This isn't a valid Solana address or claim code.",
+);
+
+/// A5: an NFT goes to a Solana wallet as it is.
+const a5 = PlanIssue(
+  IssueCode.a5,
+  Severity.error,
+  body:
+      'NFTs are sent as a normal transfer. Under "How it arrives", choose '
+      '"Normal transfer".',
 );
 
 const p1 = PlanIssue(
@@ -531,11 +536,11 @@ class PlanPreview {
   const PlanPreview._(this.amounts, this.assets);
 
   /// [balanceOf] is what the plan holds of each asset (null = unknown);
-  /// [feeBps] the release fee per rail (0 when waived).
+  /// [feeBps] the release fee of a payout of an asset on a rail.
   factory PlanPreview.of(
     List<PayoutDraft> payouts, {
     required int? Function(String? mint) balanceOf,
-    required int Function(Rail rail) feeBps,
+    required int Function(Rail rail, String? mint) feeBps,
   }) {
     final amounts = List<PayoutAmount>.filled(
       payouts.length,
@@ -572,7 +577,7 @@ class PlanPreview {
                       BigInt.from(Limits.bpsDenominator))
                   .toInt()
             : math.min(amount, remaining);
-        final (net, fee) = splitFee(gross, feeBps(p.rail));
+        final (net, fee) = splitFee(gross, feeBps(p.rail, p.mint));
         amounts[i] = PayoutAmount(gross: gross, net: net, fee: fee);
         remaining -= gross;
         feeTotal = feeTotal == null ? null : feeTotal + fee;
@@ -617,7 +622,7 @@ List<PayoutDraft> sortedByDelay(List<PayoutDraft> payouts) {
   return [for (final i in order) payouts[i]];
 }
 
-/// SOL first, then USDC, then other tokens in first-use order.
+/// SOL first, then USDC, then other tokens in first-use order, NFTs last.
 List<String?> assetOrder(Iterable<String?> mints) {
   final seen = <String?>[];
   for (final m in mints) {
@@ -627,6 +632,8 @@ List<String?> assetOrder(Iterable<String?> mints) {
       ? 0
       : m == AppConfig.usdcMint
       ? 1
+      : isNft(m)
+      ? 3
       : 2;
   final out = [...seen];
   out.sort((a, b) {
@@ -640,33 +647,33 @@ List<String?> assetOrder(Iterable<String?> mints) {
 
 /// The release fee as the editor knows it.
 class FeeInfo {
-  const FeeInfo({this.fees, this.waived = false, this.failed = false});
+  const FeeInfo({this.fees, this.failed = false});
 
   final FeeSchedule? fees;
-
-  /// The owner's monthly plan covers payouts saved now.
-  final bool waived;
 
   /// The fee schedule couldn't be loaded.
   final bool failed;
 
-  bool get known => waived || fees != null;
+  bool get known => fees != null;
 
-  int bpsFor(Rail rail) => waived ? 0 : fees?.bpsFor(rail) ?? 0;
+  /// Release fee of a payout of [mint] (null = SOL) on [rail]; 0 while
+  /// unknown.
+  int bpsFor(Rail rail, [String? mint]) => fees?.bpsFor(rail, mint) ?? 0;
 
-  /// "2% fee", "No fee: monthly plan active", "fee loading…".
-  String railLine(Rail rail) => waived
-      ? 'No fee: monthly plan active'
-      : fees == null
-      ? (failed ? 'Fee unknown' : 'fee loading…')
-      : '${percentText(fees!.bpsFor(rail) / 10000)} fee';
+  /// "2% fee", "1.5% fee · 10% burned" (SKR), "fee loading…".
+  String railLine(Rail rail, [String? mint]) {
+    final f = fees;
+    if (f == null) return failed ? 'Fee unknown' : 'fee loading…';
+    final burn = f.isSkr(mint) && f.skrBurnBps > 0
+        ? ' · ${percentText(f.skrBurnBps / 10000)} burned'
+        : '';
+    return '${percentText(f.bpsFor(rail, mint) / 10000)} fee$burn';
+  }
 
-  /// "(after the 2% fee)", "(no fee)", "(before fees)".
-  String note(Rail rail) => waived
-      ? '(no fee)'
-      : fees == null
+  /// "(after the 2% fee)", "(before fees)".
+  String note(Rail rail, [String? mint]) => fees == null
       ? '(before fees)'
-      : '(after the ${percentText(fees!.bpsFor(rail) / 10000)} fee)';
+      : '(after the ${percentText(fees!.bpsFor(rail, mint) / 10000)} fee)';
 }
 
 /// SOL to leave in the owner's wallet: network fees, plus funding this
@@ -735,17 +742,20 @@ List<PlanIssue> deliveryIssues({
             ),
           );
         } else if (autoMin == null || gross < autoMin) {
+          final usdc = p.mint == AppConfig.usdcMint;
           out.add(
             PlanIssue(
               IssueCode.d3,
               Severity.warn,
               title: '$who will need to claim it',
-              body:
-                  '${autoMin == null ? 'Payouts' : 'Payouts under about ${_wholeUp(autoMin, p.mint)}'} '
-                  "to a wallet new to $asset aren't sent automatically. $who "
-                  'claims it in the Deadman app (Family Circle → Claim); with no '
-                  'SOL, the first claim costs about 0.50 USDC, taken from the '
-                  'payout.',
+              body: p.nft
+                  ? "NFTs aren't sent automatically. $who claims $asset in the "
+                        'Deadman app (Family Circle → Claim), with a little SOL '
+                        'for the network fee.'
+                  : '${autoMin == null ? 'Payouts' : 'Payouts under about ${_wholeUp(autoMin, p.mint)}'} '
+                        "to a wallet new to $asset aren't sent automatically. "
+                        '$who claims it in the Deadman app (Family Circle → '
+                        'Claim)${usdc ? '; with no SOL, the first claim costs about 0.50 USDC, taken from the payout.' : ', with a little SOL for the network fee and their $asset account.'}',
             ),
           );
         }
@@ -843,7 +853,7 @@ List<PlanIssue> payoutWarnings({
     ...deliveryIssues(
       p: p,
       gross: preview.amounts[index].gross,
-      feeBps: fee.bpsFor(p.rail),
+      feeBps: fee.bpsFor(p.rail, p.mint),
       facts: facts,
     ),
   ]);
@@ -905,6 +915,20 @@ List<PlanIssue> assetIssues({
           mint: mint,
         ),
       );
+    } else if (isNft(mint) && asset.order.length > 1) {
+      final ns = payoutNumbers([for (final i in asset.order) numberOf(i)]);
+      out.add(
+        PlanIssue(
+          IssueCode.f4,
+          Severity.warn,
+          title: 'Only one payout can receive it',
+          body:
+              '${ns[0].toUpperCase()}${ns.substring(1)} '
+              '${asset.order.length == 2 ? 'both' : 'all'} send $symbol. It '
+              'goes to the first that runs; the others get nothing.',
+          mint: mint,
+        ),
+      );
     } else if (balance != null && asset.fixedSum > balance) {
       out.add(
         PlanIssue(
@@ -920,8 +944,8 @@ List<PlanIssue> assetIssues({
         ),
       );
     }
-    // With nothing in the plan, F2 says it better.
-    if (!asset.lastTakesAll && balance != 0) {
+    // With nothing in the plan, F2 says it better. An NFT is sent whole.
+    if (!asset.lastTakesAll && balance != 0 && !isNft(mint)) {
       out.add(
         PlanIssue(
           IssueCode.l1,
@@ -1004,6 +1028,7 @@ PlanIssue? vestingShortfall(String? mint, int totals, int deposit) =>
 /// "Everything left of your USDC", "25% of what's left", "10 USDC".
 String payoutAmountLabel(PayoutDraft p) {
   final asset = assetSymbol(p.mint);
+  if (p.nft) return 'The NFT $asset';
   if (p.mode == AmountMode.fixed) {
     return p.fixedAmount == null
         ? 'An amount of $asset'
@@ -1031,6 +1056,12 @@ String _how(PayoutDraft p) => switch (p.rail) {
 /// transfer to 7xKX…9fGh." [capped]: a fixed amount the plan can't cover.
 String payoutSentence(PayoutDraft p, {int? net, bool capped = false}) {
   final asset = assetSymbol(p.mint);
+  if (p.nft) {
+    final missing = capped || net == 0
+        ? " (only if it's in the plan by then)"
+        : '';
+    return '${p.who} gets the NFT $asset$missing ${_how(p)}.';
+  }
   final what = p.mode == AmountMode.fixed
       ? '${p.who} gets ${moneyText(p.fixedAmount ?? 0, p.mint)}'
       : p.takesAll

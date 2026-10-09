@@ -1,15 +1,16 @@
 use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
 use anchor_spl::{
     associated_token::get_associated_token_address_with_program_id,
+    token::Token,
     token_2022::spl_token_2022,
-    token_interface::{Mint, TokenAccount, TokenInterface},
+    token_interface::{self, Burn, Mint, TokenAccount, TokenInterface},
 };
 
 use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{split_fee, Config, PlanKind, Rail, Subscription, Vault},
+    state::{split_fee, stipend_bit, Config, PlanKind, Rail, Vault},
 };
 
 /// Lamports above the rent reserve (see [`Vault::rent_reserve`]).
@@ -18,21 +19,6 @@ fn withdrawable_lamports(vault: &Account<Vault>) -> Result<u64> {
     Ok(info
         .lamports()
         .saturating_sub(vault.rent_reserve(info.data_len())?))
-}
-
-/// Payout fee for `rail`: 0 while the owner's account subscription covers
-/// the payout. `subscription` must be the owner's subscription PDA, created
-/// or not, so an executor cannot drop the waiver by passing another account.
-fn payout_fee_bps(
-    vault: &Vault,
-    config: &Config,
-    subscription: &AccountInfo,
-    rail: Rail,
-    now: i64,
-) -> Result<u16> {
-    let covered =
-        Subscription::load(subscription, &vault.owner)?.is_some_and(|sub| sub.covers(vault, now));
-    Ok(if covered { 0 } else { config.fee_bps(rail) })
 }
 
 /// Private-rail token payouts also send the rail's SOL stipend so a fresh
@@ -48,10 +34,7 @@ fn pay_stipend<'info>(
     index: usize,
 ) -> Result<()> {
     let stipend = rail.gas_stipend();
-    let bit = u32::try_from(index)
-        .ok()
-        .and_then(|i| 1u8.checked_shl(i))
-        .ok_or(DeadmanError::InvalidRuleIndex)?;
+    let bit = stipend_bit(index)?;
     if stipend == 0 || vault.stipend_paid & bit != 0 || beneficiary.lamports() >= stipend {
         return Ok(());
     }
@@ -70,7 +53,7 @@ fn pay_stipend<'info>(
 /// accounts) is appended so Token-2022 transfer-hook mints can resolve their
 /// hook accounts; the token program ignores them otherwise.
 fn vault_transfer<'info>(
-    token_program: &Interface<'info, TokenInterface>,
+    token_program: &AccountInfo<'info>,
     from: &InterfaceAccount<'info, TokenAccount>,
     mint: &InterfaceAccount<'info, Mint>,
     to: AccountInfo<'info>,
@@ -129,7 +112,7 @@ pub fn handle_withdraw_sol(ctx: Context<WithdrawSol>, amount: u64) -> Result<()>
     let free = withdrawable_lamports(vault)?;
     require!(amount <= free, DeadmanError::InsufficientFunds);
     require!(
-        amount <= free.saturating_sub(vault.committed(None)?),
+        amount <= free.saturating_sub(vault.locked_for_owner(None)?),
         DeadmanError::FundsCommitted
     );
     vault.sub_lamports(amount)?;
@@ -182,11 +165,11 @@ pub fn handle_withdraw_token<'info>(
         amount
             <= a.vault_token
                 .amount
-                .saturating_sub(a.vault.committed(Some(a.mint.key()))?),
+                .saturating_sub(a.vault.locked_for_owner(Some(a.mint.key()))?),
         DeadmanError::FundsCommitted
     );
     vault_transfer(
-        &a.token_program,
+        a.token_program.as_ref(),
         &a.vault_token,
         &a.mint,
         a.owner_token.to_account_info(),
@@ -215,9 +198,6 @@ pub struct ExecuteSolRule<'info> {
     /// CHECK: lamport destination only; pinned to the configured treasury.
     #[account(mut, address = config.treasury @ DeadmanError::Unauthorized)]
     pub treasury: UncheckedAccount<'info>,
-    /// CHECK: the owner's subscription PDA `[SUBSCRIPTION_SEED, vault.owner]`,
-    /// possibly not created yet; verified in [`Subscription::load`].
-    pub subscription: UncheckedAccount<'info>,
 }
 
 /// Permissionless: pays a due SOL rule. Destinations are fixed in the rule,
@@ -238,16 +218,7 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
     let gross = ctx.accounts.vault.payout_gross(i, balance)?;
     // An empty payout would burn the tier; leave it pending instead.
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (mut net, mut fee) = split_fee(
-        gross,
-        payout_fee_bps(
-            &ctx.accounts.vault,
-            &ctx.accounts.config,
-            &ctx.accounts.subscription,
-            rule.rail,
-            now,
-        )?,
-    )?;
+    let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail, None))?;
 
     let rent = Rent::get()?;
     let treasury = &ctx.accounts.treasury;
@@ -300,7 +271,8 @@ pub struct ExecuteTokenRule<'info> {
     pub vault: Box<Account<'info, Vault>>,
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
-    #[account(mint::token_program = token_program)]
+    /// Writable so the burned share of an SKR fee can leave the supply.
+    #[account(mut, mint::token_program = token_program)]
     pub mint: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
@@ -321,17 +293,78 @@ pub struct ExecuteTokenRule<'info> {
         token::token_program = token_program
     )]
     pub beneficiary_token: Box<InterfaceAccount<'info, TokenAccount>>,
+    /// The treasury's ATA; only needed when the payout leaves a fee for
+    /// the treasury (not for fee-free payouts such as a single NFT).
     #[account(
         mut,
-        token::mint = mint,
-        token::authority = config.treasury,
-        token::token_program = token_program
+        associated_token::mint = mint,
+        associated_token::authority = config.treasury,
+        associated_token::token_program = token_program
     )]
-    pub treasury_token: Box<InterfaceAccount<'info, TokenAccount>>,
-    pub token_program: Interface<'info, TokenInterface>,
-    /// CHECK: the owner's subscription PDA `[SUBSCRIPTION_SEED, vault.owner]`,
-    /// possibly not created yet; verified in [`Subscription::load`].
-    pub subscription: UncheckedAccount<'info>,
+    pub treasury_token: Option<Box<InterfaceAccount<'info, TokenAccount>>>,
+    /// Plans hold classic SPL Token mints only.
+    pub token_program: Program<'info, Token>,
+}
+
+/// Sends a token payout of `gross`: the net to the beneficiary's account,
+/// then the fee (for SKR, `skr_burn_bps` of it burned from the vault and
+/// the rest to the treasury). Returns (net, fee).
+fn pay_token<'info>(a: &ExecuteTokenRule<'info>, rail: Rail, gross: u64) -> Result<(u64, u64)> {
+    let mint = a.mint.key();
+    let (net, fee) = split_fee(gross, a.config.fee_bps(rail, Some(mint)))?;
+    let (burned, to_treasury) = a.config.split_burn(fee, Some(mint))?;
+    let token_program = a.token_program.to_account_info();
+    vault_transfer(
+        &token_program,
+        &a.vault_token,
+        &a.mint,
+        a.beneficiary_token.to_account_info(),
+        &a.vault,
+        &[],
+        net,
+    )?;
+    if burned > 0 {
+        let plan_id = a.vault.plan_id.to_le_bytes();
+        let seeds: &[&[u8]] = &[
+            VAULT_SEED,
+            a.vault.owner.as_ref(),
+            &plan_id,
+            &[a.vault.bump],
+        ];
+        token_interface::burn(
+            CpiContext::new_with_signer(
+                a.token_program.key(),
+                Burn {
+                    mint: a.mint.to_account_info(),
+                    from: a.vault_token.to_account_info(),
+                    authority: a.vault.to_account_info(),
+                },
+                &[seeds],
+            ),
+            burned,
+        )?;
+        emit!(FeeBurned {
+            vault: a.vault.key(),
+            mint,
+            amount: burned,
+        });
+    }
+    if to_treasury > 0 {
+        let treasury = a
+            .treasury_token
+            .as_ref()
+            .ok_or(DeadmanError::TreasuryAccountRequired)?;
+        vault_transfer(
+            &token_program,
+            &a.vault_token,
+            &a.mint,
+            treasury.to_account_info(),
+            &a.vault,
+            &[],
+            to_treasury,
+        )?;
+    }
+    Ok((net, fee))
 }
 
 /// Permissionless: pays a due token rule. Private rails also receive a small
@@ -366,28 +399,7 @@ pub fn handle_execute_token_rule<'info>(
 
     let gross = a.vault.payout_gross(i, a.vault_token.amount)?;
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = split_fee(
-        gross,
-        payout_fee_bps(&a.vault, &a.config, &a.subscription, rule.rail, now)?,
-    )?;
-    vault_transfer(
-        &a.token_program,
-        &a.vault_token,
-        &a.mint,
-        a.beneficiary_token.to_account_info(),
-        &a.vault,
-        ctx.remaining_accounts,
-        net,
-    )?;
-    vault_transfer(
-        &a.token_program,
-        &a.vault_token,
-        &a.mint,
-        a.treasury_token.to_account_info(),
-        &a.vault,
-        ctx.remaining_accounts,
-        fee,
-    )?;
+    let (net, fee) = pay_token(a, rule.rail, gross)?;
 
     pay_stipend(
         &mut ctx.accounts.vault,
@@ -488,16 +500,7 @@ pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Res
     let due = vault.vested(i, now)?.saturating_sub(rule.released);
     let gross = due.min(withdrawable_lamports(vault)?);
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (mut net, mut fee) = split_fee(
-        gross,
-        payout_fee_bps(
-            &ctx.accounts.vault,
-            &ctx.accounts.config,
-            &ctx.accounts.subscription,
-            rule.rail,
-            now,
-        )?,
-    )?;
+    let (mut net, mut fee) = split_fee(gross, ctx.accounts.config.fee_bps(rule.rail, None))?;
     let rent = Rent::get()?;
     let treasury = &ctx.accounts.treasury;
     if fee > 0
@@ -561,28 +564,7 @@ pub fn handle_release_vested_token<'info>(
     let due = a.vault.vested(i, now)?.saturating_sub(rule.released);
     let gross = due.min(a.vault_token.amount);
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = split_fee(
-        gross,
-        payout_fee_bps(&a.vault, &a.config, &a.subscription, rule.rail, now)?,
-    )?;
-    vault_transfer(
-        &a.token_program,
-        &a.vault_token,
-        &a.mint,
-        a.beneficiary_token.to_account_info(),
-        &a.vault,
-        ctx.remaining_accounts,
-        net,
-    )?;
-    vault_transfer(
-        &a.token_program,
-        &a.vault_token,
-        &a.mint,
-        a.treasury_token.to_account_info(),
-        &a.vault,
-        ctx.remaining_accounts,
-        fee,
-    )?;
+    let (net, fee) = pay_token(a, rule.rail, gross)?;
     pay_stipend(
         &mut ctx.accounts.vault,
         &ctx.accounts.beneficiary,

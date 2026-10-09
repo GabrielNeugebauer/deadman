@@ -4,14 +4,16 @@
 // - :8080 -> sponsor (:8090, free): a guard key's Deadman `pulse` /
 //   `lockdown` on vaults it guards, or a beneficiary's own SOL claim
 //   (`execute_sol_rule` / `release_vested_sol`), rate-limited per vault, per
-//   signer and globally, with separate counters for claims.
+//   signer and globally. Claims and lockdowns each have counters of their
+//   own (audit M-3: pulses never use up the lockdown budget), and a
+//   lockdown is sponsored only for a funded vault with a pending payout.
 // - :8081 -> paymaster (:8091-8093, USDC: one fixed-price node per tier on
 //   devnet, one margin-priced node on mainnet): owner-signed Deadman,
 //   deposit and payment instructions; the last instruction must pay the
-//   paymaster in USDC. Kora funds only the owner's new plan or
-//   subscription account and the vault, beneficiary and treasury token
-//   accounts the transaction pays into. Rate-limited per owner and
-//   globally; quota comes back when Kora rejects the transaction.
+//   paymaster in USDC. Kora funds only the owner's new plan account and the
+//   vault, beneficiary and treasury token accounts the transaction pays
+//   into. Rate-limited per owner and globally; quota comes back when Kora
+//   rejects the transaction.
 //
 // dart run tool/kora_gateway.dart
 //
@@ -20,7 +22,10 @@
 // (kora/gateway-usage.json), GATEWAY_PER_VAULT (24), GATEWAY_PER_SIGNER (48),
 // GATEWAY_GLOBAL (2000), GATEWAY_PER_IP_MINUTE (60), GATEWAY_CLAIMS_STATE
 // (kora/gateway-claims.json), GATEWAY_CLAIMS_PER_VAULT (12),
-// GATEWAY_CLAIMS_PER_SIGNER (12), GATEWAY_CLAIMS_GLOBAL (500).
+// GATEWAY_CLAIMS_PER_SIGNER (12), GATEWAY_CLAIMS_GLOBAL (500),
+// GATEWAY_LOCKDOWNS_STATE (kora/gateway-lockdowns.json),
+// GATEWAY_LOCKDOWNS_PER_VAULT (3), GATEWAY_LOCKDOWNS_PER_SIGNER (24),
+// GATEWAY_LOCKDOWNS_GLOBAL (1000), GATEWAY_LOCKDOWN_MIN_LAMPORTS (10000000).
 // Paymaster (enabled when PAYMASTER_API_KEY is set): PAYMASTER_PORT (8081),
 // PAYMASTER_UPSTREAM (http://127.0.0.1:8091), PAYMASTER_STATE
 // (kora/paymaster-usage.json), PAYMASTER_PER_OWNER (60), PAYMASTER_GLOBAL
@@ -255,15 +260,8 @@ class SponsorPolicy {
 }
 
 /// A beneficiary's SOL claim the sponsor pays for: Deadman [name] on rule
-/// [index] of [vault], which must be a plan of [kind]; [subscription] must
-/// be the vault owner's subscription PDA.
-typedef SponsorClaim = ({
-  String name,
-  String vault,
-  int index,
-  PlanKind kind,
-  String subscription,
-});
+/// [index] of [vault], which must be a plan of [kind].
+typedef SponsorClaim = ({String name, String vault, int index, PlanKind kind});
 
 /// SOL claims the sponsor pays when the beneficiary claims for itself:
 /// discriminator and the plan kind the program requires.
@@ -282,6 +280,7 @@ class SponsorRequest {
     required this.message,
     required this.signature,
     this.claim,
+    this.lockdown = false,
   });
 
   /// The one non-Kora signer: every vault's guard, or the claiming
@@ -297,6 +296,10 @@ class SponsorRequest {
   /// Set when the transaction is a beneficiary's SOL claim (then its only
   /// Deadman instruction) rather than pulses and lockdowns.
   final SponsorClaim? claim;
+
+  /// Whether every Deadman instruction is a lockdown (lockdowns never share
+  /// a transaction with pulses, so they draw on their own budget).
+  final bool lockdown;
 }
 
 /// Checks a wire transaction (base64-decoded, legacy or v0) against the
@@ -316,6 +319,8 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
   var deadmanIxs = 0;
   final vaults = <String>{};
   final claims = <SponsorClaim>[];
+  var pulses = 0;
+  var lockdowns = 0;
   for (final ix in tx.ixs) {
     if (ix.accounts.contains(0)) {
       _reject('Instructions may not reference the sponsor account');
@@ -339,8 +344,8 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
                 .firstOrNull
           : null;
       if (claim != null) {
-        // [executor, vault, config, beneficiary, treasury, subscription]
-        if (a.length != 6 || a[1] < tx.requiredSigs) {
+        // [executor, vault, config, beneficiary, treasury]
+        if (a.length != 5 || a[1] < tx.requiredSigs) {
           _reject('Malformed Deadman ${claim.key}');
         }
         if (keys[a[0]] != signer || keys[a[3]] != signer) {
@@ -355,7 +360,6 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
           vault: keys[a[1]],
           index: d[8],
           kind: claim.value.kind,
-          subscription: keys[a[5]],
         ));
         vaults.add(keys[a[1]]);
       } else if (d.length == 8 &&
@@ -367,6 +371,11 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
           _reject(
             "Each pulse/lockdown must be signed by the transaction's guard key",
           );
+        }
+        if (_eq(d, Disc.lockdown)) {
+          lockdowns++;
+        } else {
+          pulses++;
         }
         vaults.add(keys[a[1]]);
       } else if (_eq(head, Disc.executeTokenRule) ||
@@ -394,6 +403,9 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
       'transaction',
     );
   }
+  if (pulses > 0 && lockdowns > 0) {
+    _reject('Send lockdowns in a transaction of their own, without pulses');
+  }
   final fee = budget.fee(
     signatures: tx.requiredSigs,
     ixCount: tx.ixs.length,
@@ -407,6 +419,7 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
     message: tx.message,
     signature: tx.signatures[1],
     claim: claims.firstOrNull,
+    lockdown: lockdowns > 0,
   );
 }
 
@@ -422,7 +435,15 @@ Future<bool> _signedBy(String signer, Uint8List message, Uint8List sig) =>
 Future<bool> verifyGuardSignature(SponsorRequest request) =>
     _signedBy(request.signer, request.message, request.signature);
 
-typedef VaultAccount = ({String owner, Uint8List data});
+/// An account as `getMultipleAccounts` returns it: owner program, data and
+/// lamports.
+typedef VaultAccount = ({String owner, Uint8List data, int lamports});
+
+/// Rent-exempt minimum of an account of [dataLen] bytes at the runtime's
+/// default rent (3480 lamports per byte-year, two years, 128 bytes of
+/// account overhead). A cluster may charge less; the gateway asks the RPC
+/// at startup ([SponsorRoute.vaultRent]).
+int rentExemptLamports(int dataLen) => (dataLen + 128) * 6960;
 
 /// Requires every vault to be a Deadman vault whose guard is the signer, and
 /// the signer to be neither its owner nor its guardian (owner wallets pay
@@ -463,7 +484,11 @@ void checkVaultAccounts(
 }
 
 /// A current-layout Deadman vault, decoded; null if [a] is not one.
-VaultState? _decodeCurrentVault(VaultAccount? a, String programId) {
+VaultState? _decodeCurrentVault(
+  VaultAccount? a,
+  String programId, {
+  int? rentExemptMinimum,
+}) {
   if (a == null ||
       a.owner != programId ||
       a.data.length != vaultAccountSize ||
@@ -471,23 +496,20 @@ VaultState? _decodeCurrentVault(VaultAccount? a, String programId) {
     return null;
   }
   try {
-    return decodeVault(a.data, address: '', lamports: 0, rentExemptMinimum: 0);
+    return decodeVault(
+      a.data,
+      address: '',
+      lamports: a.lamports,
+      rentExemptMinimum: rentExemptMinimum ?? rentExemptLamports(a.data.length),
+    );
   } on FormatException {
     return null;
   }
 }
 
-/// The account-wide subscription PDA `["sub", owner]` every payout of
-/// [owner]'s plans names.
-String subscriptionPda(String owner, String programId) => findPda([
-  utf8.encode('sub'),
-  base58decode(owner),
-], programId: programId).address;
-
 /// Requires rule [index] of [account] (the vault, `getMultipleAccounts`)
 /// to be a pending rule of a [kind] plan paying [beneficiary] in [mint]
-/// (null = SOL), and [subscription] to be its owner's subscription PDA (the
-/// program rejects any other). [what] names the claim in rejections.
+/// (null = SOL). [what] names the claim in rejections.
 void _checkClaimRule(
   VaultAccount? account, {
   required String vault,
@@ -496,7 +518,6 @@ void _checkClaimRule(
   required PlanKind kind,
   required String beneficiary,
   required String? mint,
-  required String subscription,
   required String what,
 }) {
   final v = _decodeCurrentVault(account, programId);
@@ -517,12 +538,6 @@ void _checkClaimRule(
     );
   }
   if (rule.executed) _reject('Rule $index of $vault is already fully paid');
-  if (subscription != subscriptionPda(v.owner, programId)) {
-    _reject(
-      '$what must name the subscription account of the owner of $vault, '
-      'not $subscription',
-    );
-  }
 }
 
 /// Requires the claim's vault to be a current-layout Deadman vault whose
@@ -543,9 +558,38 @@ void checkClaimVault(
     kind: claim.kind,
     beneficiary: request.signer,
     mint: null,
-    subscription: claim.subscription,
     what: claim.name,
   );
+}
+
+/// Default for [SponsorRoute.minLockdownLamports]: 0.01 SOL.
+const defaultMinLockdownLamports = 10000000;
+
+/// Whether [a] (the vault at [address]) is worth a sponsored lockdown
+/// (audit M-3): a current-layout plan, not revoked, with a payout still
+/// pending, that holds at least [minLamports] above its rent ([vaultRent])
+/// or a token a
+/// pending rule pays. [holdsTokens] tells whether the vault's classic SPL
+/// Token ATA of any of the given mints holds a balance; it is only called
+/// when the SOL test fails.
+Future<bool> isFundedVault(
+  VaultAccount? a,
+  String address,
+  String programId, {
+  required int minLamports,
+  required int vaultRent,
+  required Future<bool> Function(String vault, Set<String> mints) holdsTokens,
+}) async {
+  final v = _decodeCurrentVault(a, programId, rentExemptMinimum: vaultRent);
+  if (v == null || v.revokedAt != 0) return false;
+  final pending = [
+    for (final r in v.rules)
+      if (!r.executed) r,
+  ];
+  if (pending.isEmpty) return false;
+  if (v.withdrawableLamports >= minLamports) return true;
+  final mints = {for (final r in pending) ?r.mint};
+  return mints.isNotEmpty && await holdsTokens(address, mints);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,8 +611,9 @@ typedef PaymentAta = ({
 });
 
 /// A Deadman instruction the paymaster pays for: its exact account count
-/// (plus up to [PaymasterPolicy.maxExtraAccounts] Token-2022 hook accounts
-/// when [extra]) and the one account slot that may be the Kora payer.
+/// (plus up to [PaymasterPolicy.maxExtraAccounts] remaining accounts when
+/// [extra]: the token mints a plan names, or Token-2022 hook accounts of a
+/// withdrawal) and the one account slot that may be the Kora payer.
 typedef DeadmanIxSpec = ({
   List<int> disc,
   int accounts,
@@ -578,23 +623,26 @@ typedef DeadmanIxSpec = ({
 
 /// Discriminators from onchain/target/idl/deadman.json.
 const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
-  // payer (slot 1) = Kora: Anchor `init` CPIs System create_account from Kora.
+  // payer (slot 1) = Kora: the program CPIs System create_account (or a
+  // top-up of a pre-funded address) from Kora, and records what Kora
+  // actually paid as rent_paid, which close_vault gives back. Then one
+  // read-only mint account per token the rules name.
   'create_plan': (
     disc: [77, 43, 141, 254, 212, 118, 41, 186],
     accounts: 4,
-    extra: false,
+    extra: true,
     koraSlot: 1,
   ),
   'create_vesting': (
     disc: [135, 184, 171, 156, 197, 162, 246, 44],
     accounts: 4,
-    extra: false,
+    extra: true,
     koraSlot: 1,
   ),
   'update_plan': (
     disc: [119, 112, 58, 60, 76, 205, 1, 100],
     accounts: 2,
-    extra: false,
+    extra: true,
     koraSlot: null,
   ),
   'set_guard': (
@@ -629,14 +677,14 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
   ),
   'execute_sol_rule': (
     disc: [27, 74, 220, 147, 58, 73, 241, 103],
-    accounts: 6,
+    accounts: 5,
     extra: false,
     koraSlot: null,
   ),
   'execute_token_rule': (
     disc: [172, 93, 237, 201, 225, 26, 97, 140],
-    accounts: 10,
-    extra: true,
+    accounts: 9,
+    extra: false,
     koraSlot: null,
   ),
   'skip_rule': (
@@ -647,14 +695,14 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
   ),
   'release_vested_sol': (
     disc: [136, 188, 48, 45, 14, 211, 200, 228],
-    accounts: 6,
+    accounts: 5,
     extra: false,
     koraSlot: null,
   ),
   'release_vested_token': (
     disc: [50, 241, 129, 168, 233, 106, 179, 16],
-    accounts: 10,
-    extra: true,
+    accounts: 9,
+    extra: false,
     koraSlot: null,
   ),
   'revoke_vesting': (
@@ -662,16 +710,6 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
     accounts: 2,
     extra: false,
     koraSlot: null,
-  ),
-  // [owner, payer, subscription, config, sub_config, mint, owner_token,
-  //  treasury_token, token_program, system_program]: payer (slot 1) = Kora
-  // funds the owner's Subscription PDA on first use (rent spent for good).
-  // The program binds treasury_token to Config.treasury.
-  'subscribe': (
-    disc: [254, 28, 191, 138, 156, 179, 183, 53],
-    accounts: 10,
-    extra: false,
-    koraSlot: 1,
   ),
   // rent_payer (slot 2) is a lamport destination: the rent comes back to Kora.
   'close_vault': (
@@ -686,7 +724,8 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
 const _deniedDeadmanIxs = <String, List<int>>{
   'init_config': [23, 235, 115, 232, 168, 96, 1, 231],
   'set_config': [108, 158, 154, 175, 212, 98, 52, 66],
-  'set_subscription': [63, 240, 195, 242, 14, 124, 40, 179],
+  'propose_admin': [121, 214, 199, 212, 87, 39, 117, 234],
+  'accept_admin': [112, 42, 45, 90, 116, 181, 13, 170],
   'unlock': [101, 155, 40, 21, 158, 189, 56, 203],
 };
 
@@ -715,15 +754,13 @@ class PaymasterPolicy {
 typedef Payment = ({String mint, String destination, int amount});
 
 /// A token claim whose payout to the signer funds the paymaster fee:
-/// Deadman [name] on rule [index] of [vault] (a [kind] plan) paying [mint],
-/// naming [subscription] (the vault owner's subscription PDA).
+/// Deadman [name] on rule [index] of [vault] (a [kind] plan) paying [mint].
 typedef PaymasterClaim = ({
   String name,
   String vault,
   int index,
   PlanKind kind,
   String mint,
-  String subscription,
 });
 
 /// A transaction that passed [validatePaymasterTx]; the owner signature is
@@ -743,6 +780,7 @@ class PaymasterRequest {
     this.paymentSourceCreated = false,
     this.vaultChecks = const [],
     this.fundingClaim,
+    this.koraFundedPlan,
   });
 
   /// The one non-Kora signer (vault owner, executor or depositor).
@@ -751,8 +789,8 @@ class PaymasterRequest {
   /// Instruction names, e.g. `deadman.create_plan`, `token.transfer_checked`.
   final List<String> instructions;
 
-  /// Whether Kora is the `payer` of a create_plan / create_vesting /
-  /// subscribe (one account per transaction).
+  /// Whether Kora is the `payer` of a create_plan / create_vesting (one
+  /// account per transaction).
   final bool koraFundsRent;
 
   /// Associated token accounts created with Kora as the payer.
@@ -788,6 +826,12 @@ class PaymasterRequest {
   /// before it runs, so the balance check is left to Kora's simulation and
   /// the vault's rule is checked on chain instead.
   final PaymasterClaim? fundingClaim;
+
+  /// The plan account Kora pays the rent of, if any. It must not exist yet:
+  /// the program tops up a pre-funded address with a System transfer,
+  /// which Kora's fee payer policy refuses (and the plan price assumes the
+  /// full rent).
+  final String? koraFundedPlan;
 }
 
 /// A token account the transaction asks Kora to open.
@@ -814,6 +858,7 @@ PaymasterRequest validatePaymasterTx(
   final budget = _Budget();
   final names = <String>[];
   var koraCreates = 0;
+  String? koraFundedPlan;
   final koraAtas = <_KoraAta>[];
   final createdAtas = <String>{};
   // What may justify a Kora-funded ATA (audit M-1).
@@ -946,7 +991,7 @@ PaymasterRequest validatePaymasterTx(
         if (a[j] == kora && j != spec.koraSlot) {
           _reject(
             'The paymaster may only be the payer of create_plan / '
-            'create_vesting / subscribe or the rent_payer of close_vault',
+            'create_vesting or the rent_payer of close_vault',
           );
         }
       }
@@ -957,14 +1002,9 @@ PaymasterRequest validatePaymasterTx(
         if (a[1] == kora && ++koraCreates > 1) {
           _reject('At most one paymaster-funded account per transaction');
         }
+        if (a[1] == kora) koraFundedPlan = keys[a[2]];
       }
-      if (name == 'subscribe') {
-        if (keys[a[2]] != subscriptionPda(keys[owner], policy.programId)) {
-          _reject("Deadman subscribe must fund the owner's own subscription");
-        }
-      } else {
-        vaults.add(keys[a[spec.koraSlot == 1 ? 2 : 1]]);
-      }
+      vaults.add(keys[a[spec.koraSlot == 1 ? 2 : 1]]);
       if (name == 'withdraw_token' && d.length >= 16) {
         // [owner, vault, mint, vault_token, owner_token, token_program]
         final amount = _uLe(d.sublist(8, 16));
@@ -972,14 +1012,15 @@ PaymasterRequest validatePaymasterTx(
       }
       if (name == 'execute_token_rule' || name == 'release_vested_token') {
         // [executor, vault, config, mint, vault_token, beneficiary,
-        //  beneficiary_token, treasury_token, token_program, subscription,
-        //  hook extras...]. The program binds treasury_token to
-        // Config.treasury, beneficiary_token to the beneficiary and
-        // subscription to the vault owner.
+        //  beneficiary_token, treasury_token, token_program]. The program
+        // binds beneficiary_token to the beneficiary and treasury_token to
+        // the treasury's ATA; treasury_token is the program id when no fee
+        // goes to the treasury.
         final mint = keys[a[3]];
-        payouts
-          ..add((keys[a[6]], keys[a[5]], mint))
-          ..add((keys[a[7]], null, mint));
+        payouts.add((keys[a[6]], keys[a[5]], mint));
+        if (keys[a[7]] != policy.programId) {
+          payouts.add((keys[a[7]], null, mint));
+        }
         if (d.length == 9) {
           claims.add((
             keys[a[6]],
@@ -992,7 +1033,6 @@ PaymasterRequest validatePaymasterTx(
                   ? PlanKind.inheritance
                   : PlanKind.vesting,
               mint: mint,
-              subscription: keys[a[9]],
             ),
           ));
         }
@@ -1075,6 +1115,7 @@ PaymasterRequest validatePaymasterTx(
     paymentSourceCreated: createdAtas.contains(source),
     vaultChecks: vaultChecks.toSet().toList(),
     fundingClaim: fundingClaim,
+    koraFundedPlan: koraFundedPlan,
   );
 }
 
@@ -1275,6 +1316,9 @@ class SponsorRoute implements GatewayRoute {
     required this.limiter,
     required this.fetchAccounts,
     UsageLimiter? claims,
+    UsageLimiter? lockdowns,
+    this.minLockdownLamports = defaultMinLockdownLamports,
+    int? vaultRent,
   }) : claims =
            claims ??
            UsageLimiter(
@@ -1283,15 +1327,38 @@ class SponsorRoute implements GatewayRoute {
              global: 500,
              signerLabel: 'claimer',
              unit: 'sponsored claims',
-           );
+           ),
+       lockdowns =
+           lockdowns ??
+           UsageLimiter(
+             perVault: 3,
+             perSigner: 24,
+             global: 1000,
+             unit: lockdownUnit,
+           ),
+       vaultRent = vaultRent ?? rentExemptLamports(vaultAccountSize);
+
+  static const lockdownUnit = 'sponsored lockdowns';
 
   final SponsorPolicy policy;
 
-  /// Guard pulses and lockdowns.
+  /// Guard pulses.
   final UsageLimiter limiter;
 
   /// Beneficiaries' SOL claims, per vault, per claimer and global.
   final UsageLimiter claims;
+
+  /// Guard lockdowns (audit M-3): a budget of their own, so pulses and
+  /// claims never use it up, a few per vault, and only for funded vaults
+  /// (see [isFundedVault]).
+  final UsageLimiter lockdowns;
+
+  /// What a vault must hold above its rent, in SOL, for a sponsored
+  /// lockdown when it holds none of its rules' tokens.
+  final int minLockdownLamports;
+
+  /// Rent-exempt minimum of a vault on this cluster.
+  final int vaultRent;
   final Future<List<VaultAccount?>> Function(List<String>) fetchAccounts;
 
   @override
@@ -1307,11 +1374,16 @@ class SponsorRoute implements GatewayRoute {
     if (!await verifyGuardSignature(request)) {
       _reject('Invalid ${claim == null ? 'guard' : 'claimer'} signature');
     }
-    final quota = claim == null ? limiter : claims;
+    final quota = claim != null
+        ? claims
+        : request.lockdown
+        ? lockdowns
+        : limiter;
     quota.check(request.signer, request.vaults);
     final accounts = await fetchAccounts(request.vaults);
     if (claim == null) {
       checkVaultAccounts(request, accounts, policy);
+      if (request.lockdown) await _checkFunded(request, accounts);
     } else {
       checkClaimVault(request, accounts, policy);
     }
@@ -1319,10 +1391,57 @@ class SponsorRoute implements GatewayRoute {
     return (
       summary:
           '${claim == null ? '' : 'claim=${claim.name}#${claim.index} '}'
+          '${request.lockdown ? 'lockdown ' : ''}'
           'signer=${request.signer} vaults=${request.vaults.join(',')} '
           'fee<=${request.feeLamports}',
       release: () => quota.release(request.signer, request.vaults, at),
     );
+  }
+
+  /// At least one of the vaults must be funded: an empty plan locked along
+  /// with the owner's other plans is fine, a guard of empty plans only is
+  /// not sponsored (it can still pay its own lockdown).
+  Future<void> _checkFunded(
+    SponsorRequest request,
+    List<VaultAccount?> accounts,
+  ) async {
+    for (var i = 0; i < accounts.length; i++) {
+      if (await isFundedVault(
+        accounts[i],
+        request.vaults[i],
+        policy.programId,
+        minLamports: minLockdownLamports,
+        vaultRent: vaultRent,
+        holdsTokens: _holdsTokens,
+      )) {
+        return;
+      }
+    }
+    _reject(
+      'Lockdowns are sponsored only for a plan with a pending payout that '
+      'holds funds; the guard key can pay its own',
+    );
+  }
+
+  Future<bool> _holdsTokens(String vault, Set<String> mints) async {
+    final atas = [
+      for (final m in mints) associatedTokenAddress(vault, m, tokenProgramId),
+    ];
+    final accounts = await fetchAccounts(atas);
+    for (final (i, mint) in mints.indexed) {
+      final a = i < accounts.length ? accounts[i] : null;
+      final d = a?.data;
+      if (a != null &&
+          a.owner == tokenProgramId &&
+          d != null &&
+          d.length >= 165 &&
+          base58encode(d.sublist(0, 32)) == mint &&
+          base58encode(d.sublist(32, 64)) == vault &&
+          _uLe(d.sublist(64, 72)) > BigInt.zero) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @override
@@ -1355,7 +1474,7 @@ class PaymasterRoute implements GatewayRoute {
   /// Every paid transaction, per owner and global.
   final UsageLimiter limiter;
 
-  /// Kora-funded plan and subscription accounts, per owner and global.
+  /// Kora-funded plan accounts, per owner and global.
   final UsageLimiter creates;
 
   /// Kora-funded token accounts (rent spent for good), per owner and
@@ -1424,24 +1543,37 @@ class PaymasterRoute implements GatewayRoute {
     final payment = r.payment!;
     final ata = policy.paymentAtas[payment.destination]!;
     final claim = r.fundingClaim;
+    final plan = r.koraFundedPlan;
     final accounts = await fetchAccounts([
       source,
       ...r.vaultChecks,
       ?claim?.vault,
+      ?plan,
     ]);
-    if (accounts.length != 1 + r.vaultChecks.length + (claim == null ? 0 : 1)) {
+    final expected =
+        1 +
+        r.vaultChecks.length +
+        (claim == null ? 0 : 1) +
+        (plan == null ? 0 : 1);
+    if (accounts.length != expected) {
       _reject('Could not load the payment account');
+    }
+    if (plan != null && accounts.last != null) {
+      _reject(
+        'The plan address $plan already holds lamports: the paymaster only '
+        'pays the rent of a new plan at an empty address. Use another plan '
+        'or pay the rent from the wallet',
+      );
     }
     if (claim != null) {
       _checkClaimRule(
-        accounts.last,
+        accounts[1 + r.vaultChecks.length],
         vault: claim.vault,
         programId: policy.programId,
         index: claim.index,
         kind: claim.kind,
         beneficiary: r.signer,
         mint: claim.mint,
-        subscription: claim.subscription,
         what: claim.name,
       );
     }
@@ -1828,6 +1960,7 @@ Future<List<VaultAccount?>> Function(List<String>) rpcAccountFetcher(
         (
           owner: a.owner,
           data: Uint8List.fromList((a.data! as BinaryAccountData).data),
+          lamports: a.lamports,
         )
       else
         null,
@@ -1966,6 +2099,23 @@ Future<void> main() async {
         file: File(env['GATEWAY_CLAIMS_STATE'] ?? 'kora/gateway-claims.json'),
         signerLabel: 'claimer',
         unit: 'sponsored claims',
+      ),
+      lockdowns: UsageLimiter(
+        perVault: envInt('GATEWAY_LOCKDOWNS_PER_VAULT', 3),
+        perSigner: envInt('GATEWAY_LOCKDOWNS_PER_SIGNER', 24),
+        global: envInt('GATEWAY_LOCKDOWNS_GLOBAL', 1000),
+        file: File(
+          env['GATEWAY_LOCKDOWNS_STATE'] ?? 'kora/gateway-lockdowns.json',
+        ),
+        unit: SponsorRoute.lockdownUnit,
+      ),
+      minLockdownLamports: envInt(
+        'GATEWAY_LOCKDOWN_MIN_LAMPORTS',
+        defaultMinLockdownLamports,
+      ),
+      vaultRent: await rpc.getMinimumBalanceForRentExemption(
+        vaultAccountSize,
+        commitment: Commitment.confirmed,
       ),
       fetchAccounts: rpcAccountFetcher(rpc),
     ),

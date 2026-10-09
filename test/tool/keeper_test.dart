@@ -63,15 +63,20 @@ TokenFacts token({
   double? lamportsPerUnit,
   bool classicMint = true,
   int otherReserved = 0,
+  int feeBps = 200,
+  int burnBps = 0,
+  int networkFee = lamportsPerSignature,
 }) => TokenFacts(
   otherReserved: otherReserved,
   classicMint: classicMint,
   vaultBalance: vaultBalance,
-  feeBps: 200,
+  feeBps: feeBps,
   beneficiaryAta: beneficiaryAta,
   treasuryAta: treasuryAta,
   ataRent: 2039280,
   lamportsPerUnit: lamportsPerUnit,
+  burnBps: burnBps,
+  networkFee: networkFee,
 );
 
 void main() {
@@ -148,18 +153,46 @@ void main() {
 
     test('a skipped token tier follows the same ATA rent policy', () {
       final r = skippedRule(reserved: 500000, mint: mint);
+      // Fee of 10 000 units at 1 lamport each covers the network fee only.
       expect(
-        decideToken(r, treasury, token(), canSkip: false).action,
+        decideToken(
+          r,
+          treasury,
+          token(lamportsPerUnit: 1),
+          canSkip: false,
+        ).action,
         KeeperAction.execute,
       );
       expect(
         decideToken(
           r,
           treasury,
-          token(beneficiaryAta: AtaStatus.missing),
+          token(beneficiaryAta: AtaStatus.missing, lamportsPerUnit: 1),
           canSkip: false,
         ).action,
         KeeperAction.wait,
+      );
+    });
+
+    test('skips only when a later tier of the same asset is waiting', () {
+      VaultState v(List<RuleState> rules) => f.vault(rules: rules);
+      final open = v([f.rule(seed: 11), f.rule(seed: 12)]);
+      expect(skipUnblocks(open, 0), isTrue);
+      expect(skipUnblocks(open, 1), isFalse, reason: 'last tier');
+      expect(
+        skipUnblocks(v([f.rule(seed: 11), f.rule(seed: 12, mint: mint)]), 0),
+        isFalse,
+        reason: 'other asset',
+      );
+      expect(
+        skipUnblocks(v([f.rule(seed: 11), f.rule(seed: 12, executedAt: 9)]), 0),
+        isFalse,
+        reason: 'already paid',
+      );
+      expect(
+        skipUnblocks(v([f.rule(seed: 11), f.rule(seed: 12, skippedAt: 5)]), 0),
+        isFalse,
+        reason: 'already skipped, claimable anyway',
       );
     });
   });
@@ -186,25 +219,50 @@ void main() {
       final dust = rule(amount: 100000);
       expect(decideSol(dust, sol(), canSkip: false).action, KeeperAction.wait);
       expect(decideSol(dust, sol(), canSkip: true).action, KeeperAction.skip);
-      // An existing funded account can take dust.
+    });
+
+    test('M-4: executes only when the fee covers the network fee', () {
+      final funded = sol(beneficiaryLamports: 1000000);
+      // 2% of 249 950 is 4999 lamports, short of the 5000 lamport fee.
+      final d = decideSol(rule(amount: 249950), funded, canSkip: true);
+      expect(d.action, KeeperAction.wait, reason: 'never skipped for it');
       expect(
-        decideSol(
-          dust,
-          sol(beneficiaryLamports: 1000000),
-          canSkip: false,
-        ).action,
+        d.reason,
+        'pays 244951 lamports, fee 4999: fee worth ~4999 lamports does not '
+        'cover 5000 lamports of network fee; left for the beneficiary to '
+        'claim',
+      );
+      expect(
+        decideSol(rule(amount: 250000), funded, canSkip: false).action,
         KeeperAction.execute,
+      );
+      // A priority fee raises the bar.
+      final busy = SolFacts(
+        available: 5000000,
+        feeBps: 200,
+        beneficiaryLamports: 1000000,
+        beneficiaryRentMin: 890880,
+        treasuryLamports: 1000000000,
+        treasuryRentMin: 890880,
+        networkFee: networkFeeLamports(cuPrice: 100000),
+      );
+      expect(busy.networkFee, 25000);
+      expect(
+        decideSol(rule(amount: 1000000), busy, canSkip: false).action,
+        KeeperAction.wait,
       );
     });
 
-    test('counts the fee waiver when the treasury is below rent', () {
-      // Net 882706 is short of 890880; with the fee waived it is 900720.
+    test('folds the fee into the payout when the treasury is below rent, '
+        'which leaves the keeper nothing', () {
+      // Net 882706 is short of 890880; with the fee folded in it is 900720.
       final r = rule(amount: 900720);
-      expect(decideSol(r, sol(), canSkip: false).action, KeeperAction.wait);
-      expect(
-        decideSol(r, sol(treasuryLamports: 0), canSkip: false).action,
-        KeeperAction.execute,
-      );
+      final short = decideSol(r, sol(), canSkip: false);
+      expect(short.action, KeeperAction.wait);
+      expect(short.reason, contains('below rent exemption'));
+      final folded = decideSol(r, sol(treasuryLamports: 0), canSkip: false);
+      expect(folded.action, KeeperAction.wait);
+      expect(folded.reason, startsWith('pays 900720 lamports, fee 0:'));
     });
   });
 
@@ -212,9 +270,73 @@ void main() {
     final r = rule(mint: mint);
 
     test('executes without creating ATAs when both exist', () {
-      final d = decideToken(r, treasury, token(), canSkip: false);
+      final d = decideToken(
+        r,
+        treasury,
+        token(lamportsPerUnit: 1),
+        canSkip: false,
+      );
       expect(d.action, KeeperAction.execute);
+      expect(
+        d.reason,
+        'pays 980000, fee 20000 (~20000 lamports) covers 5000 '
+        'lamports',
+      );
       expect(d.createAtasFor, isEmpty);
+      expect(d.treasuryFee, isTrue);
+    });
+
+    test('M-4: a token without a known price is left to the beneficiary, '
+        'even with both ATAs', () {
+      final d = decideToken(r, treasury, token(), canSkip: true);
+      expect(d.action, KeeperAction.wait);
+      expect(d.reason, endsWith('left for the beneficiary to claim'));
+    });
+
+    test('SKR: only the fee share that is not burned counts', () {
+      final skr = token(feeBps: 150, burnBps: 1000, lamportsPerUnit: 0.36);
+      // 1.5% of 1 000 000 = 15 000, 1500 burned, 13 500 to the treasury,
+      // worth 4860 lamports: short of the network fee.
+      final d = decideToken(r, treasury, skr, canSkip: false);
+      expect(d.action, KeeperAction.wait);
+      expect(
+        d.reason,
+        startsWith(
+          'pays 985000, fee 15000 (1500 burned): fee '
+          'worth ~4860 lamports',
+        ),
+      );
+      final worth = decideToken(
+        r,
+        treasury,
+        token(feeBps: 150, burnBps: 1000, lamportsPerUnit: 1),
+        canSkip: false,
+      );
+      expect(worth.action, KeeperAction.execute);
+      expect(worth.reason, contains('(~13500 lamports)'));
+    });
+
+    test('FUNDS-5: a payout that leaves the treasury nothing needs no '
+        'treasury ATA', () {
+      final nft = rule(mint: mint, amount: 1);
+      final f = token(
+        vaultBalance: 1,
+        treasuryAta: AtaStatus.missing,
+        lamportsPerUnit: 1e9,
+      );
+      final d = decideToken(nft, treasury, f, canSkip: false);
+      expect(d.action, KeeperAction.wait, reason: 'no fee for the keeper');
+      expect(d.reason, contains('fee 0'));
+      // Were it worth sending, the treasury ATA would be left out.
+      final free = decideToken(
+        nft,
+        treasury,
+        token(vaultBalance: 1, treasuryAta: AtaStatus.unusable, networkFee: 0),
+        canSkip: false,
+      );
+      expect(free.action, KeeperAction.execute);
+      expect(free.treasuryFee, isFalse);
+      expect(free.createAtasFor, isEmpty);
     });
 
     test('does not pay ATA rent the fee does not cover (M-3)', () {
@@ -308,17 +430,18 @@ void main() {
       expect(due(1000 + 60, full: true, last: 1000), isTrue);
     });
 
-    test('installment plans release each unlock right away', () {
-      bool due(int claimable, {int? last}) => vestingReleaseDue(
-        claimable: claimable,
-        fullyVested: false,
-        now: 1000 + 60,
-        interval: 86400,
-        lastRelease: last,
-        installments: true,
-      );
-      expect(due(5, last: 1000), isTrue, reason: 'no --vest-interval wait');
+    test('installment plans wait --vest-interval too, except the last', () {
+      bool due(int claimable, {int? last, bool full = false}) =>
+          vestingReleaseDue(
+            claimable: claimable,
+            fullyVested: full,
+            now: 1000 + 60,
+            interval: 86400,
+            lastRelease: last,
+          );
+      expect(due(5, last: 1000), isFalse, reason: 'released a minute ago');
       expect(due(5), isTrue);
+      expect(due(5, last: 1000, full: true), isTrue);
       expect(due(0, last: 1000), isFalse, reason: 'between installments');
     });
 
@@ -362,16 +485,25 @@ void main() {
     test('USDC default price is 0.006 SOL per USDC', () {
       expect(defaultUsdcLamportsPerUnit * 1000000, 6000000);
     });
+
+    test('network fee: 5000 per signature plus the priority fee', () {
+      expect(networkFeeLamports(), 5000);
+      expect(networkFeeLamports(instructions: 3, cuPrice: 1000), 5600);
+      expect(networkFeeLamports(cuPrice: 1), 5001, reason: 'rounded up');
+    });
   });
 
-  group('subscription waiver', () {
+  group('Keeper.decide with the Config fees', () {
+    const skr = 'Skr1111111111111111111111111111111111111111';
     const fees = FeeSchedule(
       treasury: '7ZQi6r2ZbKGCDFqKpvVjwMBVHzH2bqoqXuRnDKxDtjXY',
       feeBpsPublic: 200,
-      feeBpsPrivate: 300,
+      feeBpsPrivate: 200,
+      skrMint: skr,
+      feeBpsSkr: 150,
+      skrBurnBps: 1000,
     );
     const now = 1790500000;
-    const lastPulse = 1790000000;
     late FakeRpc rpc;
     late Keeper keeper;
 
@@ -382,148 +514,110 @@ void main() {
         sol,
         DeadmanClient.withKora(client: sol),
         await Ed25519HDKeyPair.random(),
-        prices: {mint: 1000000},
+        prices: {mint: 1, skr: 1},
       );
       rpc.accounts
-        ..[mint] = FakeAccount(tokenProgramId, mintBytes(6))
         ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000)
         ..[fees.treasury] = const FakeAccount(
           systemProgramId,
           [],
           lamports: 5000000,
         );
+      for (final m in [mint, skr]) {
+        rpc.accounts[m] = FakeAccount(tokenProgramId, mintBytes(6));
+      }
     });
 
     tearDown(() => rpc.close());
 
     final owner = key(30);
-    AccountSubscription paid(int until) =>
-        AccountSubscription(owner: owner, paidUntil: until);
+    VaultState plan({String? ruleMint, int amount = 1000000}) => decodeVault(
+      vaultBytes(
+        owner: owner,
+        guard: key(31),
+        rules: [
+          RuleState(
+            beneficiary: heir,
+            rail: Rail.solana,
+            afterSecs: 90000,
+            mode: AmountMode.fixed,
+            amount: amount,
+            mint: ruleMint,
+            executedAt: 0,
+            paid: 0,
+          ),
+        ],
+      ),
+      address: vaultPda(owner, 0).address,
+      lamports: 1000000000,
+      rentExemptMinimum: 2000000,
+    );
 
-    VaultState plan({String? ruleMint, int planId = 0}) {
-      return decodeVault(
-        vaultBytes(
-          owner: owner,
-          planId: planId,
-          guard: key(31),
-          lastPulse: lastPulse,
-          rules: [
-            RuleState(
-              beneficiary: heir,
-              rail: Rail.solana,
-              afterSecs: 90000,
-              mode: AmountMode.fixed,
-              amount: 1000000,
-              mint: ruleMint,
-              executedAt: 0,
-              paid: 0,
-            ),
-          ],
-        ),
-        address: vaultPda(owner, planId).address,
-        lamports: 1000000000,
-        rentExemptMinimum: 2000000,
-      );
-    }
-
-    void holdTokens(VaultState v, {bool heirAta = true}) {
-      rpc.accounts[ataAddress(v.address, mint)] = FakeAccount(
-        tokenProgramId,
-        [...tokenAccountBytes(mint: mint, owner: v.address, amount: 5000000)]
-          ..[108] = 1,
-      );
-      rpc.accounts[ataAddress(fees.treasury, mint)] = FakeAccount(
-        tokenProgramId,
-        tokenAccountBytes(mint: mint, owner: fees.treasury, amount: 0)
-          ..[108] = 1,
-      );
-      if (heirAta) {
-        rpc.accounts[ataAddress(heir, mint)] = FakeAccount(
-          tokenProgramId,
-          tokenAccountBytes(mint: mint, owner: heir, amount: 0)..[108] = 1,
-        );
-      }
-    }
-
-    test("every plan of a subscribed owner executes fee-free", () async {
-      for (final id in [0, 9]) {
-        final d = await keeper.decide(
-          plan(planId: id),
-          0,
-          fees,
-          now,
-          sub: paid(lastPulse),
-        );
-        expect(d.action, KeeperAction.execute);
-        expect(d.reason, 'pays 1000000 lamports, fee 0');
-      }
-    });
-
-    test('no subscription, a lapsed one or another owner\'s pays the '
-        'fee', () async {
-      for (final sub in [
-        null,
-        paid(lastPulse - 1),
-        AccountSubscription(owner: key(32), paidUntil: now + 86400),
+    void holdTokens(VaultState v, String m, {int amount = 5000000}) {
+      for (final (holder, held) in [
+        (v.address, amount),
+        (fees.treasury, 0),
+        (heir, 0),
       ]) {
-        final d = await keeper.decide(plan(), 0, fees, now, sub: sub);
-        expect(d.reason, 'pays 980000 lamports, fee 20000');
+        rpc.accounts[ataAddress(holder, m)] = FakeAccount(
+          tokenProgramId,
+          tokenAccountBytes(mint: m, owner: holder, amount: held)..[108] = 1,
+        );
       }
-    });
+    }
 
-    test('a covered token tier executes when its ATAs exist', () async {
-      final v = plan(ruleMint: mint);
-      holdTokens(v);
-      final d = await keeper.decide(v, 0, fees, now, sub: paid(now + 86400));
+    test('a SOL tier pays 2%', () async {
+      final d = await keeper.decide(plan(), 0, fees, now);
       expect(d.action, KeeperAction.execute);
-      expect(d.reason, 'pays 1000000, fee 0');
-      expect(d.createAtasFor, isEmpty);
+      expect(d.reason, 'pays 980000 lamports, fee 20000');
     });
 
-    test('a covered token tier never pays ATA rent', () async {
-      final v = plan(ruleMint: mint);
-      holdTokens(v, heirAta: false);
-      final d = await keeper.decide(v, 0, fees, now, sub: paid(now));
-      expect(d.action, KeeperAction.wait, reason: d.reason);
-      expect(d.createAtasFor, isEmpty);
+    test('a token tier pays 2%, an SKR tier 1.5% with 10% burned', () async {
+      final usdcPlan = plan(ruleMint: mint);
+      holdTokens(usdcPlan, mint);
+      final d = await keeper.decide(usdcPlan, 0, fees, now);
+      expect(d.action, KeeperAction.execute);
+      expect(d.reason, startsWith('pays 980000, fee 20000 (~20000 lamports)'));
 
-      // The same tier without the waiver: its fee is worth the rent.
-      final charged = await keeper.decide(v, 0, fees, now);
-      expect(charged.action, KeeperAction.execute);
-      expect(charged.createAtasFor, [heir]);
+      final skrPlan = plan(ruleMint: skr);
+      holdTokens(skrPlan, skr);
+      final s = await keeper.decide(skrPlan, 0, fees, now);
+      expect(s.action, KeeperAction.execute);
+      expect(
+        s.reason,
+        startsWith('pays 985000, fee 15000 (1500 burned) (~13500 lamports)'),
+      );
+    });
+
+    test('an SKR dust tier is left to the beneficiary', () async {
+      final v = plan(ruleMint: skr, amount: 30000);
+      holdTokens(v, skr);
+      final d = await keeper.decide(v, 0, fees, now);
+      expect(d.action, KeeperAction.wait);
+      expect(d.reason, contains('fee 450 (45 burned)'));
     });
   });
 
   group('sweep', () {
-    test("reads every owner's subscription once, in one batch, and charges "
-        'no fee on any plan of a subscribed owner', () async {
+    test('reads the Config once and leaves dust to the beneficiary', () async {
       final rpc = await FakeRpc.start();
       addTearDown(rpc.close);
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final lastPulse = now - 100 * 86400;
-      final subscribed = key(40);
-      final other = key(41);
+      final paying = key(40);
+      final dust = key(41);
       rpc.accounts
         ..[configPda().address] = FakeAccount(
           AppConfig.programId,
           configBytes(admin: key(42), treasury: treasury),
         )
         ..[treasury] = const FakeAccount(systemProgramId, [], lamports: 5000000)
-        ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000)
-        ..[subPda(subscribed).address] = FakeAccount(
-          AppConfig.programId,
-          subscriptionBytes(owner: subscribed, paidUntil: lastPulse),
-        );
-      for (final (owner, planId) in [
-        (subscribed, 0),
-        (subscribed, 1),
-        (other, 0),
-      ]) {
-        rpc.accounts[vaultPda(owner, planId).address] = FakeAccount(
+        ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000);
+      for (final (owner, amount) in [(paying, 1000000), (dust, 100000)]) {
+        rpc.accounts[vaultPda(owner, 0).address] = FakeAccount(
           AppConfig.programId,
           vaultBytes(
             owner: owner,
-            planId: planId,
             guard: key(43),
             lastPulse: lastPulse,
             lockedUntil: 0,
@@ -534,7 +628,7 @@ void main() {
                 rail: Rail.solana,
                 afterSecs: 90000,
                 mode: AmountMode.fixed,
-                amount: 1000000,
+                amount: amount,
                 executedAt: 0,
                 paid: 0,
               ),
@@ -553,19 +647,10 @@ void main() {
       final out = _Out();
       await IOOverrides.runZoned(keeper.sweep, stdout: () => out);
 
-      final subReads = [
-        for (final keys in rpc.multiReads)
-          if (keys.contains(subPda(subscribed).address)) keys,
-      ];
-      expect(subReads, [
-        unorderedEquals([subPda(subscribed).address, subPda(other).address]),
-      ]);
-      String line(String owner, int planId) => out.lines.singleWhere(
-        (l) => l.contains(vaultPda(owner, planId).address),
-      );
-      expect(line(subscribed, 0), endsWith('pays 1000000 lamports, fee 0'));
-      expect(line(subscribed, 1), endsWith('pays 1000000 lamports, fee 0'));
-      expect(line(other, 0), endsWith('pays 980000 lamports, fee 20000'));
+      String line(String owner) =>
+          out.lines.singleWhere((l) => l.contains(vaultPda(owner, 0).address));
+      expect(line(paying), endsWith('pays 980000 lamports, fee 20000'));
+      expect(line(dust), endsWith('left for the beneficiary to claim'));
       expect(rpc.sent, isEmpty);
     });
   });

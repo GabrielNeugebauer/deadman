@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -199,5 +200,25 @@ void main() {
   test('fromConfig is null for an empty URL', () {
     expect(KoraClient.fromConfig(''), isNull);
     expect(KoraClient.fromConfig('https://k.test')?.url.host, 'k.test');
+  });
+
+  test('an unreachable node fails fast, except signAndSend', () async {
+    final hang = MockClient((_) => Completer<http.Response>().future);
+    final kora = KoraClient(
+      Uri.parse('http://kora.test'),
+      httpClient: hang,
+      timeout: const Duration(milliseconds: 400),
+      quickTimeout: const Duration(milliseconds: 50),
+    );
+    final quick = Stopwatch()..start();
+    await expectLater(kora.getPayerSigner(), throwsA(isA<TimeoutException>()));
+    expect(quick.elapsedMilliseconds, lessThan(300));
+
+    final slow = Stopwatch()..start();
+    await expectLater(
+      kora.signAndSendTransaction(transaction: 'AA=='),
+      throwsA(isA<TimeoutException>()),
+    );
+    expect(slow.elapsedMilliseconds, greaterThanOrEqualTo(400));
   });
 }

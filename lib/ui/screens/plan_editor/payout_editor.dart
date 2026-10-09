@@ -5,12 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../solana/deadman_api.dart';
 import '../../../state/assets.dart';
+import '../../../state/nfts.dart';
 import '../../../state/plan_draft.dart';
 import '../../../state/providers.dart';
 import '../../widgets/brand/brand.dart';
 import '../../widgets/editor/amount_mode_field.dart';
 import '../../widgets/editor/asset_chips.dart';
 import '../../widgets/editor/plan_steps.dart';
+import '../../widgets/nft.dart';
 import 'editor_providers.dart';
 import 'recipient_section.dart';
 
@@ -160,18 +162,35 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
     super.dispose();
   }
 
-  PayoutDraft get _draft => PayoutDraft(
-    beneficiary: _who.value,
-    rail: _who.rail,
-    mint: _mint,
-    mode: _mode,
-    shareBps: parseShareBps(_share.text),
-    fixedAmount: _fixed.text.trim().isEmpty
-        ? null
-        : parseAmount(_fixed.text, _mint),
-    afterSecs: _after,
-    name: _who.name.text.trim(),
-  );
+  /// An NFT is sent whole: a fixed amount of one.
+  PayoutDraft get _draft {
+    final nft = isNft(_mint);
+    return PayoutDraft(
+      beneficiary: _who.value,
+      rail: _who.rail,
+      mint: _mint,
+      mode: nft ? AmountMode.fixed : _mode,
+      shareBps: parseShareBps(_share.text),
+      fixedAmount: nft
+          ? 1
+          : _fixed.text.trim().isEmpty
+          ? null
+          : parseAmount(_fixed.text, _mint),
+      afterSecs: _after,
+      name: _who.name.text.trim(),
+    );
+  }
+
+  void _setMint(String? m) => setState(() {
+    if (isNft(_mint) && !isNft(m)) {
+      // Leaving an NFT: start the token amount afresh.
+      _mode = AmountMode.percent;
+      _share.text = '100';
+      _fixed.text = '';
+    }
+    _mint = m;
+    _dirty = true;
+  });
 
   void _changed() => setState(() => _dirty = true);
 
@@ -285,9 +304,11 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
 
   @override
   Widget build(BuildContext context) {
+    watchNftNames(ref, [_mint]);
     final fee = watchFeeInfo(ref);
     final owner = ref.watch(sessionProvider.select((s) => s.owner));
     final draft = _draft;
+    final nft = draft.nft;
     final all = [for (final (_, p) in widget.others) p, draft];
     final index = all.length - 1;
     final preview = PlanPreview.of(
@@ -315,7 +336,8 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
     final whoError = _showErrors || _addressTouched
         ? addressError(_who.value)?.body
         : null;
-    final fixedError = _showErrors && _mode == AmountMode.fixed
+    final railError = nft && draft.rail != Rail.solana ? a5 : null;
+    final fixedError = _showErrors && _mode == AmountMode.fixed && !nft
         ? amountErrors(
             mode: _mode,
             shareBps: null,
@@ -361,6 +383,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                 onChanged: _addressChanged,
                 fee: fee,
                 privateLive: ref.watch(privateRailsLiveProvider),
+                mint: _mint,
                 error: whoError,
                 loading: facts?.isLoading ?? false,
                 notice: b1,
@@ -371,28 +394,26 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                 title: 'What they get',
                 children: [
                   const FieldLabel('Which money'),
-                  AssetChips(
-                    mint: _mint,
-                    onChanged: (m) => setState(() {
-                      _mint = m;
-                      _dirty = true;
-                    }),
-                  ),
+                  AssetChips(mint: _mint, allowNft: true, onChanged: _setMint),
                   const SizedBox(height: DMSpace.xl),
-                  AmountModeField(
-                    mode: _mode,
-                    onMode: (m) => setState(() {
-                      _mode = m;
-                      _dirty = true;
-                    }),
-                    share: _share,
-                    fixed: _fixed,
-                    mint: _mint,
-                    onChanged: _changed,
-                    fixedError: fixedError,
-                    shareFocus: _shareFocus,
-                    fixedFocus: _fixedFocus,
-                  ),
+                  if (nft)
+                    _NftPayout(mint: _mint!, who: draft.who)
+                  else
+                    AmountModeField(
+                      mode: _mode,
+                      onMode: (m) => setState(() {
+                        _mode = m;
+                        _dirty = true;
+                      }),
+                      share: _share,
+                      fixed: _fixed,
+                      mint: _mint,
+                      onChanged: _changed,
+                      fixedError: fixedError,
+                      shareFocus: _shareFocus,
+                      fixedFocus: _fixedFocus,
+                    ),
+                  if (railError != null) WarningTile.of(railError),
                   for (final w in [...a1, ...delivery])
                     WarningTile.of(
                       w,
@@ -457,6 +478,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
   ) {
     final tail =
         ' to ${d.who} ${delayText(d.afterSecs)} after your last check-in';
+    if (d.nft) return TextSpan(text: 'Sends ${assetSymbol(d.mint)}$tail.');
     if (d.amount == null) {
       return const TextSpan(text: 'Enter an amount to see what they get.');
     }
@@ -475,7 +497,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
           text: moneyText(net, d.mint),
           style: DMType.mono(size: 17, weight: FontWeight.w700, color: DM.bone),
         ),
-        TextSpan(text: '$tail ${fee.note(d.rail)}'),
+        TextSpan(text: '$tail ${fee.note(d.rail, d.mint)}'),
       ],
     );
   }
@@ -544,11 +566,7 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
                     items: [
                       const DropdownMenuItem(value: 86400, child: Text('days')),
                       const DropdownMenuItem(value: 3600, child: Text('hours')),
-                      if (widget.demo || _customUnit == 60)
-                        const DropdownMenuItem(
-                          value: 60,
-                          child: Text('minutes'),
-                        ),
+                      const DropdownMenuItem(value: 60, child: Text('minutes')),
                     ],
                     onChanged: (u) {
                       _customUnit = u!;
@@ -582,4 +600,37 @@ class _PayoutEditorPageState extends ConsumerState<PayoutEditorPage> {
       ],
     );
   }
+}
+
+/// What an NFT payout sends: the NFT itself, whole.
+class _NftPayout extends StatelessWidget {
+  const _NftPayout({required this.mint, required this.who});
+
+  final String mint;
+  final String who;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      NftThumb(mint, size: 56),
+      const SizedBox(width: DMSpace.md),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Send ${assetSymbol(mint)} to $who',
+              style: DMType.outfit(size: 16, weight: FontWeight.w600),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'An NFT goes to one person, whole. The plan must hold it when '
+              'this payout runs.',
+              style: DMType.outfit(size: 13.5, color: DM.dust, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
 }

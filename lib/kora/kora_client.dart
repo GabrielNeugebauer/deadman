@@ -63,6 +63,7 @@ class KoraClient {
     this.hmacSecret = '',
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 90),
+    this.quickTimeout = const Duration(seconds: 8),
   }) : _http = httpClient ?? http.Client();
 
   /// Null when [url] is empty, i.e. Kora is not configured for this build.
@@ -104,6 +105,10 @@ class KoraClient {
 
   /// `signAndSendTransaction` waits for confirmation server-side.
   final Duration timeout;
+
+  /// Every other method answers at once, so an unreachable node (a PC that
+  /// changed IP, or is off) fails fast and the caller can fall back.
+  final Duration quickTimeout;
   final http.Client _http;
   var _id = 0;
 
@@ -203,7 +208,7 @@ class KoraClient {
     });
     final response = await _http
         .post(url, headers: _headers(body), body: body)
-        .timeout(timeout);
+        .timeout(method == 'signAndSendTransaction' ? timeout : quickTimeout);
     if (response.statusCode != 200) {
       final text = response.body.trim();
       throw KoraException(

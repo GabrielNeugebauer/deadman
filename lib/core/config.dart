@@ -74,6 +74,28 @@ class AppConfig {
   );
   static const usdcDecimals = 6;
 
+  /// Solana Mobile's Seeker token (classic SPL Token, 6 decimals). Payouts
+  /// in it pay the lower SKR release fee (`Config.fee_bps_skr`), part of
+  /// which is burned; the program reads the mint from `Config.skr_mint`. On
+  /// devnet: our test mint.
+  static const skrMint = String.fromEnvironment(
+    'SKR_MINT',
+    defaultValue: isMainnet
+        ? 'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3'
+        : '4JX81qZWhPPT38Tn4ZswaS2DyH3PffdrFqbYgsoZCuHc',
+  );
+  static const skrDecimals = 6;
+
+  /// ORE (classic SPL Token, 11 decimals): a plan asset like any token. On
+  /// devnet: our test mint.
+  static const oreMint = String.fromEnvironment(
+    'ORE_MINT',
+    defaultValue: isMainnet
+        ? 'oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp'
+        : '6KdRjrWYouFLmEcNeDpJkc9AUgzvmE7cn3DbAx2KfSyt',
+  );
+  static const oreDecimals = 11;
+
   /// SOL sent to the device guard key at setup to pay pulse fees.
   static const guardFundingLamports = 10000000;
 

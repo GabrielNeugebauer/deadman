@@ -1,14 +1,18 @@
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const VAULT_SEED: &[u8] = b"vault";
-pub const SUB_CONFIG_SEED: &[u8] = b"sub_config";
-pub const SUBSCRIPTION_SEED: &[u8] = b"sub";
 
 pub const MAX_RULES: usize = 8;
 /// Plan label length in bytes.
 pub const MAX_LABEL_LEN: usize = 32;
 pub const BPS_DENOMINATOR: u64 = 10_000;
-/// Hard cap on the payout fee for any rail: 5%.
+/// Hard cap on the payout fee for any rail or mint: 5%.
 pub const MAX_FEE_BPS: u16 = 500;
+/// Release fee on every rail: 2%.
+pub const DEFAULT_FEE_BPS: u16 = 200;
+/// Release fee for payouts in SKR: 1.5%.
+pub const DEFAULT_FEE_BPS_SKR: u16 = 150;
+/// Share of an SKR fee that is burned: 10%.
+pub const DEFAULT_SKR_BURN_BPS: u16 = 1_000;
 
 pub const SECS_PER_DAY: i64 = 86_400;
 
@@ -40,10 +44,3 @@ pub const MIN_VEST_PERIOD_SECS: i64 = 60;
 /// deposit address's ATA rent plus fees.
 pub const CLOAK_GAS_STIPEND: u64 = 12_000_000;
 pub const ZCASH_GAS_STIPEND: u64 = 3_000_000;
-
-/// Subscription period bounds and the default the app offers (30 days).
-pub const MIN_SUB_PERIOD_SECS: i64 = SECS_PER_DAY;
-pub const MAX_SUB_PERIOD_SECS: i64 = 366 * SECS_PER_DAY;
-pub const DEFAULT_SUB_PERIOD_SECS: i64 = 30 * SECS_PER_DAY;
-/// Most periods one `subscribe` call may buy.
-pub const MAX_SUB_PERIODS: u16 = 36;

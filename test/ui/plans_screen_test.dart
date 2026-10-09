@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
-import 'package:deadman/state/assets.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/screens/plans/plan_card_shell.dart';
 import 'package:deadman/ui/screens/plans_screen.dart';
@@ -61,8 +60,6 @@ Future<_PlansApi> _pump(
   WidgetTester tester,
   List<VaultState> plans, {
   Map<String, Map<String, int>> planTokens = const {},
-  SubscriptionTerms? terms,
-  AccountSubscription? sub,
   bool duress = false,
   List<int> legacy = const [],
   String guard = '',
@@ -86,14 +83,15 @@ Future<_PlansApi> _pump(
         ),
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
         planTokenBalancesProvider.overrideWith((ref) async => planTokens),
-        subscriptionTermsProvider.overrideWith((ref) async => terms),
-        accountSubscriptionProvider.overrideWith((ref) async => sub),
         walletTokenProvider.overrideWith((ref, mint) async => 7000000),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
             feeBpsPublic: 200,
             feeBpsPrivate: 300,
+            skrMint: AppConfig.skrMint,
+            feeBpsSkr: 150,
+            skrBurnBps: 1000,
           ),
         ),
       ],
@@ -312,7 +310,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Deposit USDC'), findsWidgets);
     expect(find.text('7 USDC in your wallet'), findsOneWidget);
-    expect(find.byType(SegmentedButton<AssetInfo>), findsNothing);
+    expect(find.byType(ChoiceChip), findsNothing);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     await _unmount(tester);
@@ -479,7 +477,8 @@ void main() {
     await _unmount(tester);
   });
 
-  testWidgets('Deposit asks for SOL or USDC and rejects zero', (tester) async {
+  testWidgets('Deposit offers SOL, USDC, SKR, ORE, any token or an NFT, and '
+      'rejects zero', (tester) async {
     final now = _nowSecs();
     await _pump(tester, [
       vault(guard: addr(2), lastPulse: now, ownerLastSeen: now),
@@ -487,7 +486,9 @@ void main() {
     await _expandAll(tester);
     await tester.tap(find.text('Deposit'));
     await tester.pumpAndSettle();
-    expect(find.byType(SegmentedButton<AssetInfo>), findsOneWidget);
+    for (final label in ['SOL', 'USDC', 'SKR', 'ORE', 'Other token', 'NFT']) {
+      expect(find.widgetWithText(ChoiceChip, label), findsOneWidget);
+    }
     await tester.enterText(find.byType(TextField), '0');
     await tester.tap(find.text('Confirm'));
     await tester.pump();
@@ -539,57 +540,35 @@ void main() {
     await _unmount(tester);
   });
 
-  group('monthly plan', () {
-    const terms = SubscriptionTerms(
-      pricePerPeriod: 10000000,
-      periodSecs: 30 * 86400,
-      mint: AppConfig.usdcMint,
-      minPeriods: 12,
-    );
-
-    testWidgets('each plan card shows the release fee; one account card '
-        'offers the subscription', (tester) async {
+  group('fees', () {
+    testWidgets('each plan card shows its release fee; one card shows the '
+        'fee model, with no subscription', (tester) async {
       final now = _nowSecs();
       final plan = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
-      await _pump(tester, [plan, vesting], terms: terms);
-      await tester.pump();
-      await _expandAll(tester);
-      expect(find.text('Release fee: 2% (3% private rails)'), findsNWidgets(2));
-      expect(find.textContaining('5%'), findsNothing);
-      expect(find.text('Switch to monthly'), findsNothing);
-      expect(find.text('Not subscribed'), findsOneWidget);
-      expect(find.text('Subscribe'), findsOneWidget);
-      expect(find.text('Extend'), findsNothing);
-      await _unmount(tester);
-    });
-
-    testWidgets('the account subscription covers every plan', (tester) async {
-      final now = _nowSecs();
-      final plan = vault(guard: addr(2), lastPulse: now, ownerLastSeen: now);
-      final until = now + 86400 * 400;
-      await _pump(
-        tester,
-        [plan, vesting],
-        terms: terms,
-        sub: AccountSubscription(owner: addr(1), paidUntil: until),
+      final skrPlan = vault(
+        planId: 2,
+        guard: addr(2),
+        lastPulse: now,
+        ownerLastSeen: now,
+        rules: [rule(mint: AppConfig.skrMint, rail: Rail.cloak)],
       );
+      await _pump(tester, [plan, skrPlan, vesting]);
       await tester.pump();
       await _expandAll(tester);
-      expect(find.text('0% release fee · monthly plan'), findsNWidgets(2));
+      expect(find.text('Release fee: 2%'), findsNWidgets(2));
       expect(
-        find.textContaining('Monthly plan · covers all your plans'),
+        find.text('Release fee: 1.5% · SKR fees 10% burned'),
         findsOneWidget,
       );
-      expect(find.text('Extend'), findsOneWidget);
-      await _unmount(tester);
-    });
-
-    testWidgets('not offered: no fee row on the cards', (tester) async {
-      await _pump(tester, [vesting]);
-      await _expandAll(tester);
-      expect(find.textContaining('Release fee'), findsNothing);
-      expect(find.text('Subscribe'), findsNothing);
-      expect(find.textContaining('Monthly plan'), findsNothing);
+      expect(
+        find.text(
+          '2% (3% private rails) on release · 1.5% for SKR (10% burned) · '
+          'withdrawals free',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Plus'), findsNothing);
+      expect(find.text('Extend'), findsNothing);
       await _unmount(tester);
     });
   });
@@ -732,6 +711,11 @@ void main() {
         ),
         findsOneWidget,
       );
+      expect(
+        find.textContaining('No Deadman fee: cancelling a plan is free.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('0.5%'), findsNothing);
       await _tapText(tester, 'Keep plan');
       expect(api.closed, isEmpty);
 

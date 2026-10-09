@@ -398,18 +398,11 @@ void main() {
       find.text('Send after this long since your last check-in'),
       findsOneWidget,
     );
-    for (final chip in [
-      '1 day',
-      '3 days',
-      '7 days',
-      '14 days',
-      '30 days',
-      '90 days',
-      '180 days',
-      '1 year',
-      'Custom',
-    ]) {
+    for (final chip in ['7 days', '30 days', 'Custom']) {
       expect(find.widgetWithText(ChoiceChip, chip), findsOneWidget);
+    }
+    for (final chip in ['1 day', '14 days', '90 days', '1 year']) {
+      expect(find.widgetWithText(ChoiceChip, chip), findsNothing);
     }
     expect(find.widgetWithText(ChoiceChip, '2 minutes'), findsNothing);
     expect(find.textContaining('sent in order of their wait'), findsOneWidget);
@@ -425,7 +418,7 @@ void main() {
     for (final chip in ['1 minute', '2 minutes', '5 minutes', '10 minutes']) {
       expect(find.widgetWithText(ChoiceChip, chip), findsOneWidget);
     }
-    expect(find.widgetWithText(ChoiceChip, '1 year'), findsNothing);
+    expect(find.widgetWithText(ChoiceChip, '30 days'), findsNothing);
     await _tap(tester, '2 minutes');
     await _tap(tester, 'Done');
     expect(
@@ -454,6 +447,30 @@ void main() {
     );
     await _tap(tester, 'Create plan');
     expect(sent.single.rules.map((r) => r.afterSecs), [120, 300]);
+  });
+
+  testWidgets('Custom: any wait in days, hours or minutes, without demo '
+      'timings', (tester) async {
+    final sent = await _pump(tester, null);
+    await _usdcPayout(tester);
+    await _tap(tester, 'Custom');
+    await tester.enterText(_field('Number'), '90');
+    await tester.pumpAndSettle();
+    await _tap(tester, 'days');
+    await tester.tap(find.text('minutes').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Must be at least 1 minute'), findsNothing);
+    await _tap(tester, 'Done');
+    expect(
+      find.text('Sent 90 minutes after your last check-in'),
+      findsOneWidget,
+    );
+    await _tap(tester, 'Next: fund the plan');
+    await tester.enterText(_field('Put in this plan'), '10');
+    await tester.pumpAndSettle();
+    await _tap(tester, 'Next: review');
+    await _tap(tester, 'Create plan');
+    expect(sent.single.rules.single.afterSecs, 90 * 60);
   });
 
   testWidgets('edit sends only the pending payouts; released ones are '
@@ -578,41 +595,16 @@ void main() {
     expect(sent, hasLength(1));
   });
 
-  testWidgets('an active monthly plan waives the fee on the rail tiles', (
-    tester,
-  ) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final api = FakeApi(const [])
-      ..subscription = AccountSubscription(
-        owner: addr(1),
-        paidUntil: now + 86400,
-      );
+  testWidgets('the rail tiles show the fee of each rail', (tester) async {
     await _pump(
       tester,
       vault(rules: [pending], withdrawableLamports: 1000000000),
-      api: api,
-    );
-    await _tap(tester, 'Everything left of your SOL');
-    expect(find.text('No fee · monthly plan active'), findsNWidgets(3));
-    expect(find.textContaining('(no fee)'), findsOneWidget);
-  });
-
-  testWidgets('a lapsed monthly plan shows the fee', (tester) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final api = FakeApi(const [])
-      ..subscription = AccountSubscription(
-        owner: addr(1),
-        paidUntil: now - 86400,
-      );
-    await _pump(
-      tester,
-      vault(rules: [pending], withdrawableLamports: 1000000000),
-      api: api,
     );
     await _tap(tester, 'Everything left of your SOL');
     expect(find.text('2% fee'), findsOneWidget);
     expect(find.text('3% fee'), findsNWidgets(2));
     expect(find.text('5% fee'), findsNothing);
+    expect(find.textContaining('Plus'), findsNothing);
   });
 
   testWidgets('a claim code picks its private rail', (tester) async {
@@ -842,10 +834,21 @@ void main() {
       expect(railFeeLine(FeeInfo(fees: fees), Rail.solana), '2% fee');
       expect(railFeeLine(FeeInfo(fees: fees), Rail.cloak), '3% fee');
       expect(railFeeLine(FeeInfo(fees: fees), Rail.zcash), '3% fee');
-      expect(
-        railFeeLine(FeeInfo(fees: fees, waived: true), Rail.cloak),
-        'No fee · monthly plan active',
+      final skr = FeeInfo(
+        fees: FeeSchedule(
+          treasury: addr(9),
+          feeBpsPublic: 200,
+          feeBpsPrivate: 300,
+          skrMint: AppConfig.skrMint,
+          feeBpsSkr: 150,
+          skrBurnBps: 1000,
+        ),
       );
+      expect(
+        railFeeLine(skr, Rail.cloak, AppConfig.skrMint),
+        '1.5% fee · 10% burned',
+      );
+      expect(railFeeLine(skr, Rail.cloak, AppConfig.usdcMint), '3% fee');
     });
 
     testWidgets('step sticker is a pixel word that reads "Step n of m"', (

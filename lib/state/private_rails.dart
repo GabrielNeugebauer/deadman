@@ -159,8 +159,10 @@ class TransferHistory extends Notifier<List<PrivateTransfer>> {
 
   SharedPreferences get _prefs => ref.read(prefsProvider);
 
+  /// Empty under duress: the person holding the phone sees no transfers.
   @override
   List<PrivateTransfer> build() {
+    if (ref.watch(sessionProvider.select((s) => s.duress))) return const [];
     final raw = _prefs.getString(key);
     if (raw == null) return const [];
     try {
@@ -184,6 +186,8 @@ class TransferHistory extends Notifier<List<PrivateTransfer>> {
 
   Future<void> _save(List<PrivateTransfer> list) async {
     state = list;
+    // Under duress the list on show is empty; the saved one stays as is.
+    if (ref.read(sessionProvider).duress) return;
     await _prefs.setString(key, jsonEncode([for (final t in list) t.toJson()]));
   }
 
@@ -265,7 +269,7 @@ final claimFundsProvider = FutureProvider.family<ClaimFunds, String>((
   ref,
   address,
 ) async {
-  final api = ref.watch(apiProvider);
+  final api = ref.watch(viewApiProvider);
   final (lamports, usdc) = await (
     api.balance(address),
     api.tokenBalance(address, AppConfig.usdcMint),
@@ -354,8 +358,14 @@ class RailsCheck {
     }
   }
 
+  /// A dry 1Click quote to this device's Zcash receiving address, or to a
+  /// sample one. Under duress it uses the decoy's profile (none until the
+  /// coercer sets one up): the real one is never read or sent.
   Future<String> zcash() async {
-    final profile = await ref.read(secureStoreProvider).loadClaim(Rail.zcash);
+    final decoy = ref.read(decoyWalletProvider);
+    final profile = decoy != null
+        ? decoy.claims[Rail.zcash]
+        : await ref.read(secureStoreProvider).loadClaim(Rail.zcash);
     final own = profile != null && profile.destination.startsWith('u1');
     final refundTo =
         profile?.key.address ?? (await Ed25519HDKeyPair.random()).address;

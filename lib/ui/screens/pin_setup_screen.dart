@@ -59,10 +59,12 @@ class _PinSetupScreenState extends ConsumerState<PinSetupScreen> {
       _Step.duress => (
         'Choose a duress PIN',
         ref.read(isWebProvider)
-            ? 'If someone forces you to open the app, enter this instead. Everything looks normal, '
-                  'but plans guarded by this browser are silently locked while the page stays open. '
-                  'Duress protection is strongest in the Android app.'
-            : 'If someone forces you to open the app, enter this instead. Everything looks normal, but your vault is silently locked down and withdrawals stall.',
+            ? 'If someone forces you to open the app, enter this instead. It opens a decoy wallet '
+                  'whose actions send nothing, and plans guarded by this browser are silently locked '
+                  'while the page stays open. Duress protection is strongest in the Android app.'
+            : 'If someone forces you to open the app, enter this instead. It opens a decoy wallet with '
+                  'made-up plans: anything done there seems to work but sends nothing, while your real '
+                  'vault is silently locked down.',
       ),
     };
     return PinScaffold(

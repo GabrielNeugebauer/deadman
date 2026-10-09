@@ -1,0 +1,5 @@
+{
+  "command": "check",
+  "stderr": "Unsupported spec format: .orig. Only .qedspec files are supported.\nConvert Lean specs to .qedspec format (see examples/).",
+  "timestamp": "2026-10-09T01:15:43.359026270Z"
+}

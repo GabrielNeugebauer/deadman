@@ -216,7 +216,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
       ...deliveryIssues(
         p: scheduleAsPayout(d),
         gross: total,
-        feeBps: fee.bpsFor(_who.rail),
+        feeBps: fee.bpsFor(_who.rail, _mint),
         facts: facts?.value,
       ),
     ]);
@@ -264,6 +264,7 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
                 onChanged: _addressChanged,
                 fee: fee,
                 privateLive: ref.watch(privateRailsLiveProvider),
+                mint: _mint,
                 error: _showErrors ? addressError(_who.value)?.body : null,
                 loading: facts?.isLoading ?? false,
                 notice: warnings
@@ -410,15 +411,14 @@ class _ScheduleEditorState extends ConsumerState<ScheduleEditorPage> {
 
   String _previewLine(ScheduleDraft d, int? total, FeeInfo fee, int period) {
     if (total == null) return 'Enter a total to see what they get.';
-    final (net, _) = splitFee(total, fee.bpsFor(d.rail));
+    final (net, _) = splitFee(total, fee.bpsFor(d.rail, d.mint));
     final n = d.installments(periodSecs: period, startAt: widget.startAt);
     final over =
         '${moneyText(total, d.mint)} to ${d.who} over '
         '${durationLabel(d.durationSecs)}'
         '${n == null ? '' : ' in ${n.count} ${n.count == 1 ? 'installment' : 'installments'}'}';
-    if (fee.waived) return '$over (no fee).';
     if (fee.fees == null) return '$over (before fees).';
-    return '$over (after the ${percentText(fee.fees!.bpsFor(d.rail) / 10000)} '
+    return '$over (after the ${percentText(fee.bpsFor(d.rail, d.mint) / 10000)} '
         'fee: ≈ ${moneyText(net, d.mint)}).';
   }
 }

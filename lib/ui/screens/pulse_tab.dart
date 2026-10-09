@@ -6,14 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
-import '../../state/assets.dart';
 import '../../state/boney.dart';
 import '../../state/boney_widget_sync.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
-import '../../state/subscription.dart';
+import '../../state/protocol_fees.dart';
 import '../format.dart';
 import '../rules_format.dart';
+import '../widgets/boney_skins.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 import '../widgets/pack_icons.dart';
@@ -417,7 +417,7 @@ class _BoneyButton extends StatelessWidget {
             child: SizedBox(
               width: 60,
               height: 56,
-              child: Center(child: BoneyFigure(mood: mood, size: 48)),
+              child: Center(child: SkinnedBoney(mood: mood, size: 48)),
             ),
           ),
         ),
@@ -468,7 +468,7 @@ class _MoodSheet extends StatelessWidget {
           children: [
             Row(
               children: [
-                BoneyFigure(mood: boney.mood, size: 72),
+                SkinnedBoney(mood: boney.mood, size: 72),
                 const SizedBox(width: DMSpace.lg),
                 Expanded(
                   child: Column(
@@ -500,6 +500,8 @@ class _MoodSheet extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: DMSpace.xl),
+            BoneySkinPicker(mood: boney.mood),
             const SizedBox(height: DMSpace.xxl),
             Text('One skull, three moods', style: t.titleLarge),
             const SizedBox(height: DMSpace.xs),
@@ -725,12 +727,8 @@ class _ArmIntro extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = Theme.of(context).textTheme;
     final fees = ref.watch(feesProvider).value;
-    final terms = ref.watch(subscriptionTermsProvider).value;
-    String? fee(Rail r) => fees == null
-        ? null
-        : percentText(
-            (r == Rail.solana ? fees.feeBpsPublic : fees.feeBpsPrivate) / 10000,
-          );
+    String? fee(Rail r) =>
+        fees == null ? null : percentText(fees.bpsFor(r) / 10000);
     return ListView(
       padding: const EdgeInsets.fromLTRB(
         DMSpace.gutter,
@@ -790,14 +788,8 @@ class _ArmIntro extends ConsumerWidget {
         ),
         const SizedBox(height: DMSpace.xl),
         Text(
-          terms == null
-              ? 'No subscription. Deadman only charges when a tier releases '
-                    'funds.'
-              : 'Deadman only charges when a tier releases funds. Or pay a '
-                    'flat ${amountText(terms.pricePerPeriod, terms.mint)} '
-                    '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} '
-                    'for all your plans instead (${terms.minPeriods} '
-                    '${periodWord(terms, terms.minPeriods)} minimum).',
+          'Deadman only charges when a tier releases funds '
+          '(${feeSummaryText(fees)}).',
           textAlign: TextAlign.center,
           style: t.bodySmall?.copyWith(height: 1.45),
         ),

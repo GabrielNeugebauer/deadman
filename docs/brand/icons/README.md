@@ -21,7 +21,7 @@ Always render at whole multiples of 12px (12, 24, 36, 48…) so the pixels stay 
 | shield-z | Zcash |
 | plus | Set up (Cloak, Zcash), New plan |
 | history | Restore receiving profiles from phrase |
-| calendar | Monthly plan |
+| calendar | Fee card, vesting interval |
 | shield-plus | Private rails check |
 | chevron-right | Row navigation |
 | lock | Lock app |

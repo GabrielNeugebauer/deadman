@@ -9,8 +9,10 @@ import '../../solana/deadman_api.dart';
 import '../../state/actions.dart';
 import '../../state/assets.dart';
 import '../../state/fee_settings.dart';
+import '../../state/nfts.dart';
 import '../../state/plan_draft.dart';
 import '../../state/plan_math.dart';
+import '../../state/protocol_fees.dart';
 import '../../state/providers.dart';
 import '../../state/vesting.dart' show isAddress;
 import '../format.dart';
@@ -19,6 +21,7 @@ import '../widgets/brand/brand.dart';
 import '../widgets/editor/fund_asset_card.dart';
 import '../widgets/editor/plan_steps.dart';
 import '../widgets/feedback.dart';
+import '../widgets/nft.dart';
 import 'plan_editor/editor_providers.dart';
 import 'plan_editor/payout_editor.dart';
 
@@ -371,6 +374,10 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   }
 
   _Model _model() {
+    watchNftNames(ref, [
+      for (final p in _payouts) p.mint,
+      for (final r in _history) r.mint,
+    ]);
     final fee = watchFeeInfo(ref);
     final reserve = _creating ? watchFeeReserve(ref) : 0;
     final owner = ref.watch(sessionProvider.select((s) => s.owner));
@@ -685,6 +692,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   /// plan holds 12 USDC" (the deposit, or the same example as the editor).
   String? _approx(_Model m, int i) {
     final mint = _payouts[i].mint;
+    if (isNft(mint)) return null;
     if (_creating) {
       final net = m.basisPreview.amounts[i].net;
       final basis = _basisFor(mint, _payouts);
@@ -836,6 +844,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       return 'Private token payouts need ${moneyText(stipend, null)} of SOL '
           'to move them.';
     }
+    if (isNft(mint)) {
+      return a.order.length == 1
+          ? 'Payout ${_number(a.order.single)} sends this NFT.'
+          : 'Only one payout can receive it: the first to run.';
+    }
     final sum = moneyText(a.fixedSum, mint);
     if (!a.hasShares) return 'Your payouts add up to $sum.';
     if (a.fixedSum == 0) {
@@ -844,7 +857,9 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     return 'Fixed payouts need $sum; shares pay from the rest.';
   }
 
-  String _shortAmount(PayoutDraft p) => p.mode == AmountMode.fixed
+  String _shortAmount(PayoutDraft p) => p.nft
+      ? 'The NFT'
+      : p.mode == AmountMode.fixed
       ? moneyText(p.fixedAmount ?? 0, p.mint)
       : p.takesAll
       ? 'Everything left'
@@ -914,6 +929,8 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
                       ? '?'
                       : m.preview.amounts[i].net == 0
                       ? 'nothing'
+                      : isNft(mint)
+                      ? 'sent whole'
                       : '≈ ${moneyText(m.preview.amounts[i].net!, mint)}'}',
               issue: worstOf(
                 m.payoutIssues[i].where((x) => x.severity != Severity.error),
@@ -980,6 +997,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       const SizedBox(height: DMSpace.md),
       for (final (i, p) in _payouts.indexed)
         _ReviewPayout(
+          mint: p.mint,
           number: _number(i),
           when: payoutWhen(p.afterSecs),
           sentence: payoutSentence(
@@ -1040,13 +1058,9 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
             ),
           CostRow(
             'Release fee',
-            fee.waived
-                ? 'None: monthly plan active'
-                : fee.fees == null
+            fee.fees == null
                 ? 'fee loading…'
-                : '${percentText(fee.fees!.feeBpsPublic / 10000)} of each normal '
-                      'payout, ${percentText(fee.fees!.feeBpsPrivate / 10000)} of '
-                      'each private one, taken when it runs.'
+                : '${releaseFeeTerms(fee.fees!, 'payout')}'
                       '${feeSums.isEmpty ? '' : ' If every payout runs: ≈ ${feeSums.join(' · ')}.'}',
           ),
           if (_creating) ...[
@@ -1183,9 +1197,13 @@ class _PayoutSummaryCard extends StatelessWidget {
             const SizedBox(height: DMSpace.xxs),
             Padding(
               padding: const EdgeInsets.only(right: DMSpace.sm),
-              child: Text(
-                payoutAmountLabel(p),
-                style: DMType.outfit(size: 15, color: DM.bone, height: 1.35),
+              child: WithNftThumb(
+                mint: p.mint,
+                size: 24,
+                child: Text(
+                  payoutAmountLabel(p),
+                  style: DMType.outfit(size: 15, color: DM.bone, height: 1.35),
+                ),
               ),
             ),
             if (approx != null) Text(approx!, style: DMType.data(size: 12.5)),
@@ -1266,6 +1284,7 @@ class _HistoryPayoutCard extends StatelessWidget {
 /// One numbered payout sentence in Review.
 class _ReviewPayout extends StatelessWidget {
   const _ReviewPayout({
+    required this.mint,
     required this.number,
     required this.when,
     required this.sentence,
@@ -1273,6 +1292,7 @@ class _ReviewPayout extends StatelessWidget {
     required this.onEdit,
   });
 
+  final String? mint;
   final int number;
   final String when;
   final String sentence;
@@ -1299,7 +1319,14 @@ class _ReviewPayout extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: DMSpace.xxs),
-              Text(sentence, style: DMType.outfit(size: 15.5, height: 1.45)),
+              WithNftThumb(
+                mint: mint,
+                size: 28,
+                child: Text(
+                  sentence,
+                  style: DMType.outfit(size: 15.5, height: 1.45),
+                ),
+              ),
               if (onEdit != null)
                 Align(
                   alignment: Alignment.centerLeft,

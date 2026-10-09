@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import '../../../state/boney.dart';
+import '../../../state/boney_skin.dart';
 import '../../theme/tokens.dart';
+import 'boney_skin_art.dart';
 import 'boney_sprites.g.dart';
 import 'pixel_art.dart';
 
@@ -51,6 +53,9 @@ extension BoneyMoodUi on BoneyMood {
 /// up, wink) and goes back to it. He stands still when [animate] is false,
 /// under reduced motion (`MediaQuery.disableAnimations`) and when tickers
 /// are muted (`TickerMode`).
+///
+/// [skin] is drawn over him in the same colour, following his head through
+/// every pose; the released ghost wears none.
 class BoneyFigure extends StatefulWidget {
   const BoneyFigure({
     super.key,
@@ -59,9 +64,11 @@ class BoneyFigure extends StatefulWidget {
     this.animate = true,
     this.rest = const Duration(seconds: 4),
     this.semanticLabel,
+    this.skin,
   });
 
   final BoneyMood mood;
+  final BoneySkin? skin;
 
   /// Target height of the 26x24 drawing; the cell snaps down to whole
   /// device pixels.
@@ -167,27 +174,43 @@ class _BoneyFigureState extends State<BoneyFigure> {
     final layers = mood.pose.layers;
     final cell = PixelArt.cellFor(layers.first.sprite, widget.size, dpr);
     final color = mood.status.color;
-    final art = frame == null
-        ? Stack(
-            children: [
-              for (final (i, l) in layers.indexed)
-                PixelArt(
-                  l.sprite,
-                  cell: cell,
-                  // Boney is the status colour; extras (sweat, the
-                  // tombstone) keep their own.
-                  color: i == 0 ? color : Color(l.argb),
-                ),
-            ],
-          )
-        : PixelArt(boneyIdle[frame].sprite, cell: cell, color: color);
+    final body = frame == null ? layers.first.sprite : boneyIdle[frame].sprite;
+    final skin = mood == BoneyMood.released ? null : widget.skin?.art;
+    final (sx, sy) = skin == null ? (0, 0) : skullShift(body);
+    Widget wear(PixelSprite sprite, Color color) => Transform.translate(
+      offset: Offset(sx * cell, sy * cell),
+      child: PixelArt(sprite, cell: cell, color: color),
+    );
+    final art = Stack(
+      clipBehavior: Clip.none,
+      children: [
+        if (frame == null)
+          for (final (i, l) in layers.indexed)
+            PixelArt(
+              l.sprite,
+              cell: cell,
+              // Boney is the status colour; extras (sweat, the
+              // tombstone) keep their own.
+              color: i == 0 ? color : Color(l.argb),
+            )
+        else
+          PixelArt(body, cell: cell, color: color),
+        if (skin != null) ...[
+          if (skin.shade case final shade?) wear(shade, DM.void_),
+          wear(skin.ink, color),
+        ],
+      ],
+    );
     // Centre Boney himself, not the 26x24 grid: his hearts, "?" and "z"
     // only grow to one side. Snapped to device pixels to stay crisp.
     final (cx, cy) = _bodyOffset(mood);
     double snap(double cells) => (cells * cell * dpr).roundToDouble() / dpr;
     final label = widget.semanticLabel;
     final figure = KeyedSubtree(
-      key: ValueKey('boney-${mood.wire}${frame == null ? '' : '-idle-$frame'}'),
+      key: ValueKey(
+        'boney-${mood.wire}${frame == null ? '' : '-idle-$frame'}'
+        '${skin == null ? '' : '-${widget.skin!.id}'}',
+      ),
       child: Transform.translate(
         offset: Offset(snap(cx), snap(cy)),
         child: art,

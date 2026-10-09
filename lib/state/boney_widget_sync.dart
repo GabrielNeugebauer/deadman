@@ -2,7 +2,8 @@
 /// runs the widget's one-tap check-in in the background.
 ///
 /// The widget reads the `boney_*` keys (see [Boney.toWidgetData]) plus
-/// `boney_updated_at` (unix seconds of the last push). Between pushes it
+/// `boney_updated_at` (unix seconds of the last push) and `boney_skin`
+/// (the [BoneySkin] id Boney wears, '' for none). Between pushes it
 /// moves on its own from `boney_due_at`: check in soon in the last hour,
 /// due once it passes, on track five minutes after a check-in.
 library;
@@ -13,6 +14,7 @@ import 'package:solana/solana.dart';
 import '../solana/deadman_api.dart';
 import '../solana/deadman_client.dart';
 import 'boney.dart';
+import 'boney_skin.dart';
 import 'lockdown_retry.dart';
 import 'plan_math.dart';
 import 'reminders_stub.dart' if (dart.library.io) 'reminders.dart';
@@ -65,10 +67,12 @@ class BoneyWidgetSync {
   /// Pushes [boney] and redraws the widget. `boney_updated_at` is when the
   /// state began ([since], else now): the widget times "checked in" and
   /// "checking" from it, so a re-push never stretches the celebration.
-  Future<void> push(Boney boney, {int? since}) async {
+  /// [skin] (an id, '' for none) is sent when given.
+  Future<void> push(Boney boney, {int? since, String? skin}) async {
     await host.save({
       ...boney.toWidgetData(),
       'boney_updated_at': since ?? _clock(),
+      boneySkinKey: ?skin,
     });
     await host.update();
   }
@@ -91,6 +95,7 @@ class BoneyWidgetSync {
     await push(
       boney,
       since: boney.mood == BoneyMood.checkedIn ? checkedInAt : null,
+      skin: BoneySkin.byId(prefs.getString(boneySkinKey))?.id ?? '',
     );
     return boney;
   }

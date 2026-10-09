@@ -1,5 +1,7 @@
 # Plan editor redesign (inheritance + vesting)
 
+> **Historical on fees (2026-10-08):** the subscription ("monthly plan", fee waiver) is gone. Every payout pays the release fee: 2% on every rail, 1.5% for payouts in SKR with 10% of that fee burned. Ignore every "No fee: monthly plan active" or waiver state below.
+
 Status: spec, ready to implement · 2026-10-04 · replaces the single-page editors in
 `lib/ui/screens/rules_editor.dart` and `lib/ui/screens/vesting_editor.dart`.
 
