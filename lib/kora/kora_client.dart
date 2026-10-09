@@ -63,7 +63,7 @@ class KoraClient {
     this.hmacSecret = '',
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 90),
-    this.quickTimeout = const Duration(seconds: 8),
+    this.quickTimeout = const Duration(seconds: 2),
   }) : _http = httpClient ?? http.Client();
 
   /// Null when [url] is empty, i.e. Kora is not configured for this build.
