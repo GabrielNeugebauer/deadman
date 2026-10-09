@@ -1,0 +1,8 @@
+[fuzz.metrics]
+enabled = true
+
+[[fuzz.programs]]
+address = "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL"
+# Fixed fuzz admin ([7u8; 32]) so init_config's upgrade-authority gate passes.
+upgrade_authority = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+program = "../target/deploy/deadman.so"

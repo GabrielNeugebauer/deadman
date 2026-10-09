@@ -754,10 +754,10 @@ String railShort(Rail r) => switch (r) {
   Rail.zcash => 'Zcash',
 };
 
-/// The fee line of a rail card, from the on-chain FeeSchedule: "2% fee",
-/// "3% fee", or "No fee · monthly plan active".
-String railFeeLine(FeeInfo fee, Rail rail) =>
-    fee.waived ? 'No fee · monthly plan active' : fee.railLine(rail);
+/// The fee line of a rail card for a payout of [mint], from the on-chain
+/// FeeSchedule: "2% fee", or "1.5% fee · 10% burned" for SKR.
+String railFeeLine(FeeInfo fee, Rail rail, [String? mint]) =>
+    fee.railLine(rail, mint);
 
 /// One radio card of the rail picker ("How it arrives"): the rail's icon,
 /// name, what it means and its fee in mono.

@@ -55,6 +55,7 @@ class RecipientSection extends StatelessWidget {
     required this.onChanged,
     required this.fee,
     required this.privateLive,
+    this.mint,
     this.error,
     this.loading = false,
     this.notice,
@@ -66,6 +67,9 @@ class RecipientSection extends StatelessWidget {
   final VoidCallback onChanged;
   final FeeInfo fee;
   final bool privateLive;
+
+  /// Asset paid (null = SOL): SKR pays its own fee on every rail.
+  final String? mint;
   final String? error;
 
   /// Beneficiary facts are loading.
@@ -180,7 +184,7 @@ class RecipientSection extends StatelessWidget {
           RailOptionTile(
             rail: rail,
             selected: r.rail == rail,
-            feeLine: railFeeLine(fee, rail),
+            feeLine: railFeeLine(fee, rail, mint),
             badge: rail != Rail.solana && !privateLive ? 'mainnet only' : null,
             onTap: () {
               r.rail = rail;

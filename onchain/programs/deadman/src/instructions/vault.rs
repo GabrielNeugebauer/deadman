@@ -1,4 +1,5 @@
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*, system_program};
+use anchor_spl::token;
 
 use crate::{
     constants::*,
@@ -6,6 +7,26 @@ use crate::{
     events::*,
     state::{PlanKind, RuleInput, Vault, VestingInput},
 };
+
+/// Every token mint a plan names must be passed in `remaining` (any order)
+/// and be an initialised classic SPL Token mint. Token-2022 mints are
+/// refused: their extensions (permanent delegate, transfer fees, hooks,
+/// pausing) could take or block what the plan owes its beneficiaries.
+fn require_classic_mints(
+    mints: impl Iterator<Item = Pubkey>,
+    remaining: &[AccountInfo],
+) -> Result<()> {
+    for mint in mints {
+        let info = remaining
+            .iter()
+            .find(|a| a.key() == mint)
+            .ok_or(DeadmanError::UnsupportedMint)?;
+        require!(info.owner == &token::ID, DeadmanError::UnsupportedMint);
+        token::Mint::try_deserialize(&mut &info.try_borrow_data()?[..])
+            .map_err(|_| error!(DeadmanError::UnsupportedMint))?;
+    }
+    Ok(())
+}
 
 #[derive(Accounts)]
 #[instruction(plan_id: u16)]
@@ -15,20 +36,87 @@ pub struct CreateVault<'info> {
     /// that charges the owner in USDC instead.
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK: the new plan's address, created in [`create_vault_account`].
     #[account(
-        init,
-        payer = payer,
-        space = Vault::SPACE,
+        mut,
         seeds = [VAULT_SEED, owner.key().as_ref(), &plan_id.to_le_bytes()],
         bump
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
-/// Rent deposited by `init` for the account's actual size.
-fn init_rent(vault: &Account<Vault>) -> Result<u64> {
-    Ok(Rent::get()?.minimum_balance(vault.to_account_info().data_len()))
+/// Creates the plan account and returns the rent the payer deposited:
+/// the rent minimum less whatever the address already held, so a sponsor
+/// is never refunded lamports someone else sent there.
+fn create_vault_account(a: &CreateVault, plan_id: u16, bump: u8) -> Result<u64> {
+    let vault = a.vault.to_account_info();
+    require!(
+        vault.owner == &System::id() && vault.data_is_empty(),
+        ErrorCode::AccountNotSystemOwned
+    );
+    let owner = a.owner.key();
+    let plan_id = plan_id.to_le_bytes();
+    let seeds: &[&[u8]] = &[VAULT_SEED, owner.as_ref(), &plan_id, &[bump]];
+    let space = u64::try_from(Vault::SPACE).map_err(|_| DeadmanError::MathOverflow)?;
+    let rent = Rent::get()?.minimum_balance(Vault::SPACE);
+    let held = vault.lamports();
+    let deposit = rent.saturating_sub(held);
+    let system = a.system_program.key();
+    if held == 0 {
+        system_program::create_account(
+            CpiContext::new_with_signer(
+                system,
+                system_program::CreateAccount {
+                    from: a.payer.to_account_info(),
+                    to: vault,
+                },
+                &[seeds],
+            ),
+            rent,
+            space,
+            &crate::ID,
+        )?;
+        return Ok(deposit);
+    }
+    if deposit > 0 {
+        system_program::transfer(
+            CpiContext::new(
+                system,
+                system_program::Transfer {
+                    from: a.payer.to_account_info(),
+                    to: vault.clone(),
+                },
+            ),
+            deposit,
+        )?;
+    }
+    system_program::allocate(
+        CpiContext::new_with_signer(
+            system,
+            system_program::Allocate {
+                account_to_allocate: vault.clone(),
+            },
+            &[seeds],
+        ),
+        space,
+    )?;
+    system_program::assign(
+        CpiContext::new_with_signer(
+            system,
+            system_program::Assign {
+                account_to_assign: vault,
+            },
+            &[seeds],
+        ),
+        &crate::ID,
+    )?;
+    Ok(deposit)
+}
+
+fn write_vault(info: &AccountInfo, vault: &Vault) -> Result<()> {
+    let mut data = info.try_borrow_mut_data()?;
+    vault.try_serialize(&mut &mut data[..])
 }
 
 pub fn handle_create_plan(
@@ -45,22 +133,26 @@ pub fn handle_create_plan(
         guard != Pubkey::default() && guard != owner,
         DeadmanError::InvalidGuard
     );
+    require_classic_mints(rules.iter().filter_map(|r| r.mint), ctx.remaining_accounts)?;
     let now = Clock::get()?.unix_timestamp;
-    let vault = &mut ctx.accounts.vault;
-    vault.owner = owner;
-    vault.plan_id = plan_id;
-    vault.guard = guard;
-    vault.bump = ctx.bumps.vault;
-    vault.kind = PlanKind::Inheritance;
-    vault.rent_payer = ctx.accounts.payer.key();
-    vault.rent_paid = init_rent(vault)?;
+    let rent_paid = create_vault_account(ctx.accounts, plan_id, ctx.bumps.vault)?;
+    let mut vault = Vault::new(
+        owner,
+        plan_id,
+        guard,
+        PlanKind::Inheritance,
+        ctx.accounts.payer.key(),
+        rent_paid,
+        ctx.bumps.vault,
+    );
     vault.set_label(label)?;
-    let key = vault.key();
+    let key = ctx.accounts.vault.key();
     vault.apply_policy(&key, lock_secs, skip_grace_secs, &rules, None)?;
     vault.record_owner_pulse(now)?;
+    write_vault(&ctx.accounts.vault, &vault)?;
 
     emit!(VaultCreated {
-        vault: vault.key(),
+        vault: key,
         owner,
         plan_id,
         rules: vault.rules.len() as u8,
@@ -98,6 +190,7 @@ pub fn handle_update_plan(
     vault.require_kind(PlanKind::Inheritance)?;
     vault.require_unlocked(now)?;
     require!(!vault.is_completed(), DeadmanError::PlanCompleted);
+    require_classic_mints(rules.iter().filter_map(|r| r.mint), ctx.remaining_accounts)?;
     vault.set_label(label)?;
     let key = vault.key();
     vault.apply_policy(&key, lock_secs, skip_grace_secs, &rules, guardian)?;
@@ -177,25 +270,29 @@ pub struct Lockdown<'info> {
 /// Duress / panic: freezes withdrawals and policy changes for `lock_secs`.
 /// Does not reset the switch, so inheritance keeps working.
 ///
-/// A guardian lockdown is rate-limited: after it expires the owner gets an
-/// unlocked window of `lock_secs` to remove a rogue guardian.
+/// A guardian lockdown is rate-limited: after any lockdown expires the
+/// owner gets an unlocked window of `lock_secs` to remove a rogue guardian,
+/// so a later guard lockdown cannot shrink that window.
 pub fn handle_lockdown(ctx: Context<Lockdown>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let signer = ctx.accounts.signer.key();
     let vault = &mut ctx.accounts.vault;
-    let until = now
-        .checked_add(vault.lock_secs)
-        .ok_or(DeadmanError::MathOverflow)?;
-    vault.locked_until = vault.locked_until.max(until);
     if signer != vault.owner && signer != vault.guard {
         require!(
             now >= vault.guardian_ready_at,
             DeadmanError::GuardianCooldown
         );
-        vault.guardian_ready_at = vault
+    }
+    let until = now
+        .checked_add(vault.lock_secs)
+        .ok_or(DeadmanError::MathOverflow)?;
+    vault.locked_until = vault.locked_until.max(until);
+    if vault.guardian.is_some() {
+        let ready = vault
             .locked_until
             .checked_add(vault.lock_secs)
             .ok_or(DeadmanError::MathOverflow)?;
+        vault.guardian_ready_at = vault.guardian_ready_at.max(ready);
     }
     emit!(LockedDown {
         vault: vault.key(),
@@ -257,12 +354,13 @@ pub struct CloseVault<'info> {
 
 /// The rent payer (the owner, or a fee sponsor) gets back exactly the rent
 /// it deposited and the owner everything else, even if the rent sysvar
-/// changed since. Vesting plans close only once nothing is owed to their
-/// beneficiaries.
+/// changed since. Plans close only once nothing is owed: every vesting
+/// schedule released, and no skipped tier still holds a reserved share.
 pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let vault = &ctx.accounts.vault;
     vault.require_unlocked(now)?;
+    require!(!vault.has_pending_reserve(), DeadmanError::FundsCommitted);
     if vault.kind == PlanKind::Vesting {
         for (i, r) in vault.rules.iter().enumerate() {
             require!(
@@ -307,21 +405,28 @@ pub fn handle_create_vesting(
         (MIN_LOCK_SECS..=MAX_LOCK_SECS).contains(&lock_secs),
         DeadmanError::InvalidDuration
     );
+    require_classic_mints(
+        schedules.iter().filter_map(|v| v.mint),
+        ctx.remaining_accounts,
+    )?;
     let now = Clock::get()?.unix_timestamp;
-    let vault = &mut ctx.accounts.vault;
-    vault.owner = owner;
-    vault.plan_id = plan_id;
-    vault.guard = guard;
-    vault.bump = ctx.bumps.vault;
-    vault.kind = PlanKind::Vesting;
+    let rent_paid = create_vault_account(ctx.accounts, plan_id, ctx.bumps.vault)?;
+    let mut vault = Vault::new(
+        owner,
+        plan_id,
+        guard,
+        PlanKind::Vesting,
+        ctx.accounts.payer.key(),
+        rent_paid,
+        ctx.bumps.vault,
+    );
     vault.revocable = revocable;
     vault.lock_secs = lock_secs;
-    vault.rent_payer = ctx.accounts.payer.key();
-    vault.rent_paid = init_rent(vault)?;
     vault.set_label(label)?;
-    let key = vault.key();
+    let key = ctx.accounts.vault.key();
     vault.apply_vesting(&key, now, start_at, period_secs, &schedules)?;
     vault.record_owner_pulse(now)?;
+    write_vault(&ctx.accounts.vault, &vault)?;
     emit!(VaultCreated {
         vault: key,
         owner,

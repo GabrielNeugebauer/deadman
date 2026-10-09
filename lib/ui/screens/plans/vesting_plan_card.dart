@@ -116,7 +116,8 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
           'Vesting stops now for every schedule. '
           '${vested.isEmpty ? 'Nothing vested is waiting to be released, so the beneficiaries get nothing more.' : 'What has already vested ($vested) stays with the beneficiaries and can still be released to them.'} '
           'Everything else becomes yours to withdraw, and you can close the '
-          "plan once nothing is owed. This can't be undone.",
+          "plan once nothing is owed. This can't be undone.\n\n"
+          '$closeFreeNote',
       confirm: 'Cancel plan',
     );
     if (!ok || !mounted) return;
@@ -134,11 +135,16 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     final usdc = ref.watch(planUsdcProvider(v.address)).value;
     final released = planReleased(v);
     final mints = <String?>{for (final r in v.rules) r.mint};
+    final tokens = <String, int>{
+      for (final m in mints.nonNulls)
+        if (m != AppConfig.usdcMint)
+          m: ?ref.watch(planTokenProvider((vault: v.address, mint: m))).value,
+    };
     int? balanceOf(String? mint) => mint == null
         ? v.withdrawableLamports
         : mint == AppConfig.usdcMint
         ? usdc
-        : null;
+        : tokens[mint];
     final committed = [
       for (final m in mints)
         if (v.committed(m) > 0) amountText(v.committed(m), m),
@@ -150,7 +156,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     ];
     final revoked = v.revokedAt != 0;
     final settled = vestingSettled(v);
-    final held = <String, int>{AppConfig.usdcMint: ?usdc};
+    final held = <String, int>{AppConfig.usdcMint: ?usdc, ...tokens};
     final leftovers = holdingsText(v, held);
     final (next, nextColor) = vestingNext(v, now);
     const button = Size.fromHeight(48);
@@ -159,6 +165,8 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
       null: uncommitted(v, null, v.withdrawableLamports),
       if (usdc != null)
         AppConfig.usdcMint: uncommitted(v, AppConfig.usdcMint, usdc),
+      for (final MapEntry(:key, :value) in tokens.entries)
+        key: uncommitted(v, key, value),
     });
     void close() =>
         closePlanFlow(context, ref, v, cancel: false, held: held, now: now);
@@ -183,7 +191,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
       ];
     } else {
       footer = [
-        PlanFeeLine(vault: v, now: now),
+        PlanFeeLine(vault: v),
         const SizedBox(height: DMSpace.lg),
         Row(
           children: [
@@ -250,9 +258,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
           : const Sticker('Vesting'),
       summary: released
           ? (leftovers.isEmpty ? 'Nothing left in the plan' : '$leftovers left')
-          : '${sol(v.withdrawableLamports)} SOL'
-                '${usdc == null ? '' : ' · ${amountText(usdc, AppConfig.usdcMint)}'}'
-                ' in plan',
+          : '${balancesText(v, held)} in plan',
       next: next,
       nextColor: nextColor,
       body: Column(

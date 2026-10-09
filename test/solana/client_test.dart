@@ -320,6 +320,52 @@ void main() {
       expect(ixs[1].data.toList().sublist(8, 10), [0, 0]);
     });
 
+    test('names each rule mint once as a read-only remaining account; a '
+        'Token-2022 mint is refused before signing', () async {
+      final ixs = instructions(
+        await client.buildCreateVault(
+          owner: owner,
+          planId: 0,
+          label: 'Kids',
+          guard: guard,
+          lockSecs: 3600,
+          skipGraceSecs: grace,
+          rules: [
+            rule(to: alice),
+            rule(to: bob, mint: usdc),
+            rule(to: alice, mint: usdc, afterSecs: 172801),
+          ],
+        ),
+      );
+      final create = ixs.firstWhere(
+        (ix) => hasDiscriminator(ix.data.toList(), Disc.createPlan),
+      );
+      expect(create.accounts, hasLength(5));
+      expect(create.accounts[4].pubKey.toBase58(), usdc);
+      expect(create.accounts[4].isWriteable, isFalse);
+
+      final t22 = key(31);
+      rpc.accounts[t22] = FakeAccount(token2022ProgramId, mintBytes(6));
+      await expectLater(
+        client.buildCreateVault(
+          owner: owner,
+          planId: 0,
+          label: 'Kids',
+          guard: guard,
+          lockSecs: 3600,
+          skipGraceSecs: grace,
+          rules: [rule(to: bob, mint: t22)],
+        ),
+        throwsA(
+          isA<DeadmanException>().having(
+            (e) => e.message,
+            'message',
+            contains('Token-2022'),
+          ),
+        ),
+      );
+    });
+
     test('without Kora the owner is the rent payer and fee payer', () async {
       final tx = await client.buildCreateVault(
         owner: owner,
@@ -361,6 +407,11 @@ void main() {
         'empty deposits dropped', () async {
       final other = key(40);
       rpc.accounts[other] = FakeAccount(tokenProgramId, mintBytes(0));
+      // A 0-decimal deposit (NFT-like) is checked against the owner's ATA.
+      rpc.accounts[ataAddress(owner, other)] = FakeAccount(
+        tokenProgramId,
+        tokenAccountBytes(mint: other, owner: owner, amount: 7),
+      );
       final ixs = instructions(
         await client.buildCreateVault(
           owner: owner,
@@ -652,9 +703,10 @@ void main() {
     );
     final exec = msg.instructions[2];
     expect(exec.data.toList(), [...Disc.executeTokenRule, 1]);
-    expect(exec.accounts, hasLength(10));
+    expect(exec.accounts, hasLength(9));
+    expect(exec.accounts[3].isWriteable, isTrue, reason: 'mint, for burns');
     expect(exec.accounts[6].pubKey.toBase58(), ataAddress(bob, usdc));
-    expect(exec.accounts[9].pubKey.toBase58(), subPda(owner).address);
+    expect(exec.accounts[7].pubKey.toBase58(), ataAddress(treasury, usdc));
     expect(
       exec.accounts.map((a) => a.pubKey.toBase58()),
       isNot(anyOf(contains(ataProgramId), contains(systemProgramId))),
@@ -737,7 +789,6 @@ void main() {
       configPda().address,
       alice,
       treasury,
-      subPda(owner).address,
     ]);
   });
 
@@ -813,6 +864,23 @@ void main() {
       isA<DeadmanException>()
           .having((e) => e.code, 'code', c)
           .having((e) => e.name, 'name', code(c).name),
+    );
+
+    test(
+      'names the new rules\' mints as read-only remaining accounts',
+      () async {
+        final ix = instructions(await update([rule(to: bob, mint: usdc)]))
+            .single;
+        expect(ix.accounts.map((a) => (a.pubKey.toBase58(), a.isWriteable)), [
+          (owner, true),
+          (vault, true),
+          (usdc, false),
+        ]);
+        expect(
+          instructions(await update([rule(to: bob)])).single.accounts,
+          hasLength(2),
+        );
+      },
     );
 
     test('encodes the grace period after the lock duration', () async {
@@ -1511,7 +1579,8 @@ void main() {
         (owner, true, true),
         (v, true, false),
         (systemProgramId, false, false),
-      ]);
+        (usdc, false, false),
+      ], reason: 'the schedule mint, for the SPL Token check');
       expect(ixs[2].programId.toBase58(), systemProgramId);
       expect(ixs[2].accounts[1].pubKey.toBase58(), v);
       expect(ixs[2].data.toList().sublist(4), le(8, 5000));
@@ -1670,14 +1739,7 @@ void main() {
       );
       final ix = instructions(tx).single;
       expect(ix.data.toList(), [...Disc.releaseVestedSol, 0]);
-      expect(addrs(ix), [
-        executor,
-        v,
-        configPda().address,
-        alice,
-        treasury,
-        subPda(owner).address,
-      ]);
+      expect(addrs(ix), [executor, v, configPda().address, alice, treasury]);
     });
 
     test(
@@ -1716,7 +1778,6 @@ void main() {
           ataAddress(bob, usdc),
           ataAddress(treasury, usdc),
           tokenProgramId,
-          subPda(owner).address,
         ]);
       },
     );
@@ -2518,7 +2579,6 @@ void main() {
         configPda().address,
         heir.address,
         treasury,
-        subPda(owner).address,
       ]);
       expect(addrs(ix), isNot(contains(sponsorNode.signer)));
 
@@ -2828,300 +2888,161 @@ void main() {
     });
   });
 
-  group('account subscription', () {
-    const price = 5000000;
-    const lastPulse = 1790000000;
-    final subAddr = subPda(owner).address;
-
-    Matcher throwsSub(String name, Pattern words, {int? code}) => throwsA(
-      isA<DeadmanException>()
-          .having((e) => e.name, 'name', name)
-          .having((e) => e.code, 'code', code ?? anything)
-          .having((e) => e.message, 'message', contains(words)),
-    );
-
-    void subscribed(String of, int paidUntil) =>
-        rpc.accounts[subPda(of).address] = FakeAccount(
-          AppConfig.programId,
-          subscriptionBytes(owner: of, paidUntil: paidUntil),
-        );
-
-    void terms({bool enabled = true}) =>
-        rpc.accounts[subConfigPda().address] = FakeAccount(
-          AppConfig.programId,
-          subConfigBytes(mint: usdc, pricePerPeriod: price, enabled: enabled),
-        );
-
-    Future<Uint8List> subscribe(int periods, {DeadmanClient? via}) =>
-        (via ?? client).buildSubscribe(owner: owner, periods: periods);
+  group('fee model', () {
+    final skr = AppConfig.skrMint;
+    final nft = key(30);
 
     setUp(() {
-      terms();
-      addTokens(treasury, usdc, 0);
-      addTokens(owner, usdc, 200 * 1000000);
+      rpc.accounts
+        ..[configPda().address] = FakeAccount(
+          AppConfig.programId,
+          configBytes(
+            admin: owner,
+            treasury: treasury,
+            feeBpsPrivate: 200,
+            skrMint: skr,
+          ),
+        )
+        ..[skr] = FakeAccount(tokenProgramId, mintBytes(6))
+        ..[nft] = FakeAccount(tokenProgramId, mintBytes(0));
     });
 
-    test('fetchSubscriptionTerms: the config, or null when absent or '
-        'disabled', () async {
-      final t = await client.fetchSubscriptionTerms();
-      expect(t!.pricePerPeriod, price);
-      expect(t.periodSecs, 30 * 86400);
-      expect(t.mint, usdc);
-      expect(t.minPeriods, 12);
-      terms(enabled: false);
-      expect(await client.fetchSubscriptionTerms(), isNull);
-      rpc.accounts.remove(subConfigPda().address);
-      expect(await client.fetchSubscriptionTerms(), isNull);
-      rpc.accounts[subConfigPda().address] = FakeAccount(
-        systemProgramId,
-        subConfigBytes(mint: usdc),
-      );
-      expect(
-        await client.fetchSubscriptionTerms(),
-        isNull,
-        reason: 'not owned by the program',
-      );
+    void addTokens(String holder, String mint, int amount) =>
+        rpc.accounts[ataAddress(holder, mint)] = FakeAccount(
+          tokenProgramId,
+          tokenAccountBytes(mint: mint, owner: holder, amount: amount),
+        );
+
+    RuleState fixed(String to, String mint, int amount) => RuleState(
+      beneficiary: to,
+      rail: Rail.solana,
+      afterSecs: 172800,
+      mint: mint,
+      mode: AmountMode.fixed,
+      amount: amount,
+      executedAt: 0,
+      paid: 0,
+    );
+
+    test('fetchFees reads the SKR rate and burn share', () async {
+      final fees = await client.fetchFees();
+      expect(fees.feeBpsPublic, 200);
+      expect(fees.feeBpsPrivate, 200);
+      expect(fees.skrMint, skr);
+      expect(fees.feeBpsSkr, 150);
+      expect(fees.skrBurnBps, 1000);
     });
 
-    test('fetchSubscription reads the owner PDA; null when never created or '
-        'not a Subscription of that owner', () async {
-      expect(await client.fetchSubscription(owner), isNull);
-      subscribed(owner, now + 5);
-      final s = await client.fetchSubscription(owner);
-      expect(s!.owner, owner);
-      expect(s.paidUntil, now + 5);
-      expect(s.active(now), isTrue);
-      // SOL sent to the address does not create the account.
-      rpc.accounts[subAddr] = FakeAccount(
-        systemProgramId,
-        const [],
-        lamports: 1000000,
-      );
-      expect(await client.fetchSubscription(owner), isNull);
-      rpc.accounts[subAddr] = FakeAccount(
-        AppConfig.programId,
-        subscriptionBytes(owner: alice, paidUntil: now + 5),
-      );
-      expect(await client.fetchSubscription(owner), isNull);
-    });
-
-    test('fetchSubscriptions batches many owners', () async {
-      subscribed(owner, now + 5);
-      subscribed(alice, now - 5);
-      final owners = [
-        owner,
-        alice,
-        guard,
-        owner,
-        for (var i = 0; i < 110; i++) key(200 + i),
-      ];
-      rpc.calls.clear();
-      final subs = await client.fetchSubscriptions(owners);
-      expect(subs, hasLength(owners.toSet().length));
-      expect(owners.toSet().length, greaterThan(100));
-      expect(rpc.calls, ['getMultipleAccounts', 'getMultipleAccounts']);
-      expect(subs[owner]!.paidUntil, now + 5);
-      expect(subs[alice]!.paidUntil, now - 5);
-      expect(subs[guard], isNull);
-      expect(subs.containsKey(guard), isTrue);
-    });
-
-    test('a new subscription buys 12 months at once; the owner pays the '
-        'account rent and needs no plan', () async {
-      await expectLater(
-        subscribe(11),
-        throwsSub(
-          'InvalidSubscription',
-          'A new monthly plan needs at least 12 months',
-          code: 6030,
-        ),
-      );
-      final tx = await subscribe(12);
-      final msg = SignedTx.fromBytes(tx).compiledMessage;
-      expect(msg.requiredSignatureCount, 1);
-      expect(msg.accountKeys.first.toBase58(), owner);
-      final ix = instructions(tx).single;
-      expect(ix.programId.toBase58(), AppConfig.programId);
-      expect(ix.data.toList(), [...Disc.subscribe, 12, 0]);
-      expect(addrs(ix), [
-        owner,
-        owner,
-        subAddr,
-        configPda().address,
-        subConfigPda().address,
-        usdc,
-        ataAddress(owner, usdc),
-        ataAddress(treasury, usdc),
-        tokenProgramId,
-        systemProgramId,
-      ]);
-    });
-
-    test('an active subscription extends by any number; a lapsed one '
-        'restarts at 12', () async {
-      subscribed(owner, now);
-      expect(await subscribe(1), isNotEmpty);
-      await expectLater(
-        subscribe(37),
-        throwsSub('InvalidSubscription', 'Extend by 1 to 36 months'),
-      );
-      await expectLater(
-        subscribe(0),
-        throwsSub('InvalidSubscription', 'Extend by 1 to 36 months'),
-      );
-      subscribed(owner, now - 1);
-      await expectLater(
-        subscribe(1),
-        throwsSub(
-          'InvalidSubscription',
-          'A lapsed monthly plan needs at least 12 months',
-        ),
-      );
-      expect(await subscribe(36), isNotEmpty);
-    });
-
-    test('refuses before signing: disabled, unfunded, no treasury '
-        'account', () async {
-      addTokens(owner, usdc, 12 * price - 1);
-      await expectLater(
-        subscribe(12),
-        throwsSub('NoSubscriptionFunds', '12 months cost 60 token'),
-      );
-      addTokens(owner, usdc, 12 * price);
-      rpc.accounts.remove(ataAddress(treasury, usdc));
-      await expectLater(
-        subscribe(12),
-        throwsSub('SubscriptionDisabled', 'not set up', code: 6029),
-      );
-      terms(enabled: false);
-      await expectLater(
-        subscribe(12),
-        throwsSub('SubscriptionDisabled', 'not available', code: 6029),
-      );
-      expect(rpc.sent, isEmpty);
-    });
-
-    test('USDC network fees: Kora funds a new subscription account only, '
-        'the subscription counts against the fee', () async {
-      final node = FakeKora(signer: key(70), paymentAddress: key(70));
-      final c = DeadmanClient.withKora(
-        client: rpc.client(),
-        paymaster: node.client(),
-        paymasterSigner: key(70),
-        clock: () => now,
-      )..feeToken = usdc;
-      final fee = node.feeInToken!;
-      addTokens(owner, usdc, 12 * price + fee - 1);
-      await expectLater(subscribe(12, via: c), throwsNamed('NoFeeToken'));
-      addTokens(owner, usdc, 12 * price + fee);
-      final tx = await subscribe(12, via: c);
-      final msg = SignedTx.fromBytes(tx).compiledMessage;
-      expect(msg.requiredSignatureCount, 2);
-      expect(msg.accountKeys[0].toBase58(), node.signer);
-      expect(msg.accountKeys[1].toBase58(), owner);
-      final ixs = instructions(tx);
-      expect(ixs, hasLength(2));
-      expect(ixs[0].data.toList().sublist(0, 8), Disc.subscribe);
-      expect(
-        [
-          for (final (i, a) in addrs(ixs[0]).indexed)
-            if (a == node.signer) i,
-        ],
-        [1],
-        reason: 'Kora is only the payer',
-      );
-      expect(addrs(ixs[1]), [
-        ataAddress(owner, usdc),
-        usdc,
-        ataAddress(node.paymentAddress, usdc),
-        owner,
-      ]);
-
-      // Once the account exists there is no rent: the owner is the payer.
-      subscribed(owner, now + 86400);
-      final ext = instructions(await subscribe(1, via: c));
-      expect(addrs(ext[0]).sublist(0, 2), [owner, owner]);
-      expect(addrs(ext[0]), isNot(contains(node.signer)));
-    });
-
-    test("payouts name the owner's subscription PDA", () async {
-      rpc.accounts[treasury] = FakeAccount(
-        systemProgramId,
-        const [],
-        lamports: rpc.rentExempt,
-      );
-      rpc.accounts[vaultPda(owner, 6).address] = FakeAccount(
-        AppConfig.programId,
-        vaultBytes(
-          owner: owner,
-          planId: 6,
-          guard: guard,
-          lastPulse: lastPulse,
-          rules: [rule(to: alice, afterSecs: 90000)],
-        ),
-        lamports: rpc.rentExempt + 2000000000,
-      );
-      final ix = instructions(
+    test('a single NFT pays no fee: no treasury token account', () async {
+      addPlan(5, [fixed(alice, nft, 1)]);
+      addTokens(vaultPda(owner, 5).address, nft, 1);
+      final ixs = instructions(
         await client.buildExecuteRule(
-          executor: alice,
+          executor: executor,
+          vaultOwner: owner,
+          planId: 5,
+          index: 0,
+        ),
+      );
+      expect(ixs, hasLength(2), reason: 'only the heir ATA create');
+      expect(ixs[0].accounts[1].pubKey.toBase58(), ataAddress(alice, nft));
+      final exec = ixs[1];
+      expect(exec.accounts[3].pubKey.toBase58(), nft);
+      expect(exec.accounts[3].isWriteable, isTrue);
+      expect(exec.accounts[7].pubKey.toBase58(), AppConfig.programId);
+      expect(exec.accounts[7].isWriteable, isFalse);
+    });
+
+    test('an SKR payout that leaves a fee passes the treasury ATA', () async {
+      addPlan(6, [fixed(alice, skr, 1000000)]);
+      addTokens(vaultPda(owner, 6).address, skr, 1000000);
+      final ixs = instructions(
+        await client.buildExecuteRule(
+          executor: executor,
           vaultOwner: owner,
           planId: 6,
           index: 0,
         ),
-      ).single;
-      expect(addrs(ix).last, subAddr);
-      expect(ix.accounts.last.isWriteable, isFalse);
-      expect(ix.accounts.last.isSigner, isFalse);
+      );
+      expect(ixs, hasLength(3));
+      expect(ixs[0].accounts[1].pubKey.toBase58(), ataAddress(treasury, skr));
+      expect(ixs[2].accounts[3].isWriteable, isTrue, reason: 'burn');
+      expect(ixs[2].accounts[7].pubKey.toBase58(), ataAddress(treasury, skr));
     });
 
-    test('one subscription makes every plan of the owner, also a later '
-        'one, quote fee-free', () async {
-      rpc.accounts[treasury] = FakeAccount(
-        systemProgramId,
-        const [],
-        lamports: rpc.rentExempt,
+    test('a percentage tier always passes the treasury ATA', () async {
+      addPlan(7, [rule(to: alice, mint: nft)]);
+      addTokens(vaultPda(owner, 7).address, nft, 1);
+      final ixs = instructions(
+        await client.buildExecuteRule(
+          executor: executor,
+          vaultOwner: owner,
+          planId: 7,
+          index: 0,
+        ),
       );
-      rpc.accounts[alice] = FakeAccount(
-        systemProgramId,
-        const [],
-        lamports: rpc.rentExempt,
-      );
-      void plan(String of, int planId) =>
-          rpc.accounts[vaultPda(of, planId).address] = FakeAccount(
-            AppConfig.programId,
-            vaultBytes(
-              owner: of,
-              planId: planId,
-              guard: guard,
-              lastPulse: lastPulse,
-              rules: [rule(to: alice, afterSecs: 90000)],
-            ),
-            lamports: rpc.rentExempt + 2000000000,
-          );
-      Future<int> net(String of, int planId) async => (await client.quoteClaim(
-        claimer: alice,
-        vaultOwner: of,
-        planId: planId,
-        index: 0,
+      expect(ixs, hasLength(3));
+    });
+
+    test('the claim quote takes 1.5% from SKR and 2% from others', () async {
+      addPlan(8, [fixed(alice, skr, 1000000), fixed(bob, usdc, 1000000)]);
+      final v = vaultPda(owner, 8).address;
+      addTokens(v, skr, 1000000);
+      addTokens(v, usdc, 1000000);
+      Future<int> net(int i, String claimer) async => (await client.quoteClaim(
+        claimer: claimer,
+        vaultOwner: owner,
+        planId: 8,
+        index: i,
       )).net;
-      plan(owner, 6);
-      expect(await net(owner, 6), 980000000, reason: 'no subscription');
-      for (final (paid, expected) in [
-        (lastPulse, 1000000000),
-        (lastPulse - 1, 980000000),
-      ]) {
-        subscribed(owner, paid);
-        plan(owner, 6);
-        plan(owner, 7);
-        expect(await net(owner, 6), expected, reason: 'paid until $paid');
-        expect(await net(owner, 7), expected, reason: 'paid until $paid');
-      }
-      subscribed(owner, now + 86400);
-      plan(guard, 6);
-      expect(
-        await net(guard, 6),
-        980000000,
-        reason: "another owner's plan is not covered",
+      expect(await net(0, alice), 985000);
+      expect(await net(1, bob), 980000);
+    });
+
+    test('withdrawals keep the share reserved for a skipped tier', () async {
+      addPlan(9, [
+        rule(to: alice, skippedAt: now - 100, reserved: 3000000000),
+        rule(to: bob, afterSecs: 172801),
+      ]);
+      rpc.accounts[vaultPda(owner, 9).address] = FakeAccount(
+        AppConfig.programId,
+        rpc.accounts[vaultPda(owner, 9).address]!.data,
+        lamports: 5000000000,
+      );
+      final free = 5000000000 - rpc.rentExempt;
+      await expectLater(
+        client.buildWithdrawSol(
+          owner: owner,
+          planId: 9,
+          lamports: free - 3000000000 + 1,
+        ),
+        throwsA(
+          isA<DeadmanException>().having(
+            (e) => e.code,
+            'code',
+            DeadmanException.fundsCommitted,
+          ),
+        ),
+      );
+      await client.buildWithdrawSol(
+        owner: owner,
+        planId: 9,
+        lamports: free - 3000000000,
+      );
+    });
+
+    test('a plan with a pending reserve cannot be closed', () async {
+      addPlan(10, [
+        rule(to: alice, skippedAt: now - 100, reserved: 1000),
+        rule(to: bob, afterSecs: 172801),
+      ]);
+      await expectLater(
+        client.buildCloseVault(owner: owner, planId: 10),
+        throwsA(
+          isA<DeadmanException>()
+              .having((e) => e.code, 'code', DeadmanException.fundsCommitted)
+              .having((e) => e.message, 'message', contains('skipped')),
+        ),
       );
     });
   });

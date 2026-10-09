@@ -10,7 +10,7 @@ Yes, the program must be on mainnet before a mainnet test. The private rails (Zc
 | 1   | [Preflight](#1-preflight)                                     | nobody            | nothing                |
 | 2   | [Verifiable build](#2-verifiable-build)                       | nobody            | nothing                |
 | 3   | [Deploy](#3-deploy)                                           | deploy wallet     | ~7.6 SOL, ~5.1 stays   |
-| 4   | [Initialize Config](#4-initialize-config)                     | upgrade authority | ~0.001 SOL             |
+| 4   | [Initialize Config](#4-initialize-config)                     | upgrade authority | ~0.0018 SOL            |
 | 5   | [Publish the IDL](#5-publish-the-idl)                         | upgrade authority | ≤ 0.26 SOL             |
 | 6   | [Upgrade authority to Squads](#6-upgrade-authority-to-squads) | deploy wallet     | fee only               |
 | 7   | [Kora sponsor and paymaster](#7-kora-on-mainnet)              | Kora fee payer    | float, 0.5 SOL         |
@@ -39,20 +39,20 @@ export DEPLOYER=~/.config/solana/mainnet-deployer.json   # see step 3
 
 ## Cost estimate
 
-Measured on 2026-10-04 with `scripts/mainnet_preflight.sh` (rent from mainnet `solana rent`, read-only) for the `deadman.so` built that day, **475 272 bytes**. Mainnet rent is now 5 080 lamports per byte plus the 128-byte account overhead (a 165-byte token account costs 0.00148844 SOL, not the older 0.00203928). Rerun the preflight after the final build: the numbers scale with the `.so` size.
+Measured on 2026-10-04 with `scripts/mainnet_preflight.sh` (rent from mainnet `solana rent`, read-only) for the `deadman.so` built that day, **475 272 bytes** (the 2026-10-08 build is 526 480 bytes, so program data and the buffer grow by about 11%). Mainnet rent is now 5 080 lamports per byte plus the 128-byte account overhead (a 165-byte token account costs 0.00148844 SOL, not the older 0.00203928). Rerun the preflight after the final build: the numbers scale with the `.so` size.
 
 | Item                                            | SOL        | Notes                                                           |
 | ----------------------------------------------- | ---------- | --------------------------------------------------------------- |
 | Program data, `--max-len 950544` (2x the `.so`) | 4.829642   | locked while the program exists; 2.42 SOL without the headroom  |
 | Deploy buffer (475 309 bytes)                   | 2.415220   | needed during the deploy, refunded when it completes            |
 | Program account (36 bytes)                      | 0.000833   |                                                                 |
-| Config PDA (77 bytes)                           | 0.001041   | step 4                                                          |
+| Config PDA (209 bytes)                          | 0.001712   | step 4                                                          |
 | IDL metadata account                            | ≤ 0.255057 | upper bound (the uncompressed 47 KB IDL); step 5 is optional    |
 | ~480 write transactions at ≤ 25 000 lamports    | ≤ 0.012    | 5 000 base + priority fee at `--with-compute-unit-price 100000` |
 | Margin                                          | 0.05       |                                                                 |
 | **Deploy wallet must hold**                     | **7.56**   | about **5.15 SOL stays locked** after the buffer comes back     |
 
-Running costs: the Kora fee payer float (0.5 SOL suggested, step 7), the keeper float (0.1 SOL, step 8), and the end-to-end test (about 0.12 SOL and 1 USDC funded, about 0.015 SOL and 0.02 USDC actually spent, step 10). Closing the program later (`solana program close`) returns the program-data rent, but the address can then never be reused.
+Running costs: the Kora fee payer float (0.5 SOL suggested, step 7), the keeper float (0.1 SOL, step 8), and the end-to-end test (about 0.12 SOL and 1 USDC funded, about 0.0125 SOL and 0.02 USDC actually spent, step 10). Closing the program later (`solana program close`) returns the program-data rent, but the address can then never be reused.
 
 ## 0. Gate
 
@@ -121,20 +121,35 @@ If the deploy stops halfway, the CLI prints a 12-word phrase for the intermediat
 
 ## 4. Initialize Config
 
-`init_config` must be signed by the program's **current upgrade authority**, and that signer becomes `Config.admin` for good: there is no instruction to rotate the admin. The admin can later change the treasury and both fees (`set_config` through `tool/set_config.dart`, capped at 5%). So choose who the admin is now:
+`init_config` must be signed by the program's **current upgrade authority**, and that signer becomes `Config.admin`. The admin can later change the treasury, the fee rates, the SKR mint and the burn share (`set_config` through `tool/set_config.dart`; every rate is capped at 5%, the burn share at 100%), and can hand the admin role over in two steps (`propose_admin`, then `accept_admin` signed by the new key; `tool/set_config.dart propose-admin` / `accept-admin`). So choose who the admin is now:
 
-- **A, simple:** run it now with the deploy key, before step 6. The deploy key then stays the fee admin; keep it offline after the deploy.
-- **B, preferred:** do step 6 first, then run `init_config` as a Squads proposal (Squads "Transaction builder", or build the same instruction as `tool/init_config.dart` with the Squads vault as admin). The multisig is then both upgrade authority and fee admin.
+- **A, simple:** run it now with the deploy key, before step 6. The deploy key then stays the fee admin until you rotate it; keep it offline after the deploy.
+- **B, preferred:** do step 6 first, then run `init_config` as a Squads proposal (Squads "Transaction builder", or build the same instruction as `tool/init_config.dart` with the Squads vault as admin). The multisig is then both upgrade authority and fee admin. With option A you can still move the admin to the Squads vault later with `propose-admin` and a Squads `accept_admin` proposal.
 
-Option A, with the treasury as a wallet you control (a Squads vault is fine as treasury in either option) and 2% / 3% fees **(spends ~0.001 SOL)**:
+Option A, with the treasury as a wallet you control **(spends ~0.0018 SOL)**. The treasury is passed as an account and must be a system-owned wallet (a Squads vault is fine in either option); sysvars, programs and program-owned accounts are refused. `init_config` sets the default fees: **2%** on every rail (`fee_bps_public = fee_bps_private = 200`), **1.5%** for payouts in SKR (`fee_bps_skr = 150`), and **10%** of each SKR fee burned (`skr_burn_bps = 1000`). With `--mainnet`, `--skr-mint` defaults to mainnet SKR (`SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3`, 6 decimals):
 
 ```bash
-dart run tool/init_config.dart --keypair "$DEPLOYER" \
-  --treasury <TREASURY_ADDRESS> --fee-public 200 --fee-private 300 --rpc "$RPC_URL"
-solana account BqTe2haaD7dPfc4dmYQFaGrczbMhrXiuddc2knjvoCgr --url "$RPC_URL"   # 77 bytes, owner = program
+dart run tool/init_config.dart --keypair "$DEPLOYER" --mainnet \
+  --treasury <TREASURY_ADDRESS> --rpc "$RPC_URL"
+solana account BqTe2haaD7dPfc4dmYQFaGrczbMhrXiuddc2knjvoCgr --url "$RPC_URL"   # 209 bytes, owner = program
 ```
 
-The treasury receives protocol fees in SOL and in each token paid out, so its token accounts get created on the first token payout (the executor pays that rent).
+The treasury receives protocol fees in SOL and in each token paid out, so its token accounts get created on the first token payout that leaves it a fee (the executor pays that rent). A payout whose fee rounds to 0, such as a single NFT, needs no treasury token account.
+
+### 4b. Fee rates and the SKR burn (optional)
+
+There is no subscription: the only protocol fee is the release fee. To change it, run `set_config` as `Config.admin` (the deploy key in option A, a Squads proposal in option B). The tool refuses a mainnet RPC unless `--mainnet` is passed:
+
+```bash
+dart run tool/set_config.dart --keypair "$DEPLOYER" --mainnet --rpc "$RPC_URL" \
+  --fee-public 200 --fee-private 200 --fee-skr 150 --skr-burn-bps 1000 \
+  --skr-mint SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3
+```
+
+- A payout in the SKR mint pays `--fee-skr` on any rail. `--skr-burn-bps` of that fee is burned from the vault's token account in the same instruction (event `FeeBurned`), and the rest goes to the treasury's SKR account. `--skr-mint none` turns the SKR rate off, so SKR pays the normal rail rate.
+- New rates apply to payouts that have not run yet; the app reads them from `Config`.
+- **Upgrading an existing deployment:** a Config created by an older build has the 77-byte layout. Until the admin runs `set_config` once (it reallocates the account to 209 bytes; the admin pays about 0.00067 SOL of extra rent at today's mainnet rate), every payout, `propose_admin` and `accept_admin` fails. Restart the gateway and the keeper afterwards.
+- Check on devnet first: `dart run tool/e2e_skr_nft.dart --dry-run`, then without `--dry-run` once the devnet Config has the devnet SKR mint (`4JX81qZWhPPT38Tn4ZswaS2DyH3PffdrFqbYgsoZCuHc`). It checks the 1.5% fee, the supply dropping by exactly the burned 10%, and the treasury getting the other 90%.
 
 ## 5. Publish the IDL
 
@@ -201,7 +216,7 @@ Behind a proxy, the gateway sees every client as `127.0.0.1` (`req.connectionInf
 
 ## 8. Keeper on mainnet
 
-The keeper executes due tiers and vesting releases for everyone; the payout fee pays for it. Give it its own key and a small float **(spends)**:
+The keeper executes due tiers and vesting releases for everyone, but only when the treasury's share of the fee (after any SKR burn) covers the network fee and any token-account rent it pays; smaller payouts are left for the beneficiary to claim. Give it its own key and a small float **(spends)**:
 
 ```bash
 solana-keygen new -o /etc/deadman/keeper.json --no-bip39-passphrase   # chmod 600, owned by the service user
@@ -288,9 +303,9 @@ flutter build apk --release \
      --return-to <your wallet> --i-funded-this
    ```
 
-What it does, in order: (a) creates an inheritance plan (`create_plan`) with two tiers due 120 s after the last check-in: 0.05 SOL to claim key A on the Zcash rail and 0.035 SOL (or `--cloak-usdc 2` USDC) to claim key B on the Cloak rail, and deposits; (b) waits until they are due and executes them with the keeper's payability check; (c) routes claim key A through 1Click to your u1 and tracks it to `SUCCESS` (about 3 minutes); (d) routes claim key B through Cloak in headless Chromium (`tool/cloak_bundle/live.mjs`: deposit, proof, private send to `--cloak-dest`) and checks what arrived; (e) creates a 1 USDC vesting plan over 60 s, releases it once and checks the heir got it minus 2%; (f) closes both plans and sweeps every key (owner, guard, claim keys, heir; SOL and USDC, closing token accounts) to `--return-to`. It prints a summary table with Solscan links and the funds started, swept back, delivered and spent.
+What it does, in order: (a) creates an inheritance plan (`create_plan`) with two tiers due 120 s after the last check-in: 0.05 SOL to claim key A on the Zcash rail and 0.035 SOL (or `--cloak-usdc 2` USDC) to claim key B on the Cloak rail, and deposits; (b) waits until they are due and executes them with the keeper's payability check; (c) routes claim key A through 1Click to your u1 and tracks it to `SUCCESS` (about 3 minutes); (d) routes claim key B through Cloak in headless Chromium (`tool/cloak_bundle/live.mjs`: deposit, proof, private send to `--cloak-dest`) and checks what arrived; (e) creates a 1 USDC vesting plan over 60 s, releases it once and checks the heir got it minus the release fee read from `Config` (2%); (f) closes both plans and sweeps every key (owner, guard, claim keys, heir; SOL and USDC, closing token accounts) to `--return-to`. It prints a summary table with Solscan links and the funds started, swept back, delivered and spent.
 
-Expected spend with the defaults: protocol fees 0.00425 SOL and 0.02 USDC (to your treasury), the 1Click spread (about 0.002 SOL), the Cloak exit fee (0.005 SOL + 0.3%), the vesting vault's USDC account rent (0.0015 SOL; `close_vault` leaves token accounts), the treasury's USDC account if it is new (0.0015 SOL) and network fees: about **0.015 SOL and 0.02 USDC**. The ZEC (about 0.004 ZEC for 0.0475 SOL on 2026-10-04) arrives in your Zcash wallet, and about 0.023 SOL at `--cloak-dest`.
+Expected spend with the defaults: protocol fees 0.0017 SOL and 0.02 USDC (to your treasury), the 1Click spread (about 0.002 SOL), the Cloak exit fee (0.005 SOL + 0.3%), the vesting vault's USDC account rent (0.0015 SOL; `close_vault` leaves token accounts), the treasury's USDC account if it is new (0.0015 SOL) and network fees: about **0.0125 SOL and 0.02 USDC**. The ZEC (about 0.004 ZEC for 0.0475 SOL on 2026-10-04) arrives in your Zcash wallet, and about 0.023 SOL at `--cloak-dest`.
 
 Every step is resumable: after any failure, fix the cause and run the same command again. `state.json` in the work directory records quotes, deposit addresses and signatures before anything is signed, so a rerun never pays twice (a Zcash quote that was saved but never sent is detected from the claim key's balance; an interrupted Cloak route resumes with the same amount, so the bundle finds its deposited note). Options: `--skip-zcash`, `--skip-cloak`, `--skip-vesting`, `--no-sweep`, `--paymaster https://paymaster.<your-domain>` (step e pays its fees in USDC through Kora: about 4 USDC more), `--cu-price`. `--cluster devnet` rehearses steps a, b, e and f on devnet. The work directory holds the keys (`owner.json`, `phrase.txt`, `cloak_claim.json`, mode 600): keep it until the summary says everything was swept, then delete it.
 
@@ -306,7 +321,7 @@ Every step is resumable: after any failure, fix the cause and run the same comma
 ## Risks
 
 - **Unaudited.** No external audit, fuzzing or formal review. The internal reviews ([2026-10-03](security-audit-2026-10-03.md), [2026-10-04](security-review-2026-10-04.md)) are by the same team that wrote the code. Cap what goes in (the app has no cap) and say so publicly.
-- **Upgrade authority and fee admin.** Until step 6 the deploy key can replace the program. `Config.admin` cannot be rotated, so with option A the deploy key keeps control of the treasury address and fees (≤ 5%) forever.
+- **Upgrade authority and fee admin.** Until step 6 the deploy key can replace the program. With option A the deploy key keeps control of the treasury address and fees (≤ 5%) until it rotates `Config.admin` with `propose_admin` / `accept_admin`.
 - **Hot keys.** The Kora fee payer and the keeper key are hot keys on a server. The gateway and Kora's policy limit what they sign, but a compromised server loses their float and can grief users (refused check-ins, wrong fees up to `KORA_MAX_FEE`).
 - **Paymaster economics.** Margin pricing depends on Jupiter's SOL price; a fast move between quote and landing costs Kora the difference. Failed paid transactions still cost Kora the fee (L-5).
 - **Third parties.** 1Click and its solvers, Cloak's program and relay, Jupiter, Helius and Squads can fail, change APIs or censor. The Zcash rail's ZEC delivery and the Cloak relay withdrawal have never run with real funds until step 10.

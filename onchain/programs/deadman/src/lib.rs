@@ -16,22 +16,34 @@ declare_id!("ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL");
 pub mod deadman {
     use super::*;
 
-    pub fn init_config(
-        ctx: Context<InitConfig>,
-        treasury: Pubkey,
-        fee_bps_public: u16,
-        fee_bps_private: u16,
-    ) -> Result<()> {
-        instructions::config::handle_init_config(ctx, treasury, fee_bps_public, fee_bps_private)
+    pub fn init_config(ctx: Context<InitConfig>, skr_mint: Pubkey) -> Result<()> {
+        instructions::config::handle_init_config(ctx, skr_mint)
     }
 
     pub fn set_config(
         ctx: Context<SetConfig>,
-        treasury: Pubkey,
         fee_bps_public: u16,
         fee_bps_private: u16,
+        skr_mint: Pubkey,
+        fee_bps_skr: u16,
+        skr_burn_bps: u16,
     ) -> Result<()> {
-        instructions::config::handle_set_config(ctx, treasury, fee_bps_public, fee_bps_private)
+        instructions::config::handle_set_config(
+            ctx,
+            fee_bps_public,
+            fee_bps_private,
+            skr_mint,
+            fee_bps_skr,
+            skr_burn_bps,
+        )
+    }
+
+    pub fn propose_admin(ctx: Context<ProposeAdmin>, new_admin: Pubkey) -> Result<()> {
+        instructions::config::handle_propose_admin(ctx, new_admin)
+    }
+
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        instructions::config::handle_accept_admin(ctx)
     }
 
     pub fn create_plan(
@@ -156,28 +168,6 @@ pub mod deadman {
         index: u8,
     ) -> Result<()> {
         instructions::funds::handle_execute_token_rule(ctx, index)
-    }
-
-    pub fn set_subscription(
-        ctx: Context<SetSubscription>,
-        price_per_period: u64,
-        period_secs: i64,
-        mint: Pubkey,
-        enabled: bool,
-        min_periods: u16,
-    ) -> Result<()> {
-        instructions::subscription::handle_set_subscription(
-            ctx,
-            price_per_period,
-            period_secs,
-            mint,
-            enabled,
-            min_periods,
-        )
-    }
-
-    pub fn subscribe(ctx: Context<Subscribe>, periods: u16) -> Result<()> {
-        instructions::subscription::handle_subscribe(ctx, periods)
     }
 
     pub fn recover_legacy_vault(ctx: Context<RecoverLegacyVault>, plan_id: u16) -> Result<()> {

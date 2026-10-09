@@ -28,13 +28,15 @@ abstract final class Disc {
   static const releaseVestedSol = [136, 188, 48, 45, 14, 211, 200, 228];
   static const releaseVestedToken = [50, 241, 129, 168, 233, 106, 179, 16];
   static const recoverLegacyVault = [202, 5, 20, 4, 206, 216, 105, 134];
-  static const setSubscription = [63, 240, 195, 242, 14, 124, 40, 179];
-  static const subscribe = [254, 28, 191, 138, 156, 179, 183, 53];
+  static const initConfig = [23, 235, 115, 232, 168, 96, 1, 231];
+  static const setConfig = [108, 158, 154, 175, 212, 98, 52, 66];
+  static const proposeAdmin = [121, 214, 199, 212, 87, 39, 117, 234];
+  static const acceptAdmin = [112, 42, 45, 90, 116, 181, 13, 170];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
-  static const subscriptionConfigAccount = [4, 195, 89, 89, 82, 60, 44, 175];
-  static const subscriptionAccount = [64, 7, 26, 135, 102, 132, 98, 33];
+
+  static const feeBurnedEvent = [145, 91, 45, 171, 189, 224, 44, 218];
 }
 
 /// `Vault::SPACE` (8 + `Vault::INIT_SPACE`). A Vault account of any other
@@ -66,15 +68,13 @@ abstract final class Limits {
   static const maxVestSecs = 20 * 366 * 86400;
   static const maxVestStartSkewSecs = 366 * 86400;
   static const minVestPeriodSecs = 60;
-  static const minSubPeriodSecs = 86400;
-  static const maxSubPeriodSecs = 366 * 86400;
-  static const maxSubPeriods = 36;
 }
 
 const systemProgramId = SystemProgram.programId;
 const tokenProgramId = TokenProgram.programId;
 const token2022ProgramId = Token2022Program.programId;
 const ataProgramId = AssociatedTokenAccountProgram.programId;
+const tokenMetadataProgramId = 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s';
 
 /// All-zero key (`Pubkey::default()`).
 const defaultPubkey = '11111111111111111111111111111111';
@@ -121,12 +121,13 @@ bool labelFits(String label) =>
 
 Pda configPda() => findPda([utf8.encode('config')]);
 
-Pda subConfigPda() => findPda([utf8.encode('sub_config')]);
-
-/// [owner]'s account-wide subscription (`Subscription`), which every payout
-/// instruction of the owner's plans names.
-Pda subPda(String owner) =>
-    findPda([utf8.encode('sub'), Ed25519HDPublicKey.fromBase58(owner).bytes]);
+/// Token Metadata account of [mint]: seeds `["metadata", program, mint]`
+/// under the Token Metadata program.
+String metadataPda(String mint) => findPda([
+  utf8.encode('metadata'),
+  Ed25519HDPublicKey.fromBase58(tokenMetadataProgramId).bytes,
+  Ed25519HDPublicKey.fromBase58(mint).bytes,
+], programId: tokenMetadataProgramId).address;
 
 /// Classic SPL Token associated token account of [owner] for [mint].
 String ataAddress(String owner, String mint) => findPda([
@@ -383,65 +384,6 @@ Uint8List encodeRecoverLegacyVault(int planId) =>
           ..u16(planId))
         .toBytes();
 
-Uint8List encodeSubscribe(int periods) =>
-    (BorshWriter()
-          ..bytes(Disc.subscribe)
-          ..u16(periods))
-        .toBytes();
-
-Uint8List encodeSetSubscription({
-  required int pricePerPeriod,
-  required int periodSecs,
-  required String mint,
-  required bool enabled,
-  required int minPeriods,
-}) =>
-    (BorshWriter()
-          ..bytes(Disc.setSubscription)
-          ..u64(pricePerPeriod)
-          ..i64(periodSecs)
-          ..pubkey(mint)
-          ..u8(enabled ? 1 : 0)
-          ..u16(minPeriods))
-        .toBytes();
-
-/// Mirrors the checks of `set_subscription`: the program error code the
-/// chain would raise (6030 `InvalidSubscription`), or null if valid.
-int? setSubscriptionError({
-  required int pricePerPeriod,
-  required int periodSecs,
-  required String mint,
-  required int minPeriods,
-}) {
-  if (pricePerPeriod <= 0 ||
-      periodSecs < Limits.minSubPeriodSecs ||
-      periodSecs > Limits.maxSubPeriodSecs ||
-      minPeriods < 1 ||
-      minPeriods > Limits.maxSubPeriods ||
-      mint == defaultPubkey) {
-    return 6030;
-  }
-  return null;
-}
-
-/// Mirrors the checks of `subscribe` on [periods] for an owner whose
-/// subscription is [sub] (null = never created): the program error code the
-/// chain would raise, or null if valid. [now] is unix seconds.
-int? subscribeError(
-  SubscriptionTerms terms,
-  AccountSubscription? sub,
-  int periods,
-  int now,
-) {
-  if (!terms.enabled) return 6029;
-  if (periods < 1 ||
-      periods > Limits.maxSubPeriods ||
-      periods < terms.minPeriodsFor(sub, now)) {
-    return 6030;
-  }
-  return null;
-}
-
 /// Tiers `update_plan` keeps as history in front of the new rules: every
 /// paid or skipped one. A fully released plan cannot be updated at all.
 int policyHistoryCount(VaultState vault) =>
@@ -638,63 +580,83 @@ VaultState decodeVault(
 }
 
 class DeadmanConfig {
-  const DeadmanConfig({required this.admin, required this.fees});
+  const DeadmanConfig({
+    required this.admin,
+    required this.fees,
+    this.pendingAdmin,
+    this.migrated = true,
+  });
 
   final String admin;
   final FeeSchedule fees;
+
+  /// Proposed next admin until it calls `accept_admin`; null = none.
+  final String? pendingAdmin;
+
+  /// False for the first, 77-byte layout: payouts fail on chain until the
+  /// admin runs `set_config` once, which reallocates it.
+  final bool migrated;
 }
 
+/// `Config::SPACE` (8 + `Config::INIT_SPACE`).
+const configAccountSize = 209;
+
+/// The first `Config` layout (admin, treasury, two fee rates, bump).
+const configV1AccountSize = 77;
+
+/// Decodes `Config`, current or first layout (the latter has no SKR rate).
 DeadmanConfig decodeConfig(List<int> data) {
   if (!hasDiscriminator(data, Disc.configAccount)) {
     throw const FormatException('Not a Config account');
   }
   final r = BorshReader(data)..offset = 8;
-  return DeadmanConfig(
-    admin: r.pubkey(),
-    fees: FeeSchedule(
-      treasury: r.pubkey(),
-      feeBpsPublic: r.u16(),
-      feeBpsPrivate: r.u16(),
-    ),
-  );
-}
-
-SubscriptionTerms decodeSubscriptionConfig(List<int> data) {
-  if (!hasDiscriminator(data, Disc.subscriptionConfigAccount)) {
-    throw const FormatException('Not a SubscriptionConfig account');
-  }
-  final r = BorshReader(data)..offset = 8;
-  final price = r.u64();
-  final periodSecs = r.i64();
-  final mint = r.pubkey();
-  final enabled = r.boolean();
+  final admin = r.pubkey();
+  final treasury = r.pubkey();
+  final feeBpsPublic = r.u16();
+  final feeBpsPrivate = r.u16();
   r.u8(); // bump
-  return SubscriptionTerms(
-    pricePerPeriod: price,
-    periodSecs: periodSecs,
-    mint: mint,
-    enabled: enabled,
-    minPeriods: r.u16(),
+  if (data.length < configAccountSize) {
+    return DeadmanConfig(
+      admin: admin,
+      fees: FeeSchedule(
+        treasury: treasury,
+        feeBpsPublic: feeBpsPublic,
+        feeBpsPrivate: feeBpsPrivate,
+      ),
+      migrated: false,
+    );
+  }
+  final skrMint = r.pubkey();
+  final feeBpsSkr = r.u16();
+  final skrBurnBps = r.u16();
+  if (skrBurnBps > Limits.bpsDenominator) {
+    throw FormatException('Bad skr_burn_bps $skrBurnBps');
+  }
+  final pending = r.pubkey();
+  return DeadmanConfig(
+    admin: admin,
+    fees: FeeSchedule(
+      treasury: treasury,
+      feeBpsPublic: feeBpsPublic,
+      feeBpsPrivate: feeBpsPrivate,
+      skrMint: skrMint == defaultPubkey ? null : skrMint,
+      feeBpsSkr: feeBpsSkr,
+      skrBurnBps: skrBurnBps,
+    ),
+    pendingAdmin: pending == defaultPubkey ? null : pending,
   );
 }
-
-/// `Subscription` account (owner, paid_until, bump, reserved).
-AccountSubscription decodeSubscription(List<int> data) {
-  if (!hasDiscriminator(data, Disc.subscriptionAccount) ||
-      data.length < subscriptionAccountSize) {
-    throw const FormatException('Not a Subscription account');
-  }
-  final r = BorshReader(data)..offset = 8;
-  return AccountSubscription(owner: r.pubkey(), paidUntil: r.i64());
-}
-
-/// `Subscription::SPACE`.
-const subscriptionAccountSize = 81;
 
 /// `decimals` of an SPL mint account.
 int decodeMintDecimals(List<int> data) {
   if (data.length < 82) throw const FormatException('Not a mint account');
   return data[44];
+}
+
+/// `supply` of an SPL mint account.
+int decodeMintSupply(List<int> data) {
+  if (data.length < 82) throw const FormatException('Not a mint account');
+  return (BorshReader(data)..offset = 36).u64();
 }
 
 /// `amount` of an SPL token account.
@@ -703,6 +665,84 @@ int decodeTokenAmount(List<int> data) {
     throw const FormatException('Not a token account');
   }
   return (BorshReader(data)..offset = 64).u64();
+}
+
+/// Whether an SPL token account is frozen (`state` == 2).
+bool decodeTokenFrozen(List<int> data) {
+  if (data.length < 165) {
+    throw const FormatException('Not a token account');
+  }
+  return data[108] == 2;
+}
+
+/// Token Metadata `TokenStandard`.
+enum TokenStandard {
+  nonFungible,
+  fungibleAsset,
+  fungible,
+  nonFungibleEdition,
+  programmableNonFungible,
+  programmableNonFungibleEdition,
+}
+
+/// What the app reads from a Token Metadata `Metadata` account.
+typedef NftMetadata = ({
+  String mint,
+  String name,
+  String symbol,
+  String uri,
+
+  /// Null on accounts written before token standards existed (legacy NFTs).
+  TokenStandard? tokenStandard,
+});
+
+/// Programmable NFTs need Token Metadata transfers with rule sets; the
+/// program only moves plain SPL tokens.
+bool isProgrammable(TokenStandard? s) =>
+    s == TokenStandard.programmableNonFungible ||
+    s == TokenStandard.programmableNonFungibleEdition;
+
+/// Decodes a Token Metadata `MetadataV1` account (key 4) up to
+/// `token_standard`. Older or shorter accounts end early; their token
+/// standard is null.
+NftMetadata decodeMetadata(List<int> data) {
+  if (data.isEmpty || data[0] != 4) {
+    throw const FormatException('Not a Token Metadata account');
+  }
+  final r = BorshReader(data)..offset = 1;
+  r.pubkey(); // update_authority
+  final mint = r.pubkey();
+  String text() => r.string().replaceAll('\u0000', '').trim();
+  final name = text();
+  final symbol = text();
+  final uri = text();
+  TokenStandard? standard;
+  try {
+    r.u16(); // seller_fee_basis_points
+    if (r.boolean()) {
+      final creators = r.u32();
+      if (creators > 5) throw FormatException('Bad creator count $creators');
+      r.offset += creators * 34; // address, verified, share
+    }
+    r
+      ..boolean() // primary_sale_happened
+      ..boolean(); // is_mutable
+    if (r.boolean()) r.u8(); // edition_nonce
+    if (r.boolean()) {
+      standard = r.enumOf(TokenStandard.values, 'TokenStandard');
+    }
+  } on FormatException {
+    standard = null;
+  } on RangeError {
+    standard = null;
+  }
+  return (
+    mint: mint,
+    name: name,
+    symbol: symbol,
+    uri: uri,
+    tokenStandard: standard,
+  );
 }
 
 Ed25519HDPublicKey _pk(String address) =>
@@ -802,64 +842,40 @@ Instruction skipRuleIx({
 
 /// `create_plan` or `create_vesting` (same accounts). [payer] funds the
 /// vault rent and becomes its `rent_payer`: the owner, or a Kora paymaster.
+/// [mints] are the token mints the rules or schedules name: the program
+/// reads each one (as a remaining account) to check it is a classic SPL
+/// Token mint.
 Instruction createVaultIx({
   required String owner,
   required String payer,
   required int planId,
   required List<int> data,
+  Iterable<String> mints = const [],
 }) => deadmanIx([
   _r(owner, signer: true),
   _w(payer, signer: true),
   _w(vaultPda(owner, planId).address),
   _r(systemProgramId),
+  ..._mintAccounts(mints),
 ], data);
 
-/// `subscribe`: [owner] pays its account-wide subscription in [mint] from
-/// its ATA into the treasury's ATA (classic SPL Token). [payer] (default
-/// [owner]; or a fee sponsor) funds the subscription account's rent when it
-/// is created.
-Instruction subscribeIx({
+/// `update_plan`, with every token mint the new [rules] name as a
+/// read-only remaining account (see [createVaultIx]).
+Instruction updatePlanIx({
   required String owner,
-  String? payer,
-  required String mint,
-  required String treasury,
-  required int periods,
+  required int planId,
+  required List<int> data,
+  required List<RuleSpec> rules,
 }) => deadmanIx([
-  _r(owner, signer: true),
-  _w(payer ?? owner, signer: true),
-  _w(subPda(owner).address),
-  _r(configPda().address),
-  _r(subConfigPda().address),
-  _r(mint),
-  _w(ataAddress(owner, mint)),
-  _w(ataAddress(treasury, mint)),
-  _r(tokenProgramId),
-  _r(systemProgramId),
-], encodeSubscribe(periods));
+  _w(owner, signer: true),
+  _w(vaultPda(owner, planId).address),
+  ..._mintAccounts(rules.map((r) => r.mint)),
+], data);
 
-/// `set_subscription` (admin only; creates the config on first use).
-Instruction setSubscriptionIx({
-  required String admin,
-  required int pricePerPeriod,
-  required int periodSecs,
-  required String mint,
-  required bool enabled,
-  required int minPeriods,
-}) => deadmanIx(
-  [
-    _w(admin, signer: true),
-    _r(configPda().address),
-    _w(subConfigPda().address),
-    _r(systemProgramId),
-  ],
-  encodeSetSubscription(
-    pricePerPeriod: pricePerPeriod,
-    periodSecs: periodSecs,
-    mint: mint,
-    enabled: enabled,
-    minPeriods: minPeriods,
-  ),
-);
+/// Distinct mints, read-only, in first-seen order.
+List<AccountMeta> _mintAccounts(Iterable<String?> mints) => [
+  for (final m in {...mints.nonNulls}) _r(m),
+];
 
 /// `close_vault`: the rent goes back to [rentPayer] (`Vault.rent_payer`),
 /// everything above it to the owner.
@@ -930,14 +946,18 @@ List<Instruction> withdrawTokenIxs({
 }
 
 /// `execute_sol_rule` or, for a token rule, idempotent creates of the
-/// treasury's and the beneficiary's ATAs (paid by [payer], default
-/// [executor]; the program no longer creates either) followed by
-/// `execute_token_rule` paying into the beneficiary's ATA. [treasury] comes
-/// from Config.
+/// treasury's (when [treasuryFee]) and the beneficiary's ATAs (paid by
+/// [payer], default [executor]; the program no longer creates either)
+/// followed by `execute_token_rule` paying into the beneficiary's ATA.
+/// [treasury] comes from Config.
 ///
-/// Token rules assume classic SPL Token mints. Token-2022 (different token
-/// program, ATA derivation and possibly transfer-hook remaining accounts) is
-/// not supported by this client yet.
+/// [treasuryFee] false leaves the treasury's token account out (the
+/// program id fills its optional slot), for a payout that leaves the
+/// treasury nothing, such as a single NFT; the program refuses it with
+/// `TreasuryAccountRequired` if a fee is due after all.
+///
+/// Token rules use classic SPL Token mints only; the program rejects any
+/// other mint when the plan is created or updated.
 List<Instruction> executeRuleIxs({
   required String executor,
   required String vaultOwner,
@@ -946,6 +966,7 @@ List<Instruction> executeRuleIxs({
   required int index,
   required String treasury,
   String? payer,
+  bool treasuryFee = true,
 }) => _payoutIxs(
   executor: executor,
   vaultOwner: vaultOwner,
@@ -953,6 +974,7 @@ List<Instruction> executeRuleIxs({
   rule: rule,
   treasury: treasury,
   payer: payer,
+  treasuryFee: treasuryFee,
   data: encodeExecuteRule(index, token: rule.mint != null),
 );
 
@@ -967,6 +989,7 @@ List<Instruction> releaseVestedIxs({
   required int index,
   required String treasury,
   String? payer,
+  bool treasuryFee = true,
 }) => _payoutIxs(
   executor: executor,
   vaultOwner: vaultOwner,
@@ -974,12 +997,12 @@ List<Instruction> releaseVestedIxs({
   rule: rule,
   treasury: treasury,
   payer: payer,
+  treasuryFee: treasuryFee,
   data: encodeReleaseVested(index, token: rule.mint != null),
 );
 
-/// [payer] (default: [executor]) funds any missing ATA. Every payout names
-/// the owner's subscription PDA, created or not, last (before any
-/// Token-2022 hook accounts).
+/// [payer] (default: [executor]) funds any missing ATA. The mint is
+/// writable so the burned share of an SKR fee can leave its supply.
 List<Instruction> _payoutIxs({
   required String executor,
   required String vaultOwner,
@@ -987,6 +1010,7 @@ List<Instruction> _payoutIxs({
   required RuleSpec rule,
   required String treasury,
   required String? payer,
+  required bool treasuryFee,
   required List<int> data,
 }) {
   final vault = vaultPda(vaultOwner, planId).address;
@@ -999,13 +1023,13 @@ List<Instruction> _payoutIxs({
         _r(configPda().address),
         _w(rule.beneficiary),
         _w(treasury),
-        _r(subPda(vaultOwner).address),
       ], data),
     ];
   }
   final rentPayer = payer ?? executor;
   return [
-    createAtaIdempotentIx(payer: rentPayer, owner: treasury, mint: mint),
+    if (treasuryFee)
+      createAtaIdempotentIx(payer: rentPayer, owner: treasury, mint: mint),
     createAtaIdempotentIx(
       payer: rentPayer,
       owner: rule.beneficiary,
@@ -1015,13 +1039,12 @@ List<Instruction> _payoutIxs({
       _r(executor, signer: true),
       _w(vault),
       _r(configPda().address),
-      _r(mint),
+      _w(mint),
       _w(ataAddress(vault, mint)),
       _w(rule.beneficiary),
       _w(ataAddress(rule.beneficiary, mint)),
-      _w(ataAddress(treasury, mint)),
+      treasuryFee ? _w(ataAddress(treasury, mint)) : _r(AppConfig.programId),
       _r(tokenProgramId),
-      _r(subPda(vaultOwner).address),
     ], data),
   ];
 }

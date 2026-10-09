@@ -36,6 +36,8 @@ import kotlin.math.max
  * - boney_button: check_in, check_in_to_stop, open_app or none
  * - optional boney_timeline (`[{"at": epoch ms, <the text keys>}]`, the latest passed entry wins)
  *   and boney_updated_at (epoch ms of the last push)
+ * - boney_skin: crown, cap, glasses or "" (Boney's accessory, unlocked by a Boney NFT in the app;
+ *   drawn over him in his status colour, with its dark shade under it; the released ghost wears none)
  *
  * The timer runs in the launcher (Chronometer) so it never goes stale: down to boney_due_at while
  * alive, up from it while a tier is due; past a day it reads "Nd HHh". If the app has not pushed
@@ -56,6 +58,7 @@ internal object BoneyWidget {
     private const val KEY_BUTTON = "boney_button"
     private const val KEY_TIMELINE = "boney_timeline"
     private const val KEY_UPDATED_AT = "boney_updated_at"
+    private const val KEY_SKIN = "boney_skin"
     private const val DOUBLE_PREFIX = "home_widget.double."
 
     private const val NATIVE_PREFS = "BoneyWidgetNative"
@@ -164,6 +167,29 @@ internal object BoneyWidget {
         }
     }
 
+    /** Accessory art on Boney's grid: [ink] is tinted his status colour, [shade] is drawn as is. */
+    private enum class Skin(
+        val key: String,
+        val ink: Int,
+        val inkPng: Int,
+        val shade: Int?,
+        val shadePng: Int?,
+    ) {
+        CROWN("crown", R.drawable.boney_px_skin_crown, R.drawable.boney_skin_crown, null, null),
+        CAP(
+            "cap", R.drawable.boney_px_skin_cap, R.drawable.boney_skin_cap,
+            R.drawable.boney_px_skin_cap_shade, R.drawable.boney_skin_cap_shade,
+        ),
+        GLASSES(
+            "glasses", R.drawable.boney_px_skin_glasses, R.drawable.boney_skin_glasses,
+            R.drawable.boney_px_skin_glasses_shade, R.drawable.boney_skin_glasses_shade,
+        );
+
+        companion object {
+            fun from(key: String?) = entries.firstOrNull { it.key == key?.trim()?.lowercase() }
+        }
+    }
+
     private enum class Layout(val res: Int) {
         SMALL(R.layout.boney_widget_small),
         MEDIUM(R.layout.boney_widget_medium),
@@ -185,6 +211,7 @@ internal object BoneyWidget {
         val countUpFrom: Long,
         /** Epoch millis of the next time-driven change, or null when nothing changes on its own. */
         val nextTick: Long?,
+        val skin: Skin?,
     )
 
     /** The overridable text fields, from the top-level keys or a passed timeline entry. */
@@ -305,6 +332,7 @@ internal object BoneyWidget {
             countdownTo = countdownTo,
             countUpFrom = countUpFrom,
             nextTick = ticks.filter { it > now }.minOrNull(),
+            skin = if (mood == Mood.RELEASED) null else Skin.from(prefs.text(KEY_SKIN)),
         )
     }
 
@@ -384,10 +412,9 @@ internal object BoneyWidget {
         rv.setInt(android.R.id.background, "setBackgroundResource", s.mood.background)
         rv.setOnClickPendingIntent(android.R.id.background, openApp(context))
 
-        setPixelArt(
-            context, rv, R.id.boney_image, s.mood.art, s.mood.png, BONEY_W, BONEY_H,
-            boneyScale(layout, widthDp, heightDp, tierRows, density),
-        )
+        val scale = boneyScale(layout, widthDp, heightDp, tierRows, density)
+        setPixelArt(context, rv, R.id.boney_image, s.mood.art, s.mood.png, BONEY_W, BONEY_H, scale)
+        bindSkin(context, rv, s.skin, color, scale)
         rv.setContentDescription(
             R.id.boney_image,
             context.getString(R.string.boney_image_description, s.title),
@@ -410,6 +437,23 @@ internal object BoneyWidget {
             }
         }
         return rv
+    }
+
+    private fun bindSkin(context: Context, rv: RemoteViews, skin: Skin?, color: Int, scale: Int) {
+        if (skin == null) {
+            rv.setViewVisibility(R.id.boney_skin, View.GONE)
+            rv.setViewVisibility(R.id.boney_skin_shade, View.GONE)
+            return
+        }
+        setPixelArt(context, rv, R.id.boney_skin, skin.ink, skin.inkPng, BONEY_W, BONEY_H, scale)
+        rv.setInt(R.id.boney_skin, "setColorFilter", color)
+        rv.setViewVisibility(R.id.boney_skin, View.VISIBLE)
+        if (skin.shade == null || skin.shadePng == null) {
+            rv.setViewVisibility(R.id.boney_skin_shade, View.GONE)
+        } else {
+            setPixelArt(context, rv, R.id.boney_skin_shade, skin.shade, skin.shadePng, BONEY_W, BONEY_H, scale)
+            rv.setViewVisibility(R.id.boney_skin_shade, View.VISIBLE)
+        }
     }
 
     private fun bindCount(context: Context, rv: RemoteViews, s: Snapshot, color: Int, density: Float) {

@@ -235,9 +235,8 @@ void main() {
     expect(find.byIcon(Icons.info_outline), findsOneWidget);
   });
 
-  testWidgets('under duress routing looks like a wallet timeout', (
-    tester,
-  ) async {
+  testWidgets('under duress the real receiving profiles stay hidden and '
+      'nothing is quoted', (tester) async {
     final p = await _profile(Rail.zcash, sampleZcashAddress);
     final r = await _pump(
       tester,
@@ -249,12 +248,13 @@ void main() {
         zcash.spendableBy[null] = 499995000;
       },
     );
-    await tester.tap(find.text('Route privately via Zcash'));
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pump();
-    expect(find.text('Seed Vault timed out. Try again later.'), findsOneWidget);
+    expect(find.text('Route privately via Zcash'), findsNothing);
+    expect(find.textContaining(p.key.address.substring(0, 4)), findsNothing);
+    expect(
+      find.textContaining(sampleZcashAddress.substring(0, 8)),
+      findsNothing,
+    );
     expect(r.zcash.quotes, isEmpty);
-    await tester.pumpAndSettle(const Duration(seconds: 5));
   });
 
   testWidgets('a cloak: profile gets a shielded inbox entry', (tester) async {

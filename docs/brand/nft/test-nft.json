@@ -1,0 +1,16 @@
+{
+  "name": "Deadman Test Skull",
+  "symbol": "DMSK",
+  "description": "Devnet test NFT for Deadman demos: a classic Metaplex NFT that a plan can hold and release to an heir. No value.",
+  "image": "https://raw.githubusercontent.com/GabrielNeugebauer/deadman/main/docs/brand/v3-assets/02-app-icon/png/app-icon-primary-512.png",
+  "attributes": [{ "trait_type": "network", "value": "devnet" }],
+  "properties": {
+    "category": "image",
+    "files": [
+      {
+        "uri": "https://raw.githubusercontent.com/GabrielNeugebauer/deadman/main/docs/brand/v3-assets/02-app-icon/png/app-icon-primary-512.png",
+        "type": "image/png"
+      }
+    ]
+  }
+}

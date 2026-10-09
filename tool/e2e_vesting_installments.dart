@@ -2,7 +2,7 @@
 // once: a scratch owner vests 0.06 SOL over 3 minutes in 1-minute
 // installments to a beneficiary holding no SOL. Right after the first
 // boundary the beneficiary claims through the free Kora sponsor (0.02 SOL
-// minus the 2% fee). An immediate second claim must be refused twice: by
+// minus the 2% release fee). An immediate second claim must be refused twice: by
 // the client (NothingToPay with the next installment) and by the program
 // itself (a raw `release_vested_sol` that skips the client check, simulated
 // against devnet). After the next boundaries it claims again until fully
@@ -122,7 +122,7 @@ Future<void> main(List<String> argv) async {
 
   final fees = await client.fetchFees();
   final bps = fees.bpsFor(Rail.solana);
-  if (bps != 200) stdout.writeln('note: public payout fee is $bps bps');
+  if (bps != 50) stdout.writeln('note: public payout fee is $bps bps');
   final expectNet = installment - installment * bps ~/ 10000;
 
   // Installment 1: free claim right after the boundary.
@@ -237,7 +237,7 @@ Future<void> _claim(
         after.rules[0].released == releasedBefore + expectGross,
         'one installment (gross $expectGross) released',
       );
-      _check(got == expectNet, 'heir holds $expectNet (2% fee, no gas)');
+      _check(got == expectNet, 'heir holds $expectNet (release fee, no gas)');
       return;
     } on DeadmanException catch (e) {
       if (e.name != 'NothingToPay' || tries >= 8) rethrow;

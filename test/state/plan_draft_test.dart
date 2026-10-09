@@ -1,5 +1,6 @@
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/assets.dart';
 import 'package:deadman/state/plan_draft.dart';
 import 'package:deadman/state/vesting.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -124,7 +125,7 @@ void main() {
       expect(keeperAutoDeliverMin(usdc, 300), 11329334);
     });
 
-    test('never with the fee waived or an unpriced token', () {
+    test('never with no fee or an unpriced token', () {
       expect(keeperAutoDeliverMin(usdc, 0), isNull);
       expect(keeperAutoDeliverMin(addr(40), 200), isNull);
       expect(keeperAutoDeliverMin(null, 200), isNull);
@@ -138,11 +139,11 @@ void main() {
       expect(feeValue(min - 50), lessThan(tokenAccountRentLamports));
     });
 
-    test('a waived fee always needs a claim on a new wallet', () {
-      expect(
-        _codes([_share(10000)], 900000000, fee: const FeeInfo(waived: true)),
-        {IssueCode.d3},
+    test('with no fee a new wallet always needs a claim', () {
+      final free = FeeInfo(
+        fees: FeeSchedule(treasury: addr(9), feeBpsPublic: 0, feeBpsPrivate: 0),
       );
+      expect(_codes([_share(10000)], 900000000, fee: free), {IssueCode.d3});
     });
   });
 
@@ -222,7 +223,7 @@ void main() {
       final p = PlanPreview.of(
         [_share(10000)],
         balanceOf: (_) => null,
-        feeBps: (_) => 200,
+        feeBps: (_, _) => 200,
       );
       expect(p.amounts.single.net, isNull);
       expect(p.assets.single.leftover, isNull);
@@ -393,17 +394,8 @@ void main() {
       expect(delayError(3 * 366 * 86400 + 1)!.body, 'Must be 3 years or less.');
     });
 
-    test('delay presets: days to a year, minutes with demo timings', () {
-      expect(delayChoices(demo: false).map(delayText), [
-        '1 day',
-        '3 days',
-        '7 days',
-        '14 days',
-        '30 days',
-        '90 days',
-        '180 days',
-        '1 year',
-      ]);
+    test('delay presets: 7 or 30 days, minutes with demo timings', () {
+      expect(delayChoices(demo: false).map(delayText), ['7 days', '30 days']);
       expect(delayChoices(demo: true), [60, 120, 300, 600]);
       expect(defaultDelay(demo: false), 30 * 86400);
       expect(defaultDelay(demo: true), 120);
@@ -642,6 +634,151 @@ void main() {
       expect(periodChoices(demo: true).first.$1, 60);
       expect(defaultPeriodSecs(demo: true), 60);
       expect(defaultPeriodSecs(demo: false), monthSecs);
+    });
+  });
+
+  group('NFT payouts', () {
+    final nft = addr(80);
+    setUp(() => rememberNft(nft, 'Saga Genesis #7'));
+    tearDown(forgetNfts);
+
+    PayoutDraft nftPayout({Rail rail = Rail.solana, int after = 10 * 86400}) =>
+        PayoutDraft(
+          beneficiary: addr(12),
+          rail: rail,
+          mint: nft,
+          mode: AmountMode.fixed,
+          fixedAmount: 1,
+          afterSecs: after,
+          name: 'Ana',
+        );
+
+    test('read as the NFT itself, sent whole', () {
+      final p = nftPayout();
+      expect(p.nft, isTrue);
+      expect(p.toRuleSpec().amount, 1);
+      expect(p.toRuleSpec().mode, AmountMode.fixed);
+      expect(payoutAmountLabel(p), 'The NFT Saga Genesis #7');
+      expect(
+        payoutSentence(p, net: 1),
+        'Ana gets the NFT Saga Genesis #7 as a normal transfer to '
+        '${addr(12).substring(0, 4)}…\u2060${addr(12).substring(40)}.',
+      );
+      expect(
+        payoutSentence(p, net: 0),
+        contains("(only if it's in the plan by then)"),
+      );
+      expect(moneyText(1, nft), 'Saga Genesis #7');
+    });
+
+    test('A5: only by normal transfer', () {
+      expect(nftPayout().validate(), isEmpty);
+      expect(nftPayout(rail: Rail.cloak).validate().map((i) => i.code), [
+        IssueCode.a5,
+      ]);
+    });
+
+    test('no "money stays behind", no fee taken from one', () {
+      final ps = [nftPayout()];
+      expect(_codes(ps, 1), {IssueCode.d3});
+      final (net, fee) = splitFee(1, 200);
+      expect((net, fee), (1, 0));
+    });
+
+    test('a heir new to it must claim it, with SOL for the fee', () {
+      final ps = [nftPayout()];
+      final preview = _preview(ps, 1);
+      final d3 = payoutWarnings(
+        payouts: ps,
+        index: 0,
+        preview: preview,
+        fee: FeeInfo(fees: _fees),
+        facts: const DeliveryFacts(walletLamports: 0, tokenUnits: 0),
+      ).single;
+      expect(d3.code, IssueCode.d3);
+      expect(d3.body, contains("NFTs aren't sent automatically"));
+      expect(d3.body, isNot(contains('USDC')));
+    });
+
+    test('two payouts of one NFT: only the first gets it', () {
+      final ps = [nftPayout(), nftPayout(after: 20 * 86400)];
+      final f4 = assetIssues(
+        asset: _preview(ps, 1).assetOf(nft),
+        mint: nft,
+        payouts: ps,
+        creating: true,
+        balance: 1,
+        numberOf: (i) => i + 1,
+      ).single;
+      expect(f4.code, IssueCode.f4);
+      expect(f4.title, 'Only one payout can receive it');
+      expect(f4.body, startsWith('Payouts 1 and 2 both send Saga Genesis #7'));
+      expect(f4.action, isNull);
+    });
+
+    test('nothing deposited: F2 names the NFT', () {
+      final ps = [nftPayout()];
+      final f2 = assetIssues(
+        asset: _preview(ps, 0).assetOf(nft),
+        mint: nft,
+        payouts: ps,
+        creating: true,
+        balance: 0,
+        numberOf: (i) => i + 1,
+      ).single;
+      expect(f2.code, IssueCode.f2);
+      expect(f2.body, contains('no Saga Genesis #7'));
+    });
+  });
+
+  group('other tokens', () {
+    test('a heir new to SKR claims it with a little SOL, not USDC', () {
+      final p = _share(10000, mint: AppConfig.skrMint);
+      final ps = [p];
+      final d3 = payoutWarnings(
+        payouts: ps,
+        index: 0,
+        preview: _preview(ps, 1000000000),
+        fee: FeeInfo(fees: _fees),
+        facts: const DeliveryFacts(walletLamports: 0, tokenUnits: 0),
+      ).single;
+      expect(d3.code, IssueCode.d3);
+      expect(d3.body, contains('a little SOL for the network fee'));
+      expect(d3.body, isNot(contains('0.50 USDC')));
+    });
+  });
+
+  group('FeeInfo with an SKR rate', () {
+    const skr = AppConfig.skrMint;
+    final fee = FeeInfo(
+      fees: FeeSchedule(
+        treasury: addr(9),
+        feeBpsPublic: 200,
+        feeBpsPrivate: 200,
+        skrMint: skr,
+        feeBpsSkr: 150,
+        skrBurnBps: 1000,
+      ),
+    );
+
+    test('SKR pays 1.5% on every rail and shows the burn', () {
+      expect(fee.bpsFor(Rail.cloak, skr), 150);
+      expect(fee.bpsFor(Rail.solana, usdc), 200);
+      expect(fee.railLine(Rail.zcash, skr), '1.5% fee · 10% burned');
+      expect(fee.railLine(Rail.solana), '2% fee');
+      expect(fee.note(Rail.solana, skr), '(after the 1.5% fee)');
+      expect(const FeeInfo().railLine(Rail.solana), 'fee loading…');
+      expect(const FeeInfo(failed: true).railLine(Rail.solana), 'Fee unknown');
+    });
+
+    test('the preview takes the SKR rate from SKR payouts', () {
+      final p = PlanPreview.of(
+        [_share(10000, mint: skr), _share(10000, name: 'Bo')],
+        balanceOf: (_) => 1000000,
+        feeBps: fee.bpsFor,
+      );
+      expect(p.amounts[0].net, 985000);
+      expect(p.amounts[1].net, 980000);
     });
   });
 }

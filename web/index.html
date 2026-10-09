@@ -5,6 +5,12 @@
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
+  <!--
+    No inline or foreign script except CanvasKit (gstatic) and the
+    SRI-pinned @solana/web3.js (jsdelivr); 'wasm-unsafe-eval' only lets
+    CanvasKit compile its WebAssembly.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Deadman: the safety net for your self-custody. Check in, and if you go silent your crypto still ends up where you decided.">

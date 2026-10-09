@@ -121,8 +121,10 @@ Future<void> main(List<String> argv) async {
   await step('release #2 (fully vested, basic tier)', release);
   vault = (await client.fetchVault(owner.address, 0))!;
   final heirGot = await usdc(heir.address);
+  final feeBps = (await client.fetchFees()).feeBpsPublic;
+  final expected = 10000000 - 10000000 * feeBps ~/ 10000;
   stdout.writeln(
-    'heir USDC $heirGot (expect ~9800000 after the 2% fee), '
+    'heir USDC $heirGot (expect ~$expected after the $feeBps bps fee), '
     'released ${vault.rules[0].released}, '
     'committed ${vault.committed(mint)}',
   );
@@ -132,8 +134,8 @@ Future<void> main(List<String> argv) async {
     () => client.buildCloseVault(owner: owner.address, planId: 0),
   );
   stdout.writeln('vault closed: ${await client.fetchVault(owner.address, 0)}');
-  // Each release floors its 2% fee, so the heir may get a unit more.
-  if ((heirGot - 9800000).abs() > 2) exit(1);
+  // Each release floors its fee, so the heir may get a unit more.
+  if ((heirGot - expected).abs() > 2) exit(1);
   stdout.writeln('E2E OK');
   exit(0);
 }

@@ -1,0 +1,14 @@
+{
+  "name": "Boney Cap",
+  "symbol": "BONEY",
+  "description": "Devnet Boney skin for Deadman: holding this NFT puts the Cap on Boney in the app and on the home-screen widget. No value.",
+  "image": "https://raw.githubusercontent.com/GabrielNeugebauer/deadman/main/docs/brand/nft/boney-cap.png",
+  "attributes": [
+    { "trait_type": "skin", "value": "cap" },
+    { "trait_type": "network", "value": "devnet" }
+  ],
+  "properties": {
+    "category": "image",
+    "files": [{ "uri": "https://raw.githubusercontent.com/GabrielNeugebauer/deadman/main/docs/brand/nft/boney-cap.png", "type": "image/png" }]
+  }
+}

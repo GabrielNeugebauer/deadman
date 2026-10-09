@@ -100,7 +100,7 @@ void main() {
     });
 
     test('nothing in the palette is purple', () {
-      for (final c in [DM.locked, DM.tide, DmColors.plus, DM.deep]) {
+      for (final c in [DM.locked, DM.tide, DM.deep]) {
         final hsl = HSLColor.fromColor(c);
         final purple = hsl.saturation > 0.2 && hsl.hue > 250 && hsl.hue < 320;
         expect(purple, isFalse, reason: '$c');

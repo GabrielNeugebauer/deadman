@@ -10,6 +10,7 @@ import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/format.dart';
 import 'package:deadman/ui/screens/circle_tab.dart';
 import 'package:deadman/ui/widgets/brand/brand.dart';
+import 'package:deadman/ui/widgets/nft.dart';
 import 'package:deadman/wallet/wallet_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -486,78 +487,17 @@ void main() {
     });
   });
 
-  group("owner's monthly plan", () {
-    const waived = "No protocol fee (owner's monthly plan)";
-
-    /// [fake], with the owner's account subscription paid until [until].
-    T subscribed<T extends FakeApi>(T fake, int until) => fake
-      ..subscription = AccountSubscription(owner: addr(1), paidUntil: until);
-
-    testWidgets('a covered tier says so, with the full payout', (tester) async {
-      // Paid through the last check-in (lastPulse 1000).
-      final v = vault(withdrawableLamports: 1000000000, rules: [rule()]);
-      await _pump(
-        tester,
-        [v],
-        fake: subscribed(
-          _ClaimApi(
-            const ClaimQuote(
-              payer: ClaimPayer.sponsor,
-              mint: null,
-              net: 1000000000,
-            ),
-          ),
-          2000,
-        ),
-      );
-      expect(find.text('$waived · you receive 1.000 SOL'), findsOneWidget);
-    });
-
-    testWidgets('a lapse before the last check-in: the fee applies', (
+  testWidgets('a claim states no subscription or waiver', (tester) async {
+    final v = vault(withdrawableLamports: 1000000000, rules: [rule()]);
+    await _pump(
       tester,
-    ) async {
-      final v = vault(withdrawableLamports: 1000000000, rules: [rule()]);
-      await _pump(tester, [v], fake: subscribed(_ClaimApi(null), 999));
-      expect(find.textContaining('No protocol fee'), findsNothing);
-    });
-
-    testWidgets('another owner subscribed: the fee applies', (tester) async {
-      final v = vault(withdrawableLamports: 1000000000, rules: [rule()]);
-      await _pump(
-        tester,
-        [v],
-        fake: _ClaimApi(null)
-          ..subscription = AccountSubscription(
-            owner: addr(7),
-            paidUntil: nowSecs() + 86400,
-          ),
-      );
-      expect(find.textContaining('No protocol fee'), findsNothing);
-    });
-
-    testWidgets('vesting while subscribed, without a quote', (tester) async {
-      final v = vestingVault(
-        withdrawableLamports: 1000000000,
-        schedules: [schedule(seed: 10)],
-      );
-      await _pump(tester, [
-        v,
-      ], fake: subscribed(_ClaimApi(null), nowSecs() + 86400));
-      expect(find.text(waived), findsOneWidget);
-    });
-
-    testWidgets('vesting after the subscription ended: no note', (
-      tester,
-    ) async {
-      final v = vestingVault(
-        withdrawableLamports: 1000000000,
-        schedules: [schedule(seed: 10)],
-      );
-      await _pump(tester, [
-        v,
-      ], fake: subscribed(_ClaimApi(null), nowSecs() - 86400));
-      expect(find.textContaining('No protocol fee'), findsNothing);
-    });
+      [v],
+      fake: _ClaimApi(
+        const ClaimQuote(payer: ClaimPayer.sponsor, mint: null, net: 980000000),
+      ),
+    );
+    expect(find.textContaining('No protocol fee'), findsNothing);
+    expect(find.textContaining('Plus'), findsNothing);
   });
 
   group('standing', () {
@@ -774,5 +714,30 @@ void main() {
       expect(find.text('Pull down to try again.'), findsOneWidget);
       expect(_color(tester, find.textContaining('RPC unreachable')), DM.dust);
     });
+  });
+
+  testWidgets('an NFT tier reads by its name, with its thumbnail', (
+    tester,
+  ) async {
+    addTearDown(forgetNfts);
+    final mint = addr(83);
+    final api = FakeApi(const [])
+      ..walletNfts = [
+        WalletNft(mint: mint, name: 'Saga Genesis #7', symbol: 'SAGA'),
+      ];
+    await _pump(
+      tester,
+      [
+        vault(
+          rules: [rule(mint: mint, mode: AmountMode.fixed, amount: 1)],
+          lastPulse: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        ),
+      ],
+      fake: api,
+      tokens: {'${addr(100)}:$mint': 1},
+    );
+    expect(find.text('Saga Genesis #7'), findsOneWidget);
+    expect(find.byType(NftImage), findsOneWidget);
+    expect(find.textContaining('units'), findsNothing);
   });
 }

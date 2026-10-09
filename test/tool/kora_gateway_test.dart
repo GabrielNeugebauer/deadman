@@ -72,6 +72,7 @@ VaultAccount vaultAccount({
   data: Uint8List.fromList(
     vaultBytes(owner: owner, guard: guard, guardian: guardian),
   ),
+  lamports: rentExemptLamports(vaultAccountSize),
 );
 
 Matcher rejects(Pattern message) => throwsA(
@@ -297,6 +298,7 @@ void main() {
         data: Uint8List.fromList(
           vaultBytes(owner: ownerKey.address, guard: ownerKey.address),
         ),
+        lamports: 0,
       );
       expect(
         () => checkVaultAccounts(r, [account], policy),
@@ -336,6 +338,241 @@ void main() {
         ], policy),
         rejects('not a Deadman vault'),
       );
+    });
+  });
+
+  group('lockdown budget (M-3)', () {
+    final heir = key(130);
+    final usdcMint = key(131);
+
+    /// [owner]'s plan [planId] guarded by [guardKey], with one pending tier
+    /// (SOL, or [mint]) unless [rules] is false, holding [lamports] above
+    /// its rent.
+    VaultAccount plan(
+      String owner,
+      String guardKey, {
+      int planId = 0,
+      int lamports = 50000000,
+      bool rules = true,
+      String? mint,
+      int executedAt = 0,
+      int revokedAt = 0,
+    }) => (
+      owner: AppConfig.programId,
+      lamports: rentExemptLamports(vaultAccountSize) + lamports,
+      data: Uint8List.fromList(
+        vaultBytes(
+          owner: owner,
+          planId: planId,
+          guard: guardKey,
+          revokedAt: revokedAt,
+          rules: [
+            if (rules)
+              RuleState(
+                beneficiary: heir,
+                rail: Rail.solana,
+                afterSecs: 3600,
+                mode: AmountMode.fixed,
+                amount: 1000000,
+                mint: mint,
+                executedAt: executedAt,
+                paid: 0,
+              ),
+          ],
+        ),
+      ),
+    );
+
+    Future<Uint8List> guardTx(
+      Ed25519HDKeyPair g,
+      String owner,
+      List<int> disc, {
+      List<int> plans = const [0],
+    }) => wire(
+      [
+        for (final p in plans)
+          deadmanIx([
+            ro(g.address, signer: true),
+            rw(vaultPda(owner, p).address),
+          ], disc),
+      ],
+      signers: [g],
+    );
+
+    test('pulses and claims never use up the lockdown budget', () async {
+      final chain = <String, VaultAccount?>{};
+      final pulses = UsageLimiter(global: 3);
+      final lockdowns = UsageLimiter(perVault: 3, global: 10);
+      final route = SponsorRoute(
+        policy: policy,
+        limiter: pulses,
+        lockdowns: lockdowns,
+        fetchAccounts: (a) async => [for (final k in a) chain[k]],
+      );
+      for (var i = 0; i < 3; i++) {
+        final sybil = await keypair(140 + i);
+        final o = key(150 + i);
+        chain[vaultPda(o, 0).address] = plan(o, sybil.address, lamports: 0);
+        await route.admit(await guardTx(sybil, o, Disc.pulse));
+      }
+      final late = await keypair(143);
+      chain[vaultPda(key(153), 0).address] = plan(key(153), late.address);
+      await expectLater(
+        route.admit(await guardTx(late, key(153), Disc.pulse)),
+        rejects('sponsor reached its cap of 3'),
+      );
+
+      final victim = await keypair(144);
+      final o = key(154);
+      chain[vaultPda(o, 0).address] = plan(o, victim.address);
+      final a = await route.admit(await guardTx(victim, o, Disc.lockdown));
+      expect(a.summary, contains('lockdown signer=${victim.address}'));
+      expect(lockdowns.toJson()['global'], hasLength(1));
+      expect(pulses.toJson()['global'], hasLength(3));
+    });
+
+    test('guards of empty, paid-out or revoked plans get no sponsored '
+        'lockdown, and take no quota', () async {
+      final g = await keypair(145);
+      final o = key(155);
+      final lockdowns = UsageLimiter();
+      for (final (account, why) in [
+        (plan(o, g.address, lamports: 9999999), 'below 0.01 SOL'),
+        (plan(o, g.address, rules: false), 'no rules'),
+        (plan(o, g.address, executedAt: 1790000000), 'all paid'),
+        (plan(o, g.address, revokedAt: 1790000000), 'revoked'),
+        (plan(o, g.address, lamports: 0, mint: usdcMint), 'no tokens'),
+      ]) {
+        final route = SponsorRoute(
+          policy: policy,
+          limiter: UsageLimiter(),
+          lockdowns: lockdowns,
+          fetchAccounts: (a) async => [
+            for (final k in a)
+              if (k == vaultPda(o, 0).address) account else null,
+          ],
+        );
+        await expectLater(
+          route.admit(await guardTx(g, o, Disc.lockdown)),
+          rejects('Lockdowns are sponsored only for a plan'),
+          reason: why,
+        );
+      }
+      expect(lockdowns.toJson()['global'], isEmpty);
+    });
+
+    test('a token plan counts when its vault holds the token', () async {
+      final g = await keypair(146);
+      final o = key(156);
+      final v = vaultPda(o, 0).address;
+      final chain = <String, VaultAccount?>{
+        v: plan(o, g.address, lamports: 0, mint: usdcMint),
+        associatedTokenAddress(v, usdcMint, tokenProgramId): tokenAccount(
+          v,
+          1,
+          mint: usdcMint,
+        ),
+      };
+      final route = SponsorRoute(
+        policy: policy,
+        limiter: UsageLimiter(),
+        fetchAccounts: (a) async => [for (final k in a) chain[k]],
+      );
+      await route.admit(await guardTx(g, o, Disc.lockdown));
+      // An account of another owner at that address does not count.
+      chain[associatedTokenAddress(v, usdcMint, tokenProgramId)] = tokenAccount(
+        key(157),
+        5,
+        mint: usdcMint,
+      );
+      await expectLater(
+        route.admit(await guardTx(g, o, Disc.lockdown)),
+        rejects('Lockdowns are sponsored only for a plan'),
+      );
+    });
+
+    test('one funded plan is enough for a lockdown of all the owner\'s '
+        'plans', () async {
+      final g = await keypair(147);
+      final o = key(158);
+      final chain = <String, VaultAccount?>{
+        vaultPda(o, 0).address: plan(o, g.address, rules: false),
+        vaultPda(o, 1).address: plan(o, g.address, planId: 1),
+      };
+      final route = SponsorRoute(
+        policy: policy,
+        limiter: UsageLimiter(),
+        fetchAccounts: (a) async => [for (final k in a) chain[k]],
+      );
+      final a = await route.admit(
+        await guardTx(g, o, Disc.lockdown, plans: [0, 1]),
+      );
+      expect(a.summary, contains(vaultPda(o, 1).address));
+    });
+
+    test(
+      'a few lockdowns per vault per day, and a pool of their own',
+      () async {
+        final g = await keypair(148);
+        final o = key(159);
+        final chain = {vaultPda(o, 0).address: plan(o, g.address)};
+        final lockdowns = UsageLimiter(
+          perVault: 3,
+          global: 4,
+          unit: SponsorRoute.lockdownUnit,
+        );
+        final route = SponsorRoute(
+          policy: policy,
+          limiter: UsageLimiter(),
+          lockdowns: lockdowns,
+          fetchAccounts: (a) async => [for (final k in a) chain[k]],
+        );
+        final tx = await guardTx(g, o, Disc.lockdown);
+        for (var i = 0; i < 3; i++) {
+          await route.admit(tx);
+        }
+        await expectLater(
+          route.admit(tx),
+          rejects('reached 3 sponsored lockdowns per 24h'),
+        );
+        final other = await keypair(149);
+        chain[vaultPda(key(160), 0).address] = plan(key(160), other.address);
+        await route.admit(await guardTx(other, key(160), Disc.lockdown));
+        chain[vaultPda(key(161), 0).address] = plan(key(161), other.address);
+        await expectLater(
+          route.admit(await guardTx(other, key(161), Disc.lockdown)),
+          rejects('cap of 4 sponsored lockdowns'),
+        );
+      },
+    );
+
+    test('lockdowns and pulses never share a transaction', () async {
+      final g = await keypair(162);
+      final o = key(163);
+      final tx = await wire(
+        [
+          deadmanIx([
+            ro(g.address, signer: true),
+            rw(vaultPda(o, 0).address),
+          ], Disc.lockdown),
+          deadmanIx([
+            ro(g.address, signer: true),
+            rw(vaultPda(o, 1).address),
+          ], Disc.pulse),
+        ],
+        signers: [g],
+      );
+      expect(
+        () => validateSponsorTx(tx, policy),
+        rejects('Send lockdowns in a transaction of their own'),
+      );
+      final pulse = validateSponsorTx(await guardTx(g, o, Disc.pulse), policy);
+      expect(pulse.lockdown, isFalse);
+      final lock = validateSponsorTx(
+        await guardTx(g, o, Disc.lockdown),
+        policy,
+      );
+      expect(lock.lockdown, isTrue);
     });
   });
 
@@ -625,6 +862,7 @@ VaultAccount tokenAccount(
   data: Uint8List.fromList(
     tokenAccountBytes(mint: mint, owner: holder, amount: amount)..[108] = state,
   ),
+  lamports: 2039280,
 );
 
 String usdcAta(String holder) =>
@@ -660,15 +898,15 @@ Instruction ataCreateFor(String payer, String wallet, String mint) =>
     );
 
 /// `execute_token_rule` / `release_vested_token` accounts, as the client
-/// builds them; [subscription] defaults to the vault owner's PDA.
+/// builds them; [treasury] null passes the program id for a payout that
+/// leaves no fee for the treasury.
 Instruction payoutIx(
   String executor,
   String vaultOwner,
   String beneficiary,
-  String treasury,
+  String? treasury,
   List<int> disc, {
   String mint = usdc,
-  String? subscription,
 }) {
   final vault = vaultPda(vaultOwner, 0).address;
   return deadmanIx(
@@ -676,13 +914,15 @@ Instruction payoutIx(
       ro(executor, signer: true),
       rw(vault),
       ro(configPda().address),
-      ro(mint),
+      rw(mint),
       rw(associatedTokenAddress(vault, mint, tokenProgramId)),
       rw(beneficiary),
       rw(associatedTokenAddress(beneficiary, mint, tokenProgramId)),
-      rw(associatedTokenAddress(treasury, mint, tokenProgramId)),
+      if (treasury == null)
+        ro(AppConfig.programId)
+      else
+        rw(associatedTokenAddress(treasury, mint, tokenProgramId)),
       ro(tokenProgramId),
-      ro(subscription ?? subPda(vaultOwner).address),
     ],
     [...disc, 0],
   );
@@ -1136,7 +1376,8 @@ void paymasterTests() {
     for (final (name, data) in [
       ('init_config', [23, 235, 115, 232, 168, 96, 1, 231]),
       ('set_config', [108, 158, 154, 175, 212, 98, 52, 66]),
-      ('set_subscription', Disc.setSubscription),
+      ('propose_admin', [121, 214, 199, 212, 87, 39, 117, 234]),
+      ('accept_admin', [112, 42, 45, 90, 116, 181, 13, 170]),
     ]) {
       test('rejects $name', () async {
         final tx = await wire(
@@ -1156,6 +1397,10 @@ void paymasterTests() {
     for (final (name, data) in [
       ('create_vault', [29, 237, 247, 208, 193, 82, 54, 135]),
       ('update_policy', [212, 245, 246, 7, 163, 151, 18, 57]),
+      ('subscribe', [254, 28, 191, 138, 156, 179, 183, 53]),
+      ('subscribe_with_token', [184, 57, 19, 15, 241, 194, 240, 220]),
+      ('set_subscription', [63, 240, 195, 242, 14, 124, 40, 179]),
+      ('set_subscription_price', [82, 119, 124, 171, 111, 189, 31, 246]),
     ]) {
       test('rejects the removed $name', () async {
         final tx = await wire(
@@ -1172,229 +1417,41 @@ void paymasterTests() {
       });
     }
 
-    group('subscribe', () {
-      final treasury = key(41);
-      Instruction subscribe({
-        String? payer,
-        String? treasuryAccount,
-        String? subscription,
-      }) {
-        final ix = subscribeIx(
-          owner: owner.address,
-          payer: payer,
-          mint: usdc,
-          treasury: treasury,
-          periods: 12,
-        );
-        return deadmanIx([
-          ix.accounts[0],
-          ix.accounts[1],
-          if (subscription == null) ix.accounts[2] else rw(subscription),
-          ...ix.accounts.sublist(3, 7),
-          if (treasuryAccount == null) ix.accounts[7] else rw(treasuryAccount),
-          ...ix.accounts.sublist(8),
-        ], ix.data.toList());
-      }
-
-      test('the owner as payer: the basic price, Kora in no slot', () async {
-        final tx = await wire(
-          [subscribe(), pay(owner.address, amount: 20000)],
-          signers: [owner],
-        );
-        final r = validatePaymasterTx(tx, pmPolicy);
-        expect(r.signer, owner.address);
-        expect(r.instructions, ['deadman.subscribe', 'token.transfer_checked']);
-        expect(r.tier, PaymasterTier.basic);
-        expect(r.koraFundsRent, isFalse);
-        expect(r.koraAtas, 0);
-        expect(r.vaultChecks, isEmpty);
-        expect(await verifyOwnerSignature(r), isTrue);
-      });
-
-      test('Kora as payer funds the subscription account: a Kora-funded '
-          'creation at the plan price', () async {
-        final r = validatePaymasterTx(
-          await wire(
-            [subscribe(payer: kora), pay(owner.address)],
-            signers: [owner],
-          ),
-          pmPolicy,
-        );
-        expect(r.koraFundsRent, isTrue);
-        expect(r.tier, PaymasterTier.plan);
-        await expectLater(
-          wire(
-            [subscribe(payer: kora), pay(owner.address, amount: 2999999)],
-            signers: [owner],
-          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
-          rejects('below the plan price'),
-        );
-        await expectLater(
-          wire(
-            [
-              subscribe(payer: kora),
-              createVault(owner.address, kora),
-              pay(owner.address),
-            ],
-            signers: [owner],
-          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
-          rejects('At most one paymaster-funded account'),
-        );
-      });
-
-      test('rejects Kora in any other slot', () async {
-        final tx = await wire(
-          [subscribe(treasuryAccount: kora), pay(owner.address)],
-          signers: [owner],
-        );
-        expect(
-          () => validatePaymasterTx(tx, pmPolicy),
-          rejects('The paymaster may only be the payer'),
-        );
-      });
-
-      test('rejects a payer other than the owner or Kora', () async {
-        final ix = subscribe();
-        final tx = await wire(
-          [
-            deadmanIx([
-              ix.accounts[0],
-              rw(key(48)),
-              ...ix.accounts.sublist(2),
-            ], ix.data.toList()),
-            pay(owner.address),
-          ],
-          signers: [owner],
-        );
-        expect(
-          () => validatePaymasterTx(tx, pmPolicy),
-          rejects('The subscribe payer must be the paymaster or the owner'),
-        );
-      });
-
-      test("rejects any account but the owner's subscription PDA", () async {
-        for (final wrong in [
-          subPda(key(49)).address,
-          vaultPda(owner.address, 0).address,
-          key(49),
-        ]) {
-          final tx = await wire(
-            [subscribe(payer: kora, subscription: wrong), pay(owner.address)],
-            signers: [owner],
+    test('create_plan and update_plan may name the plan mints', () async {
+      final mints = [for (var i = 0; i < 8; i++) ro(key(140 + i))];
+      Future<PaymasterRequest> check(Instruction ix) async =>
+          validatePaymasterTx(
+            await wire([ix, pay(owner.address)], signers: [owner]),
+            pmPolicy,
           );
-          expect(
-            () => validatePaymasterTx(tx, pmPolicy),
-            rejects("the owner's own subscription"),
-          );
-        }
-      });
-
-      test(
-        'rejects a missing account and the removed subscribe_plan',
-        () async {
-          final ix = subscribe();
-          final short = await wire(
-            [
-              deadmanIx(ix.accounts.take(9).toList(), ix.data.toList()),
-              pay(owner.address),
-            ],
-            signers: [owner],
-          );
-          expect(
-            () => validatePaymasterTx(short, pmPolicy),
-            rejects('Malformed Deadman subscribe'),
-          );
-          final old = await wire(
-            [
-              deadmanIx(ix.accounts.take(8).toList(), [
-                ...[35, 47, 216, 174, 106, 203, 179, 39],
-                12,
-                0,
-              ]),
-              pay(owner.address),
-            ],
-            signers: [owner],
-          );
-          expect(
-            () => validatePaymasterTx(old, pmPolicy),
-            rejects('Deadman instruction is not paid by the paymaster'),
-          );
-        },
+      final create = createVault(owner.address, kora);
+      final r = await check(
+        deadmanIx([...create.accounts, ...mints], create.data.toList()),
       );
-
-      test('Kora never funds the treasury account it pays into, nor a '
-          'token account of the subscription PDA', () async {
-        await expectLater(
-          wire(
-            [
-              ataCreateIdempotent(kora, treasury),
-              subscribe(),
-              pay(owner.address),
-            ],
-            signers: [owner],
-          ).then((tx) => validatePaymasterTx(tx, pmPolicy)),
-          rejects('only funds a token account'),
-        );
-        final sub = subPda(owner.address).address;
-        final r = validatePaymasterTx(
-          await wire(
-            [
-              subscribe(),
-              ataCreateFor(kora, sub, usdc),
-              transferChecked(
-                source: usdcAta(owner.address),
-                dest: usdcAta(sub),
-                authority: owner.address,
-              ),
-              pay(owner.address),
-            ],
-            signers: [owner],
-          ),
-          pmPolicy,
-        );
-        expect(r.vaultChecks, [
-          sub,
-        ], reason: 'not a vault: the route rejects it on chain');
-      });
-
-      test('PaymasterRoute: a Kora-funded subscription takes a creation '
-          'slot; an owner-paid one does not', () async {
-        final route = pmRoute(
-          creates: UsageLimiter(
-            perVault: 0,
-            perSigner: 1,
-            clock: () => 5000,
-            signerLabel: 'owner',
-            unit: 'paymaster-funded accounts',
-          ),
-          chain: {
-            usdcAta(owner.address): tokenAccount(owner.address, 90000000),
-          },
-        );
-        final funded = await wire(
-          [subscribe(payer: kora), pay(owner.address)],
-          signers: [owner],
-        );
-        expect((await route.admit(funded)).summary, contains('tier=plan'));
-        await expectLater(
-          route.admit(funded),
-          rejects('reached 1 paymaster-funded accounts'),
-        );
-        await expectLater(
-          route.admit(
-            await wire(
-              [createVault(owner.address, kora), pay(owner.address)],
-              signers: [owner],
-            ),
-          ),
-          rejects('reached 1 paymaster-funded accounts'),
-        );
-        final extend = await wire(
-          [subscribe(), pay(owner.address, amount: 20000)],
-          signers: [owner],
-        );
-        expect((await route.admit(extend)).summary, contains('tier=basic'));
-      });
+      expect(r.tier, PaymasterTier.plan);
+      final update = deadmanIx(
+        [
+          rw(owner.address, signer: true),
+          rw(vaultPda(owner.address, 0).address),
+          ...mints,
+        ],
+        [...Disc.updatePlan, 0],
+      );
+      expect((await check(update)).instructions.first, 'deadman.update_plan');
+      await expectLater(
+        check(
+          deadmanIx([
+            ...create.accounts,
+            ...mints,
+            ro(key(150)),
+          ], create.data.toList()),
+        ),
+        rejects('Malformed Deadman create_plan'),
+      );
+      await expectLater(
+        check(deadmanIx([...create.accounts, ro(kora)], create.data.toList())),
+        rejects('may only be the payer'),
+      );
     });
 
     test('rejects other programs', () async {
@@ -1495,6 +1552,39 @@ void paymasterTests() {
       expect((await route.admit(deposit)).summary, contains('tier=basic'));
     });
 
+    test('Kora funds a new plan only at an empty address (LC-I1)', () async {
+      final vault = vaultPda(owner.address, 0).address;
+      final creates = UsageLimiter(perVault: 0);
+      final route = pmRoute(
+        creates: creates,
+        chain: {
+          usdcAta(owner.address): tokenAccount(owner.address, 9000000),
+          vault: (owner: systemProgramId, data: Uint8List(0), lamports: 1),
+        },
+      );
+      await expectLater(
+        route.admit(
+          await wire(
+            [createVault(owner.address, kora), pay(owner.address)],
+            signers: [owner],
+          ),
+        ),
+        rejects('The plan address $vault already holds lamports'),
+      );
+      expect(creates.toJson()['global'], isEmpty);
+      // The owner may still top it up itself, at the basic price.
+      final own = await route.admit(
+        await wire(
+          [
+            createVault(owner.address, owner.address),
+            pay(owner.address, amount: 20000),
+          ],
+          signers: [owner],
+        ),
+      );
+      expect(own.summary, contains('tier=basic'));
+    });
+
     test('rejects an unsigned transaction before counting it', () async {
       final limiter = UsageLimiter(perVault: 0, perSigner: 1);
       final route = pmRoute(limiter: limiter);
@@ -1550,7 +1640,7 @@ void paymasterTests() {
       final route = pmRoute(
         chain: {
           usdcAta(owner.address): tokenAccount(owner.address, 9000000),
-          notVault: (owner: systemProgramId, data: Uint8List(0)),
+          notVault: (owner: systemProgramId, data: Uint8List(0), lamports: 1),
         },
       );
       final tx = await wire(
@@ -1955,7 +2045,6 @@ Instruction solClaimIx(
   int index = 0,
   String? config,
   String? treasuryAccount,
-  String? subscription,
 }) => deadmanIx(
   [
     ro(executor, signer: true),
@@ -1963,7 +2052,6 @@ Instruction solClaimIx(
     ro(config ?? configPda().address),
     rw(beneficiary),
     rw(treasuryAccount ?? treasury),
-    ro(subscription ?? subPda(claimVaultOwner).address),
   ],
   [...disc, index],
 );
@@ -1975,8 +2063,10 @@ VaultAccount claimVault(
   PlanKind kind = PlanKind.inheritance,
   String? mint,
   int executedAt = 0,
+  int lamports = 50000000,
 }) => (
   owner: AppConfig.programId,
+  lamports: lamports,
   data: Uint8List.fromList(
     vaultBytes(
       owner: claimVaultOwner,
@@ -2022,13 +2112,7 @@ void claimTests() {
         final r = validateSponsorTx(tx, policy);
         expect(r.signer, heir.address);
         expect(r.vaults, [vault]);
-        expect(r.claim, (
-          name: name,
-          vault: vault,
-          index: 0,
-          kind: kind,
-          subscription: subPda(claimVaultOwner).address,
-        ));
+        expect(r.claim, (name: name, vault: vault, index: 0, kind: kind));
         expect(r.feeLamports, 10000);
         expect(await verifyGuardSignature(r), isTrue);
         checkClaimVault(r, [claimVault(heir.address, kind: kind)], policy);
@@ -2131,6 +2215,18 @@ void claimTests() {
         () => validateSponsorTx(short, policy),
         rejects('Malformed Deadman release_vested_sol'),
       );
+      // The old layout, with the removed subscription account at the end.
+      final ix = solClaimIx(heir.address, heir.address, Disc.executeSolRule);
+      final withSubscription = await wire(
+        [
+          deadmanIx([...ix.accounts, ro(key(76))], ix.data.toList()),
+        ],
+        signers: [heir],
+      );
+      expect(
+        () => validateSponsorTx(withSubscription, policy),
+        rejects('Malformed Deadman execute_sol_rule'),
+      );
     });
 
     group('checkClaimVault', () {
@@ -2162,9 +2258,17 @@ void claimTests() {
         final current = claimVault(heir.address);
         for (final account in <VaultAccount?>[
           null,
-          (owner: systemProgramId, data: current.data),
-          (owner: AppConfig.programId, data: current.data.sublist(0, 1318)),
-          (owner: AppConfig.programId, data: Uint8List(vaultAccountSize)),
+          (owner: systemProgramId, data: current.data, lamports: 0),
+          (
+            owner: AppConfig.programId,
+            data: current.data.sublist(0, 1318),
+            lamports: 0,
+          ),
+          (
+            owner: AppConfig.programId,
+            data: Uint8List(vaultAccountSize),
+            lamports: 0,
+          ),
         ]) {
           expect(
             () => checkClaimVault(r, [account], policy),
@@ -2210,39 +2314,6 @@ void claimTests() {
           () => checkClaimVault(second, [claimVault(heir.address)], policy),
           rejects('has no rule 1'),
         );
-      });
-
-      test("the subscription must be the vault owner's PDA", () async {
-        expect(
-          subscriptionPda(claimVaultOwner, AppConfig.programId),
-          subPda(claimVaultOwner).address,
-        );
-        for (final wrong in [
-          subPda(heir.address).address,
-          vault,
-          configPda().address,
-          key(76),
-        ]) {
-          final r = validateSponsorTx(
-            await wire(
-              [
-                solClaimIx(
-                  heir.address,
-                  heir.address,
-                  Disc.executeSolRule,
-                  subscription: wrong,
-                ),
-              ],
-              signers: [heir],
-            ),
-            policy,
-          );
-          expect(r.claim!.subscription, wrong);
-          expect(
-            () => checkClaimVault(r, [claimVault(heir.address)], policy),
-            rejects('must name the subscription account of the owner'),
-          );
-        }
       });
     });
 
@@ -2323,7 +2394,6 @@ void claimTests() {
       bool createTreasuryAta = false,
       String? beneficiary,
       int fee = 500000,
-      String? subscription,
     }) => wire(
       [
         if (createTreasuryAta) ataCreateFor(kora, treasury, usdc),
@@ -2334,7 +2404,6 @@ void claimTests() {
           beneficiary ?? heir.address,
           treasury,
           disc,
-          subscription: subscription,
         ),
         pay(heir.address, amount: fee),
       ],
@@ -2354,7 +2423,6 @@ void claimTests() {
           index: 0,
           kind: kind,
           mint: usdc,
-          subscription: subPda(claimVaultOwner).address,
         ));
         expect(r.tier, PaymasterTier.account);
         expect(r.koraAtas, 1);
@@ -2455,21 +2523,7 @@ void claimTests() {
       );
     });
 
-    test("the claim must name the vault owner's subscription", () async {
-      for (final wrong in [subPda(heir.address).address, vault, key(80)]) {
-        final limiter = UsageLimiter(perVault: 0);
-        await expectLater(
-          pmRoute(
-            limiter: limiter,
-            chain: {vault: claimVault(heir.address, mint: usdc)},
-          ).admit(await claimTx(Disc.executeTokenRule, subscription: wrong)),
-          rejects('must name the subscription account of the owner'),
-        );
-        expect(limiter.toJson()['global'], isEmpty);
-      }
-    });
-
-    test('Token-2022 hook extras may follow the subscription', () async {
+    test('payouts take no extra accounts (nothing is forwarded)', () async {
       final ix = payoutIx(
         heir.address,
         claimVaultOwner,
@@ -2477,25 +2531,45 @@ void claimTests() {
         treasury,
         Disc.executeTokenRule,
       );
-      Future<PaymasterRequest> withExtras(int extras) async =>
+      final tx = await wire(
+        [
+          deadmanIx([...ix.accounts, ro(key(90))], ix.data.toList()),
+          pay(heir.address, amount: 20000),
+        ],
+        signers: [heir],
+      );
+      expect(
+        () => validatePaymasterTx(tx, pmPolicy),
+        rejects('Malformed Deadman execute_token_rule'),
+      );
+    });
+
+    test('a payout with no treasury fee passes the program id as '
+        'treasury_token; Kora opens only the heir ATA', () async {
+      Future<PaymasterRequest> check(List<Instruction> ixs) async =>
           validatePaymasterTx(
             await wire(
-              [
-                deadmanIx([
-                  ...ix.accounts,
-                  for (var i = 0; i < extras; i++) ro(key(90 + i)),
-                ], ix.data.toList()),
-                pay(heir.address, amount: 20000),
-              ],
+              [...ixs, pay(heir.address, amount: 500000)],
               signers: [heir],
             ),
             pmPolicy,
           );
-      expect(
-        (await withExtras(8)).fundingClaim?.subscription,
-        subPda(claimVaultOwner).address,
+      final nft = key(91);
+      final payout = payoutIx(
+        heir.address,
+        claimVaultOwner,
+        heir.address,
+        null,
+        Disc.executeTokenRule,
+        mint: nft,
       );
-      await expectLater(withExtras(9), rejects('Malformed Deadman'));
+      final r = await check([ataCreateFor(kora, heir.address, nft), payout]);
+      expect(r.koraAtas, 1);
+      expect(r.fundingClaim, isNull, reason: 'not paid in the fee mint');
+      await expectLater(
+        check([ataCreateFor(kora, treasury, nft), payout]),
+        rejects('only funds a token account'),
+      );
     });
 
     test('a payout to someone else does not fund the payer', () async {

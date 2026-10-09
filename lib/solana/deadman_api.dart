@@ -359,6 +359,16 @@ class VaultState {
     return total;
   }
 
+  /// Amount of [mint] (null = SOL) the owner cannot withdraw: vesting
+  /// commitments plus the shares reserved for skipped, unpaid tiers
+  /// (mirrors the program's `locked_for_owner`).
+  int lockedForOwner(String? mint) => committed(mint) + reservedFor(mint);
+
+  /// Some skipped tier still holds a reserved share: the plan cannot be
+  /// closed until its beneficiary claims it.
+  bool get hasPendingReserve =>
+      rules.any((r) => !r.executed && r.skipped && r.reserved > 0);
+
   /// Gross amount tier [index] pays from [balance] of its asset (mirrors
   /// the program's `payout_gross`): a skipped tier gets its reserved share;
   /// any other tier works on the balance minus every reserved share.
@@ -388,98 +398,96 @@ class VaultState {
   }
 }
 
+/// The release fee schedule from `Config`. Fees are charged only when a
+/// tier executes or a vesting installment is released; withdrawing,
+/// closing, cancelling and revoking are free.
 class FeeSchedule {
   const FeeSchedule({
     required this.treasury,
     required this.feeBpsPublic,
     required this.feeBpsPrivate,
+    this.skrMint,
+    this.feeBpsSkr = 0,
+    this.skrBurnBps = 0,
   });
 
   final String treasury;
   final int feeBpsPublic;
   final int feeBpsPrivate;
 
-  int bpsFor(Rail rail) => rail == Rail.solana ? feeBpsPublic : feeBpsPrivate;
+  /// Payouts in this mint pay [feeBpsSkr] on any rail, and [skrBurnBps] of
+  /// that fee is burned; null = no SKR rate.
+  final String? skrMint;
+  final int feeBpsSkr;
+  final int skrBurnBps;
+
+  /// Whether a payout of [mint] (null = SOL) pays the SKR rate.
+  bool isSkr(String? mint) => skrMint != null && mint == skrMint;
+
+  /// Release fee of a payout of [mint] (null = SOL) on [rail] (mirrors
+  /// `Config::fee_bps`).
+  int bpsFor(Rail rail, [String? mint]) => isSkr(mint)
+      ? feeBpsSkr
+      : rail == Rail.solana
+      ? feeBpsPublic
+      : feeBpsPrivate;
+
+  /// Fee on [gross] of [mint] on [rail], rounded down as on chain.
+  int feeOf(int gross, Rail rail, [String? mint]) =>
+      bpsShare(gross, bpsFor(rail, mint));
+
+  /// Part of a [fee] of [mint] that is burned (0 unless SKR).
+  int burnedOf(int fee, String? mint) =>
+      isSkr(mint) ? bpsShare(fee, skrBurnBps) : 0;
+
+  /// Part of a [fee] of [mint] that goes to the treasury.
+  int toTreasuryOf(int fee, String? mint) => fee - burnedOf(fee, mint);
 }
 
-/// An owner's account-wide subscription (`Subscription`, PDA
-/// `["sub", owner]`): while paid it waives the payout fee on every plan of
-/// [owner], present and future.
-class AccountSubscription {
-  const AccountSubscription({required this.owner, required this.paidUntil});
+/// [bps] basis points of [amount], rounded down (the program's `bps_of`).
+int bpsShare(int amount, int bps) =>
+    (BigInt.from(amount) * BigInt.from(bps) ~/ BigInt.from(10000)).toInt();
 
-  final String owner;
-
-  /// End of the paid coverage (unix seconds); 0 if never paid.
-  final int paidUntil;
-
-  /// Paid through [now]: an extension may then be any number of periods,
-  /// while a new or lapsed subscription needs the minimum term.
-  bool active(int now) => paidUntil >= now;
-}
-
-/// Whether [sub] (the owner's subscription, null when never created)
-/// waives the payout fee of [vault] at [now]. Mirrors the program's
-/// `Subscription::covers`: for inheritance, the owner's last check-in fell
-/// within a paid period, however late the payout runs; for vesting, the
-/// subscription is paid at [now].
-bool feeWaivedFor(VaultState vault, AccountSubscription? sub, int now) =>
-    sub != null &&
-    sub.owner == vault.owner &&
-    sub.paidUntil != 0 &&
-    switch (vault.kind) {
-      PlanKind.inheritance => sub.paidUntil >= vault.lastPulse,
-      PlanKind.vesting => sub.paidUntil >= now,
-    };
-
-/// Payout fee of [vault] on [rail] at [now]: 0 while [sub] covers it (see
-/// [feeWaivedFor]), else the [fees] schedule (mirrors `payout_fee_bps`).
-int payoutFeeBps(
-  FeeSchedule fees,
-  VaultState vault,
-  AccountSubscription? sub,
-  Rail rail,
-  int now,
-) => feeWaivedFor(vault, sub, now) ? 0 : fees.bpsFor(rail);
-
-/// The optional flat subscription (`SubscriptionConfig`) that waives the
-/// payout fee on all of an owner's plans while paid.
-class SubscriptionTerms {
-  const SubscriptionTerms({
-    required this.pricePerPeriod,
-    required this.periodSecs,
+/// A classic (non-programmable) Metaplex NFT in a wallet: an SPL Token mint
+/// with 0 decimals and a supply of 1, with a Token Metadata account. It goes
+/// into a plan as a token of amount 1 (`buildDepositToken(amount: 1)`), and
+/// a tier releases it with `RuleSpec(mode: fixed, amount: 1, mint: mint)`.
+///
+/// Not supported: programmable NFTs ([programmable]; they need Token
+/// Metadata transfers and rule sets), compressed NFTs (Bubblegum), Metaplex
+/// Core assets and Token-2022 NFTs (none of these are listed).
+class WalletNft {
+  const WalletNft({
     required this.mint,
-    required this.minPeriods,
-    this.enabled = true,
+    required this.name,
+    required this.symbol,
+    this.imageUrl,
+    this.uri,
+    this.programmable = false,
+    this.frozen = false,
   });
 
-  /// Base units of [mint] per period.
-  final int pricePerPeriod;
-  final int periodSecs;
   final String mint;
+  final String name;
+  final String symbol;
 
-  /// Periods a new or lapsed subscription must buy at once.
-  final int minPeriods;
-  final bool enabled;
+  /// `image` of the off-chain JSON at [uri] (http or https only); null when
+  /// absent, not reachable in time, or not a web URL.
+  final String? imageUrl;
 
-  /// Most periods one `subscribe` may buy.
-  static const maxPeriods = 36;
+  /// Off-chain metadata JSON URL from the Token Metadata account.
+  final String? uri;
 
-  int cost(int periods) => pricePerPeriod * periods;
+  /// A programmable NFT (pNFT): listed so the app can say why it cannot be
+  /// put in a plan.
+  final bool programmable;
 
-  /// Fewest periods an owner whose subscription is [sub] (null = never
-  /// created) may buy at [now]: [minPeriods] when new or lapsed, else 1.
-  int minPeriodsFor(AccountSubscription? sub, int now) =>
-      sub != null && sub.active(now) ? 1 : minPeriods;
+  /// The wallet's token account is frozen (e.g. staked or locked by a
+  /// marketplace): it cannot move until thawed.
+  final bool frozen;
 
-  /// `Subscription.paid_until` after buying [periods] at [now].
-  int paidUntilAfter(AccountSubscription? sub, int periods, int now) {
-    final current = sub?.paidUntil ?? 0;
-    return (current > now ? current : now) + periodSecs * periods;
-  }
-
-  /// Whether a period is about a month (28 to 31 days).
-  bool get monthly => periodSecs >= 28 * 86400 && periodSecs <= 31 * 86400;
+  /// Can go into a plan.
+  bool get supported => !programmable && !frozen;
 }
 
 /// Who pays for a beneficiary's own claim.
@@ -658,9 +666,10 @@ abstract class DeadmanApi {
   });
 
   /// Executes rule [index] of a plan (SOL or token variant, chosen from the
-  /// rule). For token rules it also creates, idempotently, the treasury's
-  /// and the beneficiary's ATAs (paid by [executor]): the program pays into
-  /// any token account the beneficiary owns but no longer creates one.
+  /// rule). For token rules it also creates, idempotently, the
+  /// beneficiary's ATA and, when the payout leaves a fee for the treasury,
+  /// the treasury's (paid by [executor]): the program pays into any token
+  /// account the beneficiary owns but no longer creates one.
   Future<Uint8List> buildExecuteRule({
     required String executor,
     required String vaultOwner,
@@ -791,25 +800,16 @@ abstract class DeadmanApi {
     required int index,
   });
 
-  /// The monthly-plan terms, or null when not offered (no config on chain,
-  /// or disabled).
-  Future<SubscriptionTerms?> fetchSubscriptionTerms();
+  /// Classic Metaplex NFTs held by [owner] (SPL Token accounts with exactly
+  /// 1 of a 0-decimal, supply-1 mint that has a Token Metadata account),
+  /// including programmable ones flagged [WalletNft.programmable]. Images
+  /// come from the off-chain JSON when it answers quickly; a slow or broken
+  /// link only leaves [WalletNft.imageUrl] null.
+  Future<List<WalletNft>> fetchWalletNfts(String owner);
 
-  /// [owner]'s account-wide subscription, or null when never created.
-  Future<AccountSubscription?> fetchSubscription(String owner);
-
-  /// Prepays [periods] periods of [owner]'s account-wide subscription,
-  /// which waives the payout fee on every plan of the owner, including
-  /// plans created later (see [feeWaivedFor]). A new or lapsed subscription
-  /// must buy at least [SubscriptionTerms.minPeriods]; an active one may
-  /// extend by any number (1 to [SubscriptionTerms.maxPeriods] per
-  /// transaction). The price comes from the owner's token account of
-  /// [SubscriptionTerms.mint]; the subscription account's rent, on first
-  /// use, from the owner (or the paymaster when fees are paid in USDC).
-  Future<Uint8List> buildSubscribe({
-    required String owner,
-    required int periods,
-  });
+  /// The Token Metadata of [mint] (name, symbol, uri, image), or null when
+  /// it is not a 0-decimal, supply-1 SPL Token mint with metadata.
+  Future<WalletNft?> fetchNftMetadata(String mint);
 
   /// Submits wallet-signed transactions; returns signatures after confirmation.
   Future<List<String>> sendSigned(List<Uint8List> signedTransactions);

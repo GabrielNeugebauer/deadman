@@ -100,6 +100,25 @@
                 android:layout_gravity="center"
                 android:scaleType="fitXY"
                 android:src="@drawable/boney_px_on_track" />
+
+            <!-- Boney's skin over him, same size and place: shade, then ink in his colour. -->
+            <ImageView
+                android:id="@+id/boney_skin_shade"
+                android:importantForAccessibility="no"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:scaleType="fitXY"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/boney_skin"
+                android:importantForAccessibility="no"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:scaleType="fitXY"
+                android:visibility="gone" />
         </FrameLayout>
 
         <LinearLayout

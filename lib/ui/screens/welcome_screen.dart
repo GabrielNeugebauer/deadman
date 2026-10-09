@@ -109,7 +109,7 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
               leading: IconTile(icon: Icons.front_hand_outlined),
               title: 'Coercion',
               monoSubtitle: false,
-              subtitle: 'A duress PIN silently freezes your vault while the app looks normal.',
+              subtitle: 'A duress PIN opens a decoy wallet and silently freezes your real vault.',
             ),
             DMListRow(
               leading: IconTile(icon: Icons.phonelink_erase),

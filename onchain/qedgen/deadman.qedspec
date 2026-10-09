@@ -1,0 +1,678 @@
+// Deadman: vault state machine and money flows.
+//
+// Model of one plan account (`Vault`, PDA ["vault", owner, plan_id]) and the
+// SOL that sits above its rent reserve. Source of truth for the behaviour is
+// onchain/programs/deadman/src; this spec restates what that code must
+// guarantee so the generated proptest harness can check the model.
+//
+// Modelling choices:
+// - Timestamps are unsigned seconds; `now` is a handler parameter standing
+//   for `Clock::get()?.unix_timestamp`, so one call sees one clock value.
+// - `sol_balance` is the withdrawable SOL (lamports above the rent reserve).
+//   Token tiers move tokens, not SOL; their flows are modelled by the
+//   same per-rule fields with `is_sol = 0`, and only SOL hits `sol_balance`.
+// - `kind` is 1 for inheritance plans and 2 for vesting plans.
+// - Program-side reserves of skipped tiers live in `rules[i].reserved`; the
+//   spec adds `live_reserve` (the reserve of a skipped, still unpaid tier,
+//   0 otherwise) and its running total `total_reserve`, because the code
+//   derives that sum on the fly in `Vault::reserved_for`.
+// - Vesting caps: `cap` is `amount` until revocation, then what had vested
+//   at revocation (`Vault::vesting_cap`).
+// - `paid_out`, `fees_out` and `withdrawn` are spec-only counters for the
+//   SOL conservation property. Deposits are plain system transfers outside
+//   the program and are not modelled.
+
+// 2026-10-08 (later): the subscription is gone (fees: 2% per release, 1.5%
+// in SKR with 10% of that burned; withdrawals keep skipped reserves; plans
+// with a pending reserve do not close; two-step admin rotation).
+//
+// Verification status (qedgen 2.51.0, 2026-10-08), assurance `model-tested`
+// at most, never `implementation-verified`:
+// - `qedgen check`: 0 errors. `--anchor-project`: handler sets agree.
+// - `codegen --proptest` + `cargo test --release`: 94 of 98 harnesses
+//   pass; the 4 `*_preserves_reserve_sum` harnesses abort on rejected
+//   inputs (random states almost never satisfy a sum equality). Most
+//   money-flow harnesses never reach a successful handler call with the
+//   generator's full-range inputs, so their passes are weak evidence.
+// - The proptest lowering drops `<account>.pubkey` guards and the
+//   `guard := new_guard` effect, so authorization is checked by
+//   onchain/programs/deadman/tests/review_qedgen.rs against the real
+//   program instead, together with these properties on random sequences.
+
+spec Deadman
+
+program_id "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL"
+
+const MAX_RULES = 8
+/// Index of the one tier / schedule the create handlers model.
+const FIRST = 0
+const BPS_DENOMINATOR = 10000
+const MAX_FEE_BPS = 500
+const MIN_LOCK_SECS = 60
+const MAX_LOCK_SECS = 2592000
+const MIN_SKIP_GRACE_SECS = 60
+const MAX_SKIP_GRACE_SECS = 31622400
+const MIN_RULE_DELAY_SECS = 60
+const MAX_RULE_DELAY_SECS = 94867200
+const MAX_GUARD_ONLY_SECS = 31536000
+const KIND_INHERITANCE = 1
+const KIND_VESTING = 2
+
+type RuleIdx = Fin[MAX_RULES]
+
+type Rule = {
+  is_sol       : U8,
+  amount       : U64,
+  after_secs   : U64,
+  executed_at  : U64,
+  paid         : U64,
+  skipped_at   : U64,
+  reserved     : U64,
+  live_reserve : U64,
+  released     : U64,
+  cap          : U64,
+}
+
+type State
+  | Uninit
+  | Active of {
+      owner             : Pubkey,
+      guard             : Pubkey,
+      guardian          : Pubkey,
+      admin             : Pubkey,
+      pending_admin     : Pubkey,
+      upgrade_authority : Pubkey,
+      kind              : U8,
+      rule_count        : U8,
+      lock_secs         : U64,
+      skip_grace_secs   : U64,
+      last_pulse        : U64,
+      owner_last_seen   : U64,
+      locked_until      : U64,
+      guardian_ready_at : U64,
+      has_guardian      : U8,
+      revocable         : U8,
+      revoked_at        : U64,
+      rent_paid         : U64,
+      sol_balance       : U64,
+      total_reserve     : U64,
+      paid_out          : U64,
+      fees_out          : U64,
+      withdrawn         : U64,
+      rules             : Map[MAX_RULES] Rule,
+    }
+
+type Error
+  | Unauthorized
+  | FeeTooHigh
+  | InvalidDuration
+  | InvalidRules
+  | InvalidGuardian
+  | InvalidGuard
+  | VaultLocked
+  | RuleNotDue
+  | RuleAlreadyExecuted
+  | RuleOutOfOrder
+  | WrongAsset
+  | InvalidRuleIndex
+  | InsufficientFunds
+  | NoGuardian
+  | GuardianCooldown
+  | PlanCompleted
+  | LabelTooLong
+  | OwnerConfirmationRequired
+  | NothingToPay
+  | BeneficiaryCannotReceive
+  | SkipTooEarly
+  | WrongPlanKind
+  | InvalidVesting
+  | NotRevocable
+  | AlreadyRevoked
+  | FundsCommitted
+  | InvalidConfig
+  | MathOverflow
+  | NotLegacyVault
+  | DeprecatedSubscriptionDisabled
+  | DeprecatedInvalidSubscription
+  | UnsupportedMint
+  | TreasuryAccountRequired
+
+pragma checked_overflow_error = MathOverflow
+
+pda vault ["vault", owner, plan_id]
+pda config ["config"]
+
+// ---------------------------------------------------------------- config
+
+/// Admin is the program's upgrade authority (checked against ProgramData).
+/// Fees start at 2% per release (1.5% in SKR, 10% of that burned).
+/// `treasury_ok` is 1 when the treasury is a system-owned, non-executable
+/// account.
+handler init_config (treasury_ok : U8) {
+  auth admin
+  accounts {
+    admin          : signer, writable
+    config         : writable, pda ["config"]
+    treasury       : readonly
+    program        : program
+    program_data   : readonly
+    system_program : program
+  }
+  requires state.upgrade_authority == admin.pubkey else Unauthorized
+  requires treasury_ok == 1 else InvalidConfig
+}
+
+/// Also migrates a v1 (77-byte) config to the current layout.
+handler set_config (treasury_ok : U8) (fee_bps_public : U16) (fee_bps_private : U16) (fee_bps_skr : U16) (skr_burn_bps : U16) {
+  auth admin
+  accounts {
+    admin          : signer, writable
+    config         : writable, pda ["config"]
+    treasury       : readonly
+    system_program : program
+  }
+  requires state.admin == admin.pubkey else Unauthorized
+  requires treasury_ok == 1 else InvalidConfig
+  requires fee_bps_public <= MAX_FEE_BPS and fee_bps_private <= MAX_FEE_BPS
+           and fee_bps_skr <= MAX_FEE_BPS else FeeTooHigh
+  requires skr_burn_bps <= BPS_DENOMINATOR else InvalidConfig
+}
+
+/// First step of an admin rotation.
+handler propose_admin (new_admin : Pubkey) {
+  auth admin
+  accounts {
+    admin  : signer
+    config : writable, pda ["config"]
+  }
+  requires state.admin == admin.pubkey else Unauthorized
+}
+
+/// Second step: only the proposed key can take over.
+handler accept_admin {
+  auth new_admin
+  accounts {
+    new_admin : signer
+    config    : writable, pda ["config"]
+  }
+  requires state.pending_admin == new_admin.pubkey else Unauthorized
+}
+
+// ---------------------------------------------------------- plan lifecycle
+
+/// One pending SOL tier is modelled (rules[FIRST]); the code accepts 1..=8.
+handler create_plan (now : U64) (lock_secs : U64) (skip_grace_secs : U64) (amount : U64) (after_secs : U64) (rent : U64)
+    : State.Uninit -> State.Active {
+  // Self-service: the vault PDA is seeded by the signing owner's key, so
+  // a signer can only create its own plans.
+  permissionless
+  accounts {
+    owner          : signer
+    payer          : signer, writable
+    vault          : writable, pda ["vault", owner, plan_id]
+    system_program : program
+  }
+  requires lock_secs >= MIN_LOCK_SECS and lock_secs <= MAX_LOCK_SECS else InvalidDuration
+  requires skip_grace_secs >= MIN_SKIP_GRACE_SECS and skip_grace_secs <= MAX_SKIP_GRACE_SECS else InvalidDuration
+  requires amount > 0 else InvalidRules
+  requires after_secs >= MIN_RULE_DELAY_SECS and after_secs <= MAX_RULE_DELAY_SECS else InvalidRules
+  effect {
+    owner             := owner.pubkey
+    kind              := KIND_INHERITANCE
+    rule_count        := 1
+    lock_secs         := lock_secs
+    skip_grace_secs   := skip_grace_secs
+    last_pulse        := now
+    owner_last_seen   := now
+    locked_until      := 0
+    guardian_ready_at := 0
+    has_guardian      := 0
+    revocable         := 0
+    revoked_at        := 0
+    rent_paid         := rent
+    sol_balance       := 0
+    total_reserve     := 0
+    paid_out          := 0
+    fees_out          := 0
+    withdrawn         := 0
+    rules[FIRST] := { is_sol := 1, amount := amount, after_secs := after_secs, executed_at := 0,
+                  paid := 0, skipped_at := 0, reserved := 0, live_reserve := 0,
+                  released := 0, cap := 0 }
+  }
+}
+
+/// One SOL schedule is modelled (rules[FIRST]).
+handler create_vesting (now : U64) (lock_secs : U64) (revocable : U8) (total : U64) (cliff_secs : U64) (rent : U64)
+    : State.Uninit -> State.Active {
+  // Self-service: the vault PDA is seeded by the signing owner's key, so
+  // a signer can only create its own plans.
+  permissionless
+  accounts {
+    owner          : signer
+    payer          : signer, writable
+    vault          : writable, pda ["vault", owner, plan_id]
+    system_program : program
+  }
+  requires lock_secs >= MIN_LOCK_SECS and lock_secs <= MAX_LOCK_SECS else InvalidDuration
+  requires total > 0 else InvalidVesting
+  effect {
+    owner             := owner.pubkey
+    kind              := KIND_VESTING
+    rule_count        := 1
+    lock_secs         := lock_secs
+    skip_grace_secs   := 0
+    last_pulse        := now
+    owner_last_seen   := now
+    locked_until      := 0
+    guardian_ready_at := 0
+    has_guardian      := 0
+    revocable         := revocable
+    revoked_at        := 0
+    rent_paid         := rent
+    sol_balance       := 0
+    total_reserve     := 0
+    paid_out          := 0
+    fees_out          := 0
+    withdrawn         := 0
+    rules[FIRST] := { is_sol := 1, amount := total, after_secs := cliff_secs, executed_at := 0,
+                  paid := 0, skipped_at := 0, reserved := 0, live_reserve := 0,
+                  released := 0, cap := total }
+  }
+}
+
+/// Replaces pending tiers; paid or skipped tiers stay as history. Modelled
+/// on one slot: a pending slot `i` gets new terms.
+handler update_plan (i : U8) (now : U64) (lock_secs : U64) (skip_grace_secs : U64) (amount : U64) (after_secs : U64) (guardian_set : U8)
+    : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires state.kind == KIND_INHERITANCE else WrongPlanKind
+  requires now >= state.locked_until else VaultLocked
+  requires i < state.rule_count else InvalidRules
+  requires state.rules[i].executed_at == 0 and state.rules[i].skipped_at == 0 else InvalidRules
+  requires lock_secs >= MIN_LOCK_SECS and lock_secs <= MAX_LOCK_SECS else InvalidDuration
+  requires skip_grace_secs >= MIN_SKIP_GRACE_SECS and skip_grace_secs <= MAX_SKIP_GRACE_SECS else InvalidDuration
+  requires amount > 0 else InvalidRules
+  requires after_secs >= MIN_RULE_DELAY_SECS and after_secs <= MAX_RULE_DELAY_SECS else InvalidRules
+  effect {
+    lock_secs        := lock_secs
+    skip_grace_secs  := skip_grace_secs
+    has_guardian     := guardian_set
+    rules[i].amount     := amount
+    rules[i].after_secs := after_secs
+    last_pulse       := now
+    owner_last_seen  := now
+  }
+}
+
+/// Owner rotates the device key. Allowed during lockdown.
+handler set_guard (now : U64) (new_guard : Pubkey) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires new_guard != state.owner and new_guard != state.guardian else InvalidGuard
+  effect {
+    guard           := new_guard
+    last_pulse      := now
+    owner_last_seen := now
+  }
+}
+
+/// Check-in by the owner (role 0) or the guard key (role 1). The guard may
+/// only keep the plan alive within a year of the owner's last wallet action
+/// and never after a tier paid or was skipped without the owner since.
+handler pulse (now : U64) (by_owner : U8) (released_since_owner : U8) : State.Active -> State.Active {
+  auth signer
+  accounts {
+    signer : signer
+    vault  : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == signer.pubkey or state.guard == signer.pubkey else Unauthorized
+  // `by_owner` is 1 exactly when the owner signed (the code compares keys).
+  requires (by_owner == 1 and state.owner == signer.pubkey)
+           or (by_owner == 0 and state.owner != signer.pubkey) else Unauthorized
+  requires state.kind == KIND_INHERITANCE else WrongPlanKind
+  requires by_owner == 1
+           or (now <= state.owner_last_seen + MAX_GUARD_ONLY_SECS and released_since_owner == 0) else OwnerConfirmationRequired
+  effect {
+    last_pulse      := now
+    owner_last_seen := if by_owner == 1 then now else state.owner_last_seen
+  }
+}
+
+/// Duress lockdown by owner, guard or guardian. Never shortens a lock; a
+/// guardian lockdown is rate-limited.
+handler lockdown (now : U64) (by_guardian : U8) : State.Active -> State.Active {
+  auth signer
+  accounts {
+    signer : signer
+    vault  : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == signer.pubkey or state.guard == signer.pubkey
+           or (state.has_guardian == 1 and state.guardian == signer.pubkey) else Unauthorized
+  // `by_guardian` is 1 exactly when neither the owner nor the guard signed.
+  requires (by_guardian == 1 and state.owner != signer.pubkey and state.guard != signer.pubkey)
+           or (by_guardian == 0 and (state.owner == signer.pubkey or state.guard == signer.pubkey)) else Unauthorized
+  requires by_guardian == 0 or now >= state.guardian_ready_at else GuardianCooldown
+  let until = now + state.lock_secs
+  let locked = if state.locked_until >= until then state.locked_until else until
+  // While a guardian is set, every lockdown leaves the owner `lock_secs`
+  // unlocked after it ends before the guardian may lock again (LC-I2).
+  effect {
+    locked_until      := locked
+    guardian_ready_at := if state.has_guardian == 1 and state.guardian_ready_at < locked + state.lock_secs
+                           then locked + state.lock_secs
+                           else state.guardian_ready_at
+  }
+  ensures state.locked_until >= old(state.locked_until)
+}
+
+/// Early unlock needs the owner and the guardian together.
+handler unlock (now : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner    : signer
+    guardian : signer
+    vault    : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires state.has_guardian == 1 else NoGuardian
+  requires state.guardian == guardian.pubkey else Unauthorized
+  effect {
+    locked_until    := now
+    last_pulse      := now
+    owner_last_seen := now
+  }
+}
+
+/// Closes the plan once nothing is owed: vesting released in full, and no
+/// skipped tier still holding a reserve.
+handler close_vault (now : U64) : State.Active -> State.Uninit {
+  auth owner
+  accounts {
+    owner      : signer, writable
+    vault      : writable, pda ["vault", owner, plan_id]
+    rent_payer : writable
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires now >= state.locked_until else VaultLocked
+  requires state.kind == KIND_INHERITANCE or state.rules[FIRST].released >= state.rules[FIRST].cap else FundsCommitted
+  requires state.total_reserve == 0 else FundsCommitted
+}
+
+/// Stops future vesting; what vested stays claimable.
+handler revoke_vesting (now : U64) (vested_now : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires state.kind == KIND_VESTING else WrongPlanKind
+  requires now >= state.locked_until else VaultLocked
+  requires state.rules[FIRST].executed_at == 0 else PlanCompleted
+  requires state.revocable == 1 else NotRevocable
+  requires state.revoked_at == 0 else AlreadyRevoked
+  requires vested_now >= state.rules[FIRST].released and vested_now <= state.rules[FIRST].cap else InvalidVesting
+  effect {
+    revoked_at      := now
+    rules[FIRST].cap    := vested_now
+    last_pulse      := now
+    owner_last_seen := now
+  }
+}
+
+/// Closes a plan account in an older layout; every lamport goes to the
+/// owner recorded in it. Outside this model's single-layout state.
+handler recover_legacy_vault (layout_ok : U8) {
+  auth owner
+  accounts {
+    owner  : signer, writable
+    legacy : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires layout_ok == 1 else NotLegacyVault
+}
+
+// ------------------------------------------------------------ money flows
+
+/// Owner withdraws spare SOL. Vesting commitments and skipped-tier
+/// reserves stay in the vault.
+handler withdraw_sol (now : U64) (amount : U64) : State.Active -> State.Active {
+  auth owner
+  invariant reserves_backed
+  accounts {
+    owner : signer, writable
+    vault : writable, pda ["vault", owner, plan_id]
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires now >= state.locked_until else VaultLocked
+  requires amount <= state.sol_balance else InsufficientFunds
+  requires state.kind == KIND_INHERITANCE
+           or amount + (state.rules[FIRST].cap - state.rules[FIRST].released) <= state.sol_balance else FundsCommitted
+  requires amount + state.total_reserve <= state.sol_balance else FundsCommitted
+  effect {
+    sol_balance     -= amount
+    withdrawn       += amount
+    last_pulse      := now
+    owner_last_seen := now
+  }
+}
+
+/// Token tiers and withdrawals move tokens only; the SOL model is unchanged.
+handler withdraw_token (now : U64) (token_amount : U64) : State.Active -> State.Active {
+  auth owner
+  accounts {
+    owner         : signer, writable
+    vault         : writable, pda ["vault", owner, plan_id]
+    mint          : readonly
+    vault_token   : writable, token, authority vault
+    owner_token   : writable, token
+    token_program : program
+  }
+  requires state.owner == owner.pubkey else Unauthorized
+  requires now >= state.locked_until else VaultLocked
+  effect {
+    last_pulse      := now
+    owner_last_seen := now
+  }
+  transfers {
+    from vault_token to owner_token amount token_amount authority vault
+  }
+}
+
+/// Permissionless payout of a due SOL tier. A skipped tier gets its
+/// reserve; any other tier works on the balance minus every reserve.
+handler execute_sol_rule (i : U8) (now : U64) (fee_bps : U16) (gross : U64) : State.Active -> State.Active {
+  permissionless
+  invariant reserves_backed
+  invariant reserve_sum
+  accounts {
+    executor     : signer
+    vault        : writable, pda ["vault", owner, plan_id]
+    config       : readonly, pda ["config"]
+    beneficiary  : writable
+    treasury     : writable
+  }
+  let fee = mul_div_floor(gross, fee_bps, BPS_DENOMINATOR)
+  requires state.kind == KIND_INHERITANCE else WrongPlanKind
+  requires i < state.rule_count else InvalidRuleIndex
+  requires state.rules[i].is_sol == 1 else WrongAsset
+  requires state.rules[i].executed_at == 0 else RuleAlreadyExecuted
+  requires state.rules[i].skipped_at != 0 or now > state.last_pulse + state.rules[i].after_secs else RuleNotDue
+  requires fee_bps <= MAX_FEE_BPS else FeeTooHigh
+  requires gross > 0 else NothingToPay
+  requires (state.rules[i].skipped_at != 0 and state.rules[i].live_reserve > 0 and gross <= state.rules[i].live_reserve and gross <= state.sol_balance)
+        or (state.rules[i].live_reserve == 0 and gross <= state.rules[i].amount and gross + state.total_reserve <= state.sol_balance) else InsufficientFunds
+  effect {
+    sol_balance            -= gross
+    paid_out               += gross - fee
+    fees_out               += fee
+    total_reserve          -= state.rules[i].live_reserve
+    rules[i].live_reserve  := 0
+    rules[i].executed_at   := now
+    rules[i].paid          := gross - fee
+  }
+  ensures state.fees_out - old(state.fees_out) <= old(state.sol_balance) - state.sol_balance
+}
+
+handler execute_token_rule (i : U8) (now : U64) (net : U64) (fee : U64) : State.Active -> State.Active {
+  permissionless
+  invariant reserve_sum
+  accounts {
+    executor          : signer
+    vault             : writable, pda ["vault", owner, plan_id]
+    config            : readonly, pda ["config"]
+    mint              : writable
+    vault_token       : writable, token, authority vault
+    beneficiary       : writable
+    beneficiary_token : writable, token
+    treasury_token    : writable, token
+    token_program     : program
+  }
+  requires state.kind == KIND_INHERITANCE else WrongPlanKind
+  requires i < state.rule_count else InvalidRuleIndex
+  requires state.rules[i].is_sol == 0 else WrongAsset
+  requires state.rules[i].executed_at == 0 else RuleAlreadyExecuted
+  requires state.rules[i].skipped_at != 0 or now > state.last_pulse + state.rules[i].after_secs else RuleNotDue
+  effect {
+    rules[i].live_reserve := 0
+    rules[i].executed_at  := now
+    rules[i].paid         := net
+  }
+  transfers {
+    from vault_token to beneficiary_token amount net authority vault
+    from vault_token to treasury_token amount fee authority vault
+  }
+}
+
+/// Permissionless: lets later tiers of the same asset pass a tier that has
+/// not paid by the end of the grace period. Its share is set aside.
+handler skip_rule (i : U8) (now : U64) (share : U64) : State.Active -> State.Active {
+  permissionless
+  invariant reserves_backed
+  invariant reserve_sum
+  accounts {
+    caller      : signer
+    vault       : writable, pda ["vault", owner, plan_id]
+    vault_token : readonly
+  }
+  requires state.kind == KIND_INHERITANCE else WrongPlanKind
+  requires i < state.rule_count else InvalidRuleIndex
+  requires state.rules[i].is_sol == 1 else WrongAsset
+  requires state.rules[i].executed_at == 0 and state.rules[i].skipped_at == 0 else RuleAlreadyExecuted
+  requires now > state.last_pulse + state.rules[i].after_secs + state.skip_grace_secs else SkipTooEarly
+  requires now > 0 else SkipTooEarly
+  requires share <= state.rules[i].amount and share + state.total_reserve <= state.sol_balance else InsufficientFunds
+  effect {
+    rules[i].skipped_at   := now
+    rules[i].reserved     := share
+    rules[i].live_reserve := share
+    total_reserve         += share
+  }
+}
+
+/// Releases what has vested so far on the SOL schedule (permissionless).
+handler release_vested_sol (now : U64) (fee_bps : U16) (vested_now : U64) (gross : U64) : State.Active -> State.Active {
+  permissionless
+  invariant reserves_backed
+  invariant reserve_sum
+  accounts {
+    executor     : signer
+    vault        : writable, pda ["vault", owner, plan_id]
+    config       : readonly, pda ["config"]
+    beneficiary  : writable
+    treasury     : writable
+  }
+  let fee = mul_div_floor(gross, fee_bps, BPS_DENOMINATOR)
+  requires state.kind == KIND_VESTING else WrongPlanKind
+  requires state.rules[FIRST].executed_at == 0 else RuleAlreadyExecuted
+  requires fee_bps <= MAX_FEE_BPS else FeeTooHigh
+  requires vested_now <= state.rules[FIRST].cap else InvalidVesting
+  requires gross > 0 else NothingToPay
+  requires gross + state.rules[FIRST].released <= vested_now and gross <= state.sol_balance else NothingToPay
+  effect {
+    sol_balance          -= gross
+    paid_out             += gross - fee
+    fees_out             += fee
+    rules[FIRST].released    := state.rules[FIRST].released + gross
+    rules[FIRST].paid        := state.rules[FIRST].paid + (gross - fee)
+    rules[FIRST].executed_at := if state.rules[FIRST].released + gross >= state.rules[FIRST].cap then now else 0
+  }
+}
+
+handler release_vested_token (now : U64) (net : U64) (fee : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    executor          : signer
+    vault             : writable, pda ["vault", owner, plan_id]
+    config            : readonly, pda ["config"]
+    mint              : writable
+    vault_token       : writable, token, authority vault
+    beneficiary       : writable
+    beneficiary_token : writable, token
+    treasury_token    : writable, token
+    token_program     : program
+  }
+  requires state.kind == KIND_VESTING else WrongPlanKind
+  transfers {
+    from vault_token to beneficiary_token amount net authority vault
+    from vault_token to treasury_token amount fee authority vault
+  }
+}
+
+// ------------------------------------------------------------- properties
+
+/// SOL that leaves the vault is accounted for exactly once.
+property sol_conservation :
+  state.sol_balance + state.paid_out + state.fees_out + state.withdrawn
+    == old(state.sol_balance) + old(state.paid_out) + old(state.fees_out) + old(state.withdrawn)
+  preserved_by [update_plan, set_guard, pulse, lockdown, unlock, revoke_vesting, withdraw_sol,
+                withdraw_token, execute_sol_rule, execute_token_rule, skip_rule,
+                release_vested_sol, release_vested_token]
+
+/// Shares set aside for skipped tiers are backed by SOL in the vault.
+/// Linked from every handler that moves SOL or reserves, `withdraw_sol`
+/// included (FUNDS-1).
+invariant reserves_backed :
+  state.total_reserve <= state.sol_balance
+
+/// The running reserve equals the sum of per-tier live reserves.
+invariant reserve_sum :
+  state.total_reserve == (sum i : RuleIdx, state.rules[i].live_reserve)
+
+/// A released tier is final: it never pays again and keeps its record.
+/// Stated on slot FIRST because a binary (`old`) property under `forall`
+/// does not lower; handlers pick their slot from all of `RuleIdx`, so
+/// slot FIRST still sees every handler path.
+property executed_is_final :
+  old(state.rules[FIRST].executed_at) != 0
+    implies (state.rules[FIRST].executed_at == old(state.rules[FIRST].executed_at)
+             and state.rules[FIRST].paid == old(state.rules[FIRST].paid))
+  preserved_by [update_plan, set_guard, pulse, lockdown, unlock, revoke_vesting, withdraw_sol,
+                withdraw_token, execute_sol_rule, execute_token_rule, skip_rule,
+                release_vested_sol, release_vested_token]
+
+/// Vesting never releases more than its cap.
+property vesting_within_cap :
+  state.kind == KIND_VESTING implies state.rules[FIRST].released <= state.rules[FIRST].cap
+  preserved_by all
+
+/// Lockdown never shortens an existing lock; only `unlock` (owner plus
+/// guardian) may end it early.
+property lock_monotone :
+  state.locked_until >= old(state.locked_until)
+  preserved_by [update_plan, set_guard, pulse, lockdown, revoke_vesting, withdraw_sol,
+                withdraw_token, execute_sol_rule, execute_token_rule, skip_rule,
+                release_vested_sol, release_vested_token]
+
+cover inheritance_pays [create_plan, execute_sol_rule]
+cover skip_then_claim [create_plan, skip_rule, execute_sol_rule]
+cover vesting_releases [create_vesting, release_vested_sol]

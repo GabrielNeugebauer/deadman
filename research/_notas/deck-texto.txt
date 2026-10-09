@@ -1,0 +1,146 @@
+Deadman pitch deck
+Don’t take your crypto
+to the grave.
+01 · The Problem
+~60%
+of crypto users prefer self-custody.
+Private and hardware wallets, like the Seeker, protect you from a lot of risks. But:
+If you
+died tomorrow
+, what would happen to your assets?
+Source: CoinLaw
+01 · The Problem
+01 · The Problem
+01 · The Problem
+01 · The Problem
+01 · The Problem
+Today’s wallets are all or nothing.
+Lose the keys, lose the money.
+02 · The Solution
+Go silent,
+your heirs get paid.
+Deadman is a vault that sends your assets to your heirs, automatically, when you go silent.
+CHECK-IN
+One fingerprint proves you are still here.
+SILENCE
+Miss your check-ins and the vault releases.
+HEIRS
+Up to 8 tiers pay your heirs, in order.
+02
+03 · Demo · 1/3
+Plan funds
+01
+Choose who receives, and how.
+Release plan
+up to 8 tiers, paid in order
+Delivery
+public transfer, or private via Cloak
+03 · Demo · 2/3
+Check-in
+02
+The protocol waits for your check-in.
+Window
+7 days, 30 days, or any period you set
+Check-in
+one fingerprint, no wallet prompt
+03 · Demo · 3/3
+Silence
+03
+Go silent, and the transfer completes.
+Example
+1 SOL tier → 0.995 SOL to the heir
+Fee
+0.005 SOL (0.5%), only on release
+04 · Beyond The Switch
+Any deadman switch does that.
+We do more.
+WHAT YOU GET
+Inheritance
+15+ PROJECTS
+Cipherwill
+WEB APP
+Release to heirs on silence
+Coercion PIN, fake wallet
+Vesting plans
+Sponsored check-ins (Kora)
+NFT mascot that reminds you
+MOBILE APP
+05 · Business Model
+B2C, PAY AS YOU USE
+Or go 0% fees with a monthly plan.
+01 · PROTOCOL FEE
+0.5%
+per protocol execution
+or cancellation
+02 · MONTHLY PLAN
+$40
+/ month · 0% fees
+$35
+· if paid in $SKR
+03 · $SKR BURN
+30%
+of $SKR
+BURNED
+Fuels the ecosystem
+06 · Market
+Anyone who self-custodies
+TAM
+$16B
+Monthly active users on Solana
+33.9M addresses × $480/yr plan.
+SAM
+$7.2B
+Self-custody wallet users
+15M on Phantom alone × $480/yr.
+SOM
+$72M
+150K Seeker owners
+Our wedge: keys already live on the phone.
+TOKEN TERMINAL 2026 · PHANTOM 2025 · SOLANA MOBILE 2025
+07 · Traction
+Real SOL.
+Real testers.
+PROTECTED IN ALPHA
+200+ SOL
+run through full owner-to-heir flows
+52
+people on the waitlist
+10
+real users in alpha testing
+Internal data, Oct 2026
+08 · Roadmap
+Live on mainnet. Next, every Android.
+NOW
+OCT 2026
+Mainnet live
+Deadman already runs on Solana mainnet.
+OCT 12
+Open alpha
+First alpha with open testing.
+NOV 2026
+Testing closes
+Feedback goes into the app.
+Q1 2027
+Audit
+External security audit.
+MID 2027
+Every Android
+Launch for any Android wallet.
+2027 dates are targets
+09 · Team
+Two
+builders.
+Both with experience to build
+the best Deadman
+1ST PLACE
+Solana × Cursor University Hackathon
+1ST PLACE
+Superteam BR University Hackathon
+DEVELOPER
+Gabriel Neugebauer
+2+ years building and maintaining custom Android ROMs, 3+ years in cybersecurity research. Computer Science, UFPEL.
+DESIGNER
+Vitória Tumelero
+3+ years in UX/UI area, Web developer, consultant on 20+ projects. Computer Science, UFPEL.
+Your keys die with you.
+Your crypto doesn’t.

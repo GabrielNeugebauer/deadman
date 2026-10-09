@@ -9,14 +9,13 @@ import '../../state/assets.dart';
 import '../../state/fee_settings.dart';
 import '../../state/plan_math.dart';
 import '../../state/providers.dart';
-import '../../state/subscription.dart';
+import '../../state/protocol_fees.dart';
 import '../format.dart';
 import '../rules_format.dart';
 import '../web/web_ui.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/feedback.dart';
 import '../widgets/pack_icons.dart';
-import '../widgets/plan_pricing.dart';
 import 'rails_check_screen.dart';
 import 'recovery_phrase_screen.dart';
 
@@ -114,7 +113,8 @@ class SettingsTab extends ConsumerWidget {
   }
 
   /// Two steps: PINs and guard by default; receiving keys only on an
-  /// explicit second confirmation.
+  /// explicit second confirmation. Under duress the same dialogs run on the
+  /// decoy and the reset is faked (see [SessionController.reset]).
   Future<void> _forget(BuildContext context, WidgetRef ref) async {
     final web = ref.read(isWebProvider);
     if (!await _confirm(
@@ -132,7 +132,13 @@ class SettingsTab extends ConsumerWidget {
       return;
     }
     var deleteKeys = false;
-    if (await ref.read(secureStoreProvider).hasReceivingKeys()) {
+    // Under duress the decoy's receiving profiles decide the second step;
+    // the real store is not read.
+    final decoy = ref.read(decoyWalletProvider);
+    final hasKeys = decoy != null
+        ? decoy.claims.isNotEmpty
+        : await ref.read(secureStoreProvider).hasReceivingKeys();
+    if (hasKeys) {
       if (!context.mounted) return;
       final choice = await showDialog<bool>(
         context: context,
@@ -310,7 +316,6 @@ class SettingsTab extends ConsumerWidget {
           const SectionHeader(title: 'Fees'),
           const SizedBox(height: DMSpace.xs),
           const PricingCard(),
-          const MonthlyPlanCard(margin: EdgeInsets.only(top: DMSpace.md)),
           const SizedBox(height: DMSpace.md),
           const NetworkFeesCard(),
           const SizedBox(height: DMSpace.xxl),
@@ -584,8 +589,9 @@ class _ReceivePrivatelyCard extends ConsumerWidget {
   }
 }
 
-/// How Deadman charges: a percentage of each release, or, when offered, a
-/// flat monthly plan covering all of the owner's plans that replaces it.
+/// How Deadman charges: a percentage of each payout when it runs, a lower
+/// rate for payouts in SKR (part of which is burned), and nothing for
+/// withdrawing, closing, cancelling or revoking.
 class PricingCard extends ConsumerWidget {
   const PricingCard({super.key});
 
@@ -594,7 +600,6 @@ class PricingCard extends ConsumerWidget {
     final t = Theme.of(context).textTheme;
     final small = t.bodyMedium?.copyWith(fontSize: 14);
     final fees = ref.watch(feesProvider).value;
-    final terms = ref.watch(subscriptionTermsProvider).value;
     return DMCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -603,8 +608,10 @@ class PricingCard extends ConsumerWidget {
           const SizedBox(height: DMSpace.xs),
           Text(
             fees == null
-                ? 'Free to use. A fee applies only when a tier releases funds.'
-                : 'Free to use. A fee is taken from each release:',
+                ? '$feeSummaryStaticText.'
+                : 'A fee is taken only when a tier or vesting installment '
+                      'releases funds. Withdrawing, closing, cancelling and '
+                      'revoking are free.',
             style: small,
           ),
           if (fees != null) ...[
@@ -618,20 +625,22 @@ class PricingCard extends ConsumerWidget {
               rail: 'Via Cloak or Zcash',
               rate: percentText(fees.feeBpsPrivate / 10000),
             ),
-          ],
-          if (terms != null) ...[
-            const SizedBox(height: DMSpace.md),
-            Text(
-              'Or pay ${amountText(terms.pricePerPeriod, terms.mint)} '
-              '${terms.monthly ? 'a month' : 'per ${span(terms.periodSecs)}'} and '
-              'releases carry no fee: one subscription covers all your plans, '
-              'present and future. Better for larger holdings. A new or lapsed '
-              'subscription starts with ${terms.minPeriods} '
-              '${periodWord(terms, terms.minPeriods)} paid at once (up to '
-              '${SubscriptionTerms.maxPeriods} per payment); while it runs, '
-              'extend by any amount.',
-              style: small,
-            ),
+            if (fees.skrMint != null) ...[
+              const Divider(),
+              _RateRow(
+                rail: 'Payouts in SKR',
+                rate: percentText(fees.feeBpsSkr / 10000),
+              ),
+              if (fees.skrBurnBps > 0) ...[
+                const SizedBox(height: DMSpace.sm),
+                Text(
+                  '${percentText(fees.skrBurnBps / 10000)} of every SKR fee '
+                  'is burned in the same transaction; the rest goes to '
+                  'Deadman.',
+                  style: small,
+                ),
+              ],
+            ],
           ],
         ],
       ),

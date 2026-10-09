@@ -339,7 +339,7 @@ class Plan {
           'to browsers); pass --cloak-rpc <Helius URL>',
         );
       }
-      // Net of the 3% private-rail fee, the deposit minus Cloak's minimum
+      // Net of the private-rail fee, the deposit minus Cloak's minimum
       // and reserve must still cover the exit fee.
       if (cloakUsdc > 0 && cloakUsdc < 1600000) {
         throw const FormatException('--cloak-usdc must be at least 1.6');
@@ -1310,7 +1310,7 @@ class E2e {
 // Expected Config rates (bps) for the cost estimate; preflight prints the
 // live ones from the Config PDA.
 const _publicFeeBps = 200;
-const _privateFeeBps = 300;
+const _privateFeeBps = 200;
 
 /// Funding the owner needs and what the run is expected to spend.
 class Costs {
@@ -1348,7 +1348,7 @@ class Costs {
         lines.add((
           'Zcash tier ${fmtSol(plan.zcashLamports)}',
           fmtSol(fee),
-          'protocol fee 3% to the treasury',
+          'protocol fee 2% to the treasury',
         ));
         lines.add((
           '1Click swap',
@@ -1363,7 +1363,7 @@ class Costs {
         lines.add((
           'Cloak tier ${fmtSol(plan.cloakLamports)}',
           fmtSol(plan.cloakLamports - net),
-          'protocol fee 3% to the treasury',
+          'protocol fee 2% to the treasury',
         ));
         lines.add((
           'Cloak exit fee',
@@ -1379,7 +1379,7 @@ class Costs {
         lines.add((
           'Cloak tier ${fmtUsdc(plan.cloakUsdc)}',
           fmtUsdc(plan.cloakUsdc - net),
-          'protocol fee 3% to the treasury',
+          'protocol fee 2% to the treasury',
         ));
         lines.add((
           'Cloak exit fee',
@@ -1544,11 +1544,14 @@ Future<void> _dryRun(
       );
       final deadman = DeadmanClient.withKora(client: client);
       try {
-        final fees = await deadman.fetchFees();
+        final config = await deadman.fetchConfig();
+        final fees = config.fees;
         check(
-          true,
+          config.migrated,
           'config: treasury ${fees.treasury}, ${fees.feeBpsPublic}/'
-          '${fees.feeBpsPrivate} bps',
+          '${fees.feeBpsPrivate} bps, SKR ${fees.skrMint ?? 'off'} at '
+          '${fees.feeBpsSkr} bps (${fees.skrBurnBps} bps of it burned)'
+          '${config.migrated ? '' : '; old layout: run set_config first'}',
         );
       } on Object {
         check(false, 'config PDA ${configPda().address} not initialized');

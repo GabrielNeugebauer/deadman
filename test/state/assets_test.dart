@@ -72,4 +72,72 @@ void main() {
     expect(assetInfo(other).symbol, assetSymbol(other));
     expect(assetInfo(null), solAsset);
   });
+
+  group('SKR and ORE', () {
+    const skr = AppConfig.skrMint;
+    const ore = AppConfig.oreMint;
+
+    test('are presets after USDC, with their own decimals', () {
+      expect(presetAssets.map((a) => a.symbol).take(4), [
+        'SOL',
+        'USDC',
+        'SKR',
+        'ORE',
+      ]);
+      expect(skr, '4JX81qZWhPPT38Tn4ZswaS2DyH3PffdrFqbYgsoZCuHc');
+      expect(ore, '6KdRjrWYouFLmEcNeDpJkc9AUgzvmE7cn3DbAx2KfSyt');
+      expect(knownAsset(skr)!.decimals, 6);
+      expect(knownAsset(ore)!.decimals, 11);
+      expect(presetAssets.map((a) => a.symbol), isNot(contains('JitoSOL')));
+    });
+
+    test('ORE amounts use 11 decimals', () {
+      expect(parseAmount('1.5', ore), 150000000000);
+      expect(parseAmount('0.00000000001', ore), 1);
+      expect(amountText(150000000000, ore), '1.5 ORE');
+      expect(amountText(123456789, ore), '0.0012 ORE');
+      expect(amountText(1, ore), '0.00000000001 ORE');
+      expect(amountInput(150000000000, ore), '1.5');
+    });
+
+    test('SKR amounts use 6 decimals', () {
+      expect(amountText(1200000000, skr), '1200 SKR');
+      expect(parseAmount('12.25', skr), 12250000);
+      expect(unitLabel(skr), 'SKR');
+    });
+  });
+
+  group('NFTs', () {
+    setUp(forgetNfts);
+    tearDown(forgetNfts);
+
+    test('a remembered NFT reads by its name and moves whole', () {
+      final mint = addr(70);
+      expect(isNft(mint), isFalse);
+      expect(amountText(1, mint), startsWith('1 units '));
+      rememberNft(mint, ' Mad Lad #42 ', imageUrl: 'https://x/img.png');
+      expect(isNft(mint), isTrue);
+      expect(knownAsset(mint)!.nft, isTrue);
+      expect(knownAsset(mint)!.imageUrl, 'https://x/img.png');
+      expect(amountText(1, mint), 'Mad Lad #42');
+      expect(amountText(2, mint), '2 × Mad Lad #42');
+      expect(assetSymbol(mint), 'Mad Lad #42');
+      expect(unitLabel(mint), 'NFT');
+      expect(parseAmount('1', mint), 1);
+      expect(amountInput(1, mint), '1');
+    });
+
+    test('an unnamed NFT gets a short name', () {
+      final mint = addr(71);
+      rememberNft(mint, '');
+      expect(assetSymbol(mint), startsWith('NFT '));
+    });
+
+    test('forgetNfts clears them', () {
+      final mint = addr(72);
+      rememberNft(mint, 'X');
+      forgetNfts();
+      expect(isNft(mint), isFalse);
+    });
+  });
 }

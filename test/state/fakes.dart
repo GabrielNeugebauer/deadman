@@ -235,35 +235,33 @@ class FakeApi implements DeadmanApi {
     return Uint8List(0);
   }
 
-  /// What [fetchSubscriptionTerms] returns (null = not offered).
-  SubscriptionTerms? subscriptionTerms;
-
-  /// What [fetchSubscription] returns for any owner (null = never
-  /// subscribed).
-  AccountSubscription? subscription;
-
-  /// (owner, periods) of each [buildSubscribe] call.
-  final subscribed = <(String, int)>[];
+  /// What [fetchWalletNfts] returns for any owner.
+  List<WalletNft> walletNfts = [];
 
   @override
-  Future<SubscriptionTerms?> fetchSubscriptionTerms() async {
+  Future<List<WalletNft>> fetchWalletNfts(String owner) async {
     if (fail != null) throw fail!;
-    return subscriptionTerms;
+    return walletNfts;
   }
 
   @override
-  Future<AccountSubscription?> fetchSubscription(String owner) async {
+  Future<WalletNft?> fetchNftMetadata(String mint) async {
     if (fail != null) throw fail!;
-    return subscription;
+    return walletNfts.where((n) => n.mint == mint).firstOrNull;
   }
 
+  /// (mint, amount) of each [buildDepositToken] call.
+  final tokenDeposits = <(String, int)>[];
+
   @override
-  Future<Uint8List> buildSubscribe({
+  Future<Uint8List> buildDepositToken({
     required String owner,
-    required int periods,
+    required int planId,
+    required String mint,
+    required int amount,
   }) async {
     if (fail != null) throw fail!;
-    subscribed.add((owner, periods));
+    tokenDeposits.add((mint, amount));
     return Uint8List(0);
   }
 

@@ -10,7 +10,11 @@ import 'package:solana/dto.dart'
         DataSlice,
         Encoding,
         FutureContextResultExt,
-        ProgramDataFilter;
+        ParsedSplTokenProgramAccountData,
+        ProgramDataFilter,
+        TokenAccountData,
+        TokenAccountsFilter;
+import 'package:http/http.dart' as http show Client, Request;
 import 'package:http/http.dart' show ClientException;
 import 'package:solana/base58.dart';
 import 'package:solana/encoder.dart';
@@ -217,13 +221,23 @@ class DeadmanException implements Exception {
       'FundsCommitted',
       'Those funds are committed to vesting beneficiaries',
     ),
-    6026: ('InvalidConfig', 'Treasury must be set'),
+    6026: (
+      'InvalidConfig',
+      'Treasury must be a system-owned wallet, and the SKR burn share at '
+          'most 100%',
+    ),
     6027: ('MathOverflow', 'Arithmetic overflow'),
     6028: ('NotLegacyVault', 'Not a plan account in an older layout'),
-    6029: ('SubscriptionDisabled', 'Subscriptions are disabled'),
-    6030: (
-      'InvalidSubscription',
-      'Invalid subscription parameters or accounts',
+    6029: ('DeprecatedSubscriptionDisabled', 'Unused'),
+    6030: ('DeprecatedInvalidSubscription', 'Unused'),
+    6031: (
+      'UnsupportedMint',
+      'Only classic SPL Token mints can be put in a plan',
+    ),
+    6032: (
+      'TreasuryAccountRequired',
+      "This payout charges a fee, so the treasury's token account is "
+          'required',
     ),
   };
 
@@ -255,14 +269,14 @@ class DeadmanException implements Exception {
         'This vesting plan was created as irrevocable, so it cannot be stopped',
     6024: 'Vesting on this plan was already stopped',
     6025:
-        'Those funds are owed to vesting beneficiaries. You can only withdraw '
-        'what is above the amount still to be released to them',
-    6029: 'Monthly plans are not available right now',
-    6030:
-        'A new monthly plan needs at least 12 months paid at once (an active '
-        'one can be extended by any number, up to 36 per payment), or a '
-        "release named the wrong subscription account (update the app). "
-        'Refresh and try again',
+        'Those funds are owed to beneficiaries: vesting still to be '
+        'released, or the share kept for a skipped payout until its '
+        'beneficiary claims it. You can only withdraw what is above that, '
+        'and a plan holding such a share cannot be closed yet',
+    6031:
+        'Only standard SPL tokens can go into a plan (no Token-2022 '
+        'tokens)',
+    6032: 'This payout charges a fee: refresh and try again',
   };
 
   static const vaultLocked = 6006;
@@ -279,8 +293,8 @@ class DeadmanException implements Exception {
   static const alreadyRevoked = 6024;
   static const fundsCommitted = 6025;
   static const notLegacyVault = 6028;
-  static const subscriptionDisabled = 6029;
-  static const invalidSubscription = 6030;
+  static const unsupportedMint = 6031;
+  static const treasuryAccountRequired = 6032;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -325,6 +339,7 @@ class DeadmanClient implements DeadmanApi {
     this.paymasterToken = AppConfig.usdcMint,
     this.maxFee = AppConfig.koraMaxFee,
     int Function()? clock,
+    this.metadataHttp,
   }) : _now = clock ?? _systemNow,
        _client =
            client ??
@@ -354,6 +369,9 @@ class DeadmanClient implements DeadmanApi {
   /// Highest paymaster fee accepted, in fee-token base units.
   final int maxFee;
   final int Function() _now;
+
+  /// Fetches off-chain NFT JSON; null = a client per [fetchWalletNfts].
+  final http.Client? metadataHttp;
 
   @override
   String? get feeToken => _feeToken;
@@ -542,139 +560,182 @@ class DeadmanClient implements DeadmanApi {
   @override
   Future<FeeSchedule> fetchFees() async => (await fetchConfig()).fees;
 
-  @override
-  Future<SubscriptionTerms?> fetchSubscriptionTerms() async {
-    final data = _programData(await _account(subConfigPda().address));
-    if (data == null) return null;
-    final terms = decodeSubscriptionConfig(data);
-    return terms.enabled ? terms : null;
-  }
+  /// Most off-chain NFT JSON documents fetched per [fetchWalletNfts].
+  static const maxNftImageFetches = 40;
+  static const nftJsonTimeout = Duration(seconds: 4);
+  static const nftJsonMaxBytes = 256 * 1024;
 
   @override
-  Future<AccountSubscription?> fetchSubscription(String owner) async =>
-      _subscriptionOf(owner, await _account(subPda(owner).address));
-
-  /// Subscriptions of [owners] in batched reads (null = never created);
-  /// for sweeps over many plans.
-  Future<Map<String, AccountSubscription?>> fetchSubscriptions(
-    Iterable<String> owners,
-  ) async {
-    final list = owners.toSet().toList();
-    final out = <String, AccountSubscription?>{};
-    // getMultipleAccounts takes at most 100 keys.
-    for (var i = 0; i < list.length; i += 100) {
-      final batch = list.skip(i).take(100).toList();
+  Future<List<WalletNft>> fetchWalletNfts(String owner) async {
+    final accounts = await _net(
+      () => _rpc.getTokenAccountsByOwner(
+        owner,
+        const TokenAccountsFilter.byProgramId(tokenProgramId),
+        commitment: commitment,
+        encoding: Encoding.jsonParsed,
+      ),
+    );
+    // One NFT per mint: exactly 1 of a 0-decimal token.
+    final frozen = <String, bool>{};
+    for (final a in accounts.value) {
+      final data = a.account.data;
+      if (data is! ParsedSplTokenProgramAccountData) continue;
+      final parsed = data.parsed;
+      if (parsed is! TokenAccountData) continue;
+      final info = parsed.info;
+      if (info.tokenAmount.decimals != 0 || info.tokenAmount.amount != '1') {
+        continue;
+      }
+      frozen[info.mint] = info.state == 'frozen';
+    }
+    if (frozen.isEmpty) return const [];
+    final nfts = <WalletNft>[];
+    final mints = frozen.keys.toList();
+    // Mint and metadata of each candidate; 2 keys each, 100 keys per call.
+    for (var i = 0; i < mints.length; i += 50) {
+      final batch = mints.skip(i).take(50).toList();
       final found = await _net(
         () => _rpc
             .getMultipleAccounts(
-              [for (final o in batch) subPda(o).address],
+              [
+                for (final m in batch) ...[m, metadataPda(m)],
+              ],
               commitment: commitment,
               encoding: Encoding.base64,
             )
             .value,
       );
       for (var j = 0; j < batch.length; j++) {
-        out[batch[j]] = _subscriptionOf(batch[j], found[j]);
+        final nft = _nftOf(batch[j], found[2 * j], found[2 * j + 1]);
+        if (nft != null) {
+          nfts.add(frozen[batch[j]]! ? _withFrozen(nft) : nft);
+        }
       }
     }
-    return out;
+    return _withImages(nfts);
   }
 
-  /// [owner]'s subscription from its PDA account, or null when it is not a
-  /// current `Subscription` of [owner] (as the program reads it).
-  static AccountSubscription? _subscriptionOf(String owner, Account? account) {
-    final data = _programData(account);
-    if (data == null || !hasDiscriminator(data, Disc.subscriptionAccount)) {
+  @override
+  Future<WalletNft?> fetchNftMetadata(String mint) async {
+    final found = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            [mint, metadataPda(mint)],
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    final nft = _nftOf(mint, found[0], found[1]);
+    return nft == null ? null : (await _withImages([nft])).single;
+  }
+
+  /// A classic SPL Token mint with 0 decimals and supply 1 and its Token
+  /// Metadata account, as a [WalletNft] without image; null otherwise.
+  static WalletNft? _nftOf(String mint, Account? mintAccount, Account? meta) {
+    final mintData = mintAccount?.data;
+    final metaData = meta?.data;
+    if (mintAccount?.owner != tokenProgramId ||
+        mintData is! BinaryAccountData ||
+        meta?.owner != tokenMetadataProgramId ||
+        metaData is! BinaryAccountData) {
       return null;
     }
     try {
-      final sub = decodeSubscription(data);
-      return sub.owner == owner ? sub : null;
+      if (decodeMintDecimals(mintData.data) != 0 ||
+          decodeMintSupply(mintData.data) != 1) {
+        return null;
+      }
+      final m = decodeMetadata(metaData.data);
+      if (m.mint != mint) return null;
+      final standard = m.tokenStandard;
+      if (standard == TokenStandard.fungible ||
+          standard == TokenStandard.fungibleAsset) {
+        return null;
+      }
+      return WalletNft(
+        mint: mint,
+        name: m.name,
+        symbol: m.symbol,
+        uri: m.uri.isEmpty ? null : m.uri,
+        programmable: isProgrammable(standard),
+      );
     } on FormatException {
       return null;
     }
   }
 
-  @override
-  Future<Uint8List> buildSubscribe({
-    required String owner,
-    required int periods,
-  }) async {
-    final terms = await fetchSubscriptionTerms();
-    if (terms == null) {
-      throw DeadmanException.program(DeadmanException.subscriptionDisabled);
+  static WalletNft _withFrozen(WalletNft n) => WalletNft(
+    mint: n.mint,
+    name: n.name,
+    symbol: n.symbol,
+    imageUrl: n.imageUrl,
+    uri: n.uri,
+    programmable: n.programmable,
+    frozen: true,
+  );
+
+  /// [nfts] with `image` from their off-chain JSON where it answers within
+  /// [nftJsonTimeout]; failures leave the image null.
+  Future<List<WalletNft>> _withImages(List<WalletNft> nfts) async {
+    final client = metadataHttp ?? http.Client();
+    try {
+      return await Future.wait([
+        for (final (i, n) in nfts.indexed)
+          i < maxNftImageFetches && _webUri(n.uri) != null
+              ? _imageOf(client, n.uri!).then(
+                  (image) => image == null
+                      ? n
+                      : WalletNft(
+                          mint: n.mint,
+                          name: n.name,
+                          symbol: n.symbol,
+                          imageUrl: image,
+                          uri: n.uri,
+                          programmable: n.programmable,
+                          frozen: n.frozen,
+                        ),
+                )
+              : Future.value(n),
+      ]);
+    } finally {
+      if (metadataHttp == null) client.close();
     }
-    final sub = await fetchSubscription(owner);
-    final now = _now();
-    if (subscribeError(terms, sub, periods, now) != null) {
-      throw _subscriptionPeriodsError(terms, sub, now);
-    }
-    final mint = terms.mint;
-    final decimals = await _mintDecimals(mint);
-    final treasury = (await fetchFees()).treasury;
-    if (await _account(ataAddress(treasury, mint)) == null) {
-      throw const DeadmanException(
-        'Monthly plans are not set up on this network yet (no treasury '
-        'account for the payment token).',
-        code: DeadmanException.subscriptionDisabled,
-        name: 'SubscriptionDisabled',
-      );
-    }
-    final cost = terms.cost(periods);
-    final held = await tokenBalance(owner, mint);
-    if (held < cost) {
-      final name = _tokenName(mint);
-      throw DeadmanException(
-        '$periods ${_periodWord(terms, periods)} cost ${_units(cost, decimals)} '
-        '$name and your wallet holds ${_units(held, decimals)} $name.',
-        name: 'NoSubscriptionFunds',
-      );
-    }
-    final exists = sub != null;
-    return _build(
-      owner,
-      (payer) => [
-        subscribeIx(
-          owner: owner,
-          // Only a first payment creates the account; then the paymaster
-          // funds its rent, otherwise the owner signs as a payer of nothing.
-          payer: exists ? owner : payer,
-          mint: mint,
-          treasury: treasury,
-          periods: periods,
-        ),
-      ],
-      // Counts against a fee paid in the same token.
-      spend: {mint: cost},
-    );
   }
 
-  static DeadmanException _subscriptionPeriodsError(
-    SubscriptionTerms terms,
-    AccountSubscription? sub,
-    int now,
-  ) {
-    const max = SubscriptionTerms.maxPeriods;
-    final min = terms.minPeriodsFor(sub, now);
-    final String message;
-    if (min > 1) {
-      final kind = (sub?.paidUntil ?? 0) == 0 ? 'A new' : 'A lapsed';
-      message =
-          '$kind monthly plan needs at least $min '
-          '${_periodWord(terms, min)} paid at once (up to $max).';
-    } else {
-      message = 'Extend by 1 to $max ${_periodWord(terms, max)} per payment.';
-    }
-    return DeadmanException(
-      message,
-      code: DeadmanException.invalidSubscription,
-      name: 'InvalidSubscription',
-    );
+  static Uri? _webUri(String? s) {
+    final u = s == null ? null : Uri.tryParse(s);
+    return u != null &&
+            (u.scheme == 'https' || u.scheme == 'http') &&
+            u.host.isNotEmpty
+        ? u
+        : null;
   }
 
-  /// "months" for ~30-day periods, else "periods".
-  static String _periodWord(SubscriptionTerms terms, int n) =>
-      '${terms.monthly ? 'month' : 'period'}${n == 1 ? '' : 's'}';
+  /// `image` of the JSON at [uri], or null on any failure, a non-web image
+  /// link, more than [nftJsonMaxBytes], or no answer within
+  /// [nftJsonTimeout].
+  static Future<String?> _imageOf(http.Client client, String uri) async {
+    try {
+      return await () async {
+        final res = await client.send(http.Request('GET', _webUri(uri)!));
+        if (res.statusCode != 200 ||
+            (res.contentLength ?? 0) > nftJsonMaxBytes) {
+          return null;
+        }
+        final body = BytesBuilder(copy: false);
+        await for (final chunk in res.stream) {
+          body.add(chunk);
+          if (body.length > nftJsonMaxBytes) return null;
+        }
+        final json = jsonDecode(utf8.decode(body.takeBytes()));
+        final image = json is Map ? json['image'] : null;
+        return image is String && _webUri(image) != null ? image : null;
+      }().timeout(nftJsonTimeout);
+    } on Object {
+      return null;
+    }
+  }
 
   @override
   Future<int> balance(String address) =>
@@ -739,6 +800,7 @@ class DeadmanClient implements DeadmanApi {
       skipGraceSecs: skipGraceSecs,
       rules: rules,
     );
+    final mints = await _planMints(rules.map((r) => r.mint));
     final deposits = {
       for (final e in tokenDeposits.entries)
         if (e.value > 0) e.key: e.value,
@@ -747,6 +809,7 @@ class DeadmanClient implements DeadmanApi {
     final decimals = {
       for (final mint in deposits.keys) mint: await _mintDecimals(mint),
     };
+    await _checkWholeTokenSources(owner, deposits, decimals);
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreatePlan(
       planId: planId,
@@ -760,7 +823,13 @@ class DeadmanClient implements DeadmanApi {
       owner,
       (payer) => [
         if (fundGuard) _transfer(owner, guard, AppConfig.guardFundingLamports),
-        createVaultIx(owner: owner, payer: payer, planId: planId, data: data),
+        createVaultIx(
+          owner: owner,
+          payer: payer,
+          planId: planId,
+          data: data,
+          mints: mints,
+        ),
         if (depositLamports > 0) _transfer(owner, vault, depositLamports),
         for (final e in deposits.entries)
           ...depositTokenIxs(
@@ -805,10 +874,7 @@ class DeadmanClient implements DeadmanApi {
       periodSecs: periodSecs,
     );
     if (code != null) throw DeadmanException.program(code);
-    // Rejects Token-2022 and non-mint accounts before anything is signed.
-    for (final mint in {for (final s in schedules) ?s.mint}) {
-      await _mintDecimals(mint);
-    }
+    final mints = await _planMints(schedules.map((s) => s.mint));
     final deposits = {
       for (final e in tokenDeposits.entries)
         if (e.value > 0) e.key: e.value,
@@ -816,6 +882,7 @@ class DeadmanClient implements DeadmanApi {
     final decimals = {
       for (final mint in deposits.keys) mint: await _mintDecimals(mint),
     };
+    await _checkWholeTokenSources(owner, deposits, decimals);
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreateVesting(
       planId: planId,
@@ -831,7 +898,13 @@ class DeadmanClient implements DeadmanApi {
       owner,
       (payer) => [
         if (fundGuard) _transfer(owner, guard, AppConfig.guardFundingLamports),
-        createVaultIx(owner: owner, payer: payer, planId: planId, data: data),
+        createVaultIx(
+          owner: owner,
+          payer: payer,
+          planId: planId,
+          data: data,
+          mints: mints,
+        ),
         if (depositLamports > 0) _transfer(owner, vault, depositLamports),
         for (final e in deposits.entries)
           ...depositTokenIxs(
@@ -869,6 +942,7 @@ class DeadmanClient implements DeadmanApi {
   }) async {
     _checkAmount(amount);
     final decimals = await _mintDecimals(mint);
+    await _checkWholeTokenSources(owner, {mint: amount}, {mint: decimals});
     return _build(
       owner,
       (payer) => depositTokenIxs(
@@ -881,6 +955,43 @@ class DeadmanClient implements DeadmanApi {
       ),
       spend: {mint: amount},
     );
+  }
+
+  /// For 0-decimal tokens (NFTs): the owner's ATA must hold [deposits] and
+  /// not be frozen, so a programmable NFT (always frozen), a locked NFT or
+  /// one held outside the ATA fails here with a reason instead of in the
+  /// wallet's simulation.
+  Future<void> _checkWholeTokenSources(
+    String owner,
+    Map<String, int> deposits,
+    Map<String, int> decimals,
+  ) async {
+    for (final MapEntry(key: mint, value: amount) in deposits.entries) {
+      if (decimals[mint] != 0 || amount <= 0) continue;
+      final data = (await _account(ataAddress(owner, mint)))?.data;
+      final name = _tokenName(mint);
+      if (data is! BinaryAccountData || data.data.length < 165) {
+        throw DeadmanException(
+          'Your wallet has no standard token account holding $name. Move it '
+          'to your main token account first.',
+          name: 'NoTokenAccount',
+        );
+      }
+      if (decodeTokenFrozen(data.data)) {
+        throw DeadmanException(
+          '$name is frozen in your wallet (a programmable NFT, or staked or '
+          'listed). Programmable NFTs cannot be put in a plan yet.',
+          name: 'TokenFrozen',
+        );
+      }
+      final held = decodeTokenAmount(data.data);
+      if (held < amount) {
+        throw DeadmanException(
+          'Your wallet holds $held of $name, not $amount.',
+          name: 'InsufficientTokens',
+        );
+      }
+    }
   }
 
   @override
@@ -909,7 +1020,7 @@ class DeadmanClient implements DeadmanApi {
     _checkAmount(amount);
     final vault = await _ownedVault(owner, planId);
     _checkUnlocked(vault);
-    if (vault.committed(mint) > 0) {
+    if (vault.lockedForOwner(mint) > 0) {
       _checkWithdrawable(
         vault,
         mint,
@@ -959,6 +1070,7 @@ class DeadmanClient implements DeadmanApi {
       historyCount: policyHistoryCount(current),
       guardian: guardian,
     );
+    await _planMints(rules.map((r) => r.mint));
     final data = encodeUpdatePlan(
       label: label,
       lockSecs: lockSecs,
@@ -966,7 +1078,12 @@ class DeadmanClient implements DeadmanApi {
       rules: rules,
       guardian: guardian,
     );
-    return _build(owner, (_) => [ownerActionIx(owner, planId, data)]);
+    return _build(
+      owner,
+      (_) => [
+        updatePlanIx(owner: owner, planId: planId, data: data, rules: rules),
+      ],
+    );
   }
 
   @override
@@ -1252,20 +1369,11 @@ class DeadmanClient implements DeadmanApi {
   KoraClient? _claimPaymaster(String mint) =>
       mint == paymasterToken && paymasterSigner.isNotEmpty ? paymaster : null;
 
-  /// What the beneficiary receives from [p]: the gross minus the protocol
-  /// fee (none while the owner's subscription covers the plan), which a SOL
-  /// payout keeps when the treasury could not hold it (mirrors the
-  /// program).
+  /// What the beneficiary receives from [p]: the gross minus the release
+  /// fee (the SKR rate for SKR payouts), which a SOL payout keeps when the
+  /// treasury could not hold it (mirrors the program).
   Future<int> _netPayout(_Payout p) async {
-    final bps = payoutFeeBps(
-      p.fees,
-      p.vault,
-      await fetchSubscription(p.vault.owner),
-      p.rule.rail,
-      _now(),
-    );
-    final fee = (BigInt.from(p.gross) * BigInt.from(bps) ~/ BigInt.from(10000))
-        .toInt();
+    final fee = p.fees.feeOf(p.gross, p.rule.rail, p.rule.mint);
     if (p.rule.mint == null &&
         fee > 0 &&
         await balance(p.fees.treasury) + fee < await _rentFor(0)) {
@@ -1303,14 +1411,17 @@ class DeadmanClient implements DeadmanApi {
   }
 
   /// SOL a wallet-paid token claim of [p] costs [claimer]: the network fee
-  /// plus rent for the token accounts it opens (its own and the
-  /// treasury's, when missing).
+  /// plus rent for the token accounts it opens (its own and, when a fee
+  /// goes to the treasury, the treasury's, when missing).
   Future<int> _walletTokenClaimCost(String claimer, _Payout p) async {
     final mint = p.rule.mint!;
     final accounts = await _net(
       () => _rpc
           .getMultipleAccounts(
-            [ataAddress(claimer, mint), ataAddress(p.fees.treasury, mint)],
+            [
+              ataAddress(claimer, mint),
+              if (p.treasuryFee) ataAddress(p.fees.treasury, mint),
+            ],
             commitment: commitment,
             encoding: Encoding.base64,
           )
@@ -1409,6 +1520,14 @@ class DeadmanClient implements DeadmanApi {
           throw DeadmanException.program(DeadmanException.fundsCommitted);
         }
       }
+    }
+    if (vault.hasPendingReserve) {
+      throw const DeadmanException(
+        'A skipped payout still holds its share for its beneficiary, so this '
+        'plan cannot be closed until they claim it.',
+        code: DeadmanException.fundsCommitted,
+        name: 'FundsCommitted',
+      );
     }
     final rentPayer = vault.rentPayer.isEmpty ? owner : vault.rentPayer;
     // close_vault leaves the vault's token accounts behind, so sweep every
@@ -1748,11 +1867,21 @@ class DeadmanClient implements DeadmanApi {
       }
     }
     final fees = await fetchFees();
+    final treasuryFee = _treasuryFeeDue(
+      fees,
+      rule,
+      rule.skipped && rule.reserved > 0
+          ? rule.reserved
+          : rule.mode == AmountMode.fixed
+          ? rule.amount
+          : null,
+    );
     return (
       vault: vault,
       rule: rule,
       fees: fees,
       gross: vault.payoutGross(index, held),
+      treasuryFee: treasuryFee,
       ixs: (String payer) => executeRuleIxs(
         executor: executor,
         vaultOwner: vaultOwner,
@@ -1761,6 +1890,7 @@ class DeadmanClient implements DeadmanApi {
         index: index,
         treasury: fees.treasury,
         payer: payer,
+        treasuryFee: treasuryFee,
       ),
     );
   }
@@ -1810,11 +1940,17 @@ class DeadmanClient implements DeadmanApi {
     }
     if (mint != null) await _mintDecimals(mint);
     final fees = await fetchFees();
+    final treasuryFee = _treasuryFeeDue(
+      fees,
+      rule,
+      vault.vestingCap(index) - rule.released,
+    );
     return (
       vault: vault,
       rule: rule,
       fees: fees,
       gross: due < held ? due : held,
+      treasuryFee: treasuryFee,
       ixs: (String payer) => releaseVestedIxs(
         executor: executor,
         vaultOwner: vaultOwner,
@@ -1823,8 +1959,20 @@ class DeadmanClient implements DeadmanApi {
         index: index,
         treasury: fees.treasury,
         payer: payer,
+        treasuryFee: treasuryFee,
       ),
     );
+  }
+
+  /// Whether a token payout of [rule] can leave the treasury a fee, so its
+  /// token account must be passed (and created if missing). [maxGross] is
+  /// the most the payout can be when it lands (null = no bound, as for a
+  /// percentage of a balance that may still grow). A single NFT, for
+  /// instance, rounds to no fee and needs no treasury account.
+  static bool _treasuryFeeDue(FeeSchedule fees, RuleSpec rule, int? maxGross) {
+    if (rule.mint == null || maxGross == null) return true;
+    final fee = fees.feeOf(maxGross, rule.rail, rule.mint);
+    return fees.toTreasuryOf(fee, rule.mint) > 0;
   }
 
   /// Why schedule [index] has nothing to release at [now]: for installment
@@ -2155,8 +2303,12 @@ class DeadmanClient implements DeadmanApi {
 
   Future<int> _ataRent() => _rentFor(165);
 
-  static String _tokenName(String mint) =>
-      mint == AppConfig.usdcMint ? 'USDC' : 'token ${mint.substring(0, 4)}…';
+  static String _tokenName(String mint) => switch (mint) {
+    AppConfig.usdcMint => 'USDC',
+    AppConfig.skrMint => 'SKR',
+    AppConfig.oreMint => 'ORE',
+    _ => 'token ${mint.substring(0, 4)}…',
+  };
 
   /// [unixSecs] as `yyyy-MM-dd HH:mm UTC`.
   static String _utcMinute(int unixSecs) {
@@ -2192,6 +2344,17 @@ class DeadmanClient implements DeadmanApi {
         AppConfig.guardFundingLamports + depositLamports;
   }
 
+  /// The distinct token mints a plan names, each checked to be a classic
+  /// SPL Token mint (the program refuses others with `UnsupportedMint`)
+  /// before anything is signed.
+  Future<List<String>> _planMints(Iterable<String?> mints) async {
+    final out = {...mints.nonNulls}.toList();
+    for (final mint in out) {
+      await _mintDecimals(mint);
+    }
+    return out;
+  }
+
   Future<VaultState> _ownedVault(String owner, int planId) async {
     final vault = await fetchVault(owner, planId);
     if (vault == null) throw const DeadmanException('Plan not found');
@@ -2214,7 +2377,7 @@ class DeadmanClient implements DeadmanApi {
     if (amount > held) {
       throw DeadmanException.program(DeadmanException.insufficientFunds);
     }
-    if (amount > held - vault.committed(mint)) {
+    if (amount > held - vault.lockedForOwner(mint)) {
       throw DeadmanException.program(DeadmanException.fundsCommitted);
     }
   }
@@ -2455,6 +2618,9 @@ typedef _Payout = ({
   RuleState rule,
   FeeSchedule fees,
   int gross,
+
+  /// The treasury's token account is passed (see `_treasuryFeeDue`).
+  bool treasuryFee,
   List<Instruction> Function(String payer) ixs,
 });
 

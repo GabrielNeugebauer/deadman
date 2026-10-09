@@ -271,7 +271,7 @@ class SelectCard extends StatelessWidget {
   final IconData? icon;
   final String? body;
 
-  /// Mono line under the body: "No fee · monthly plan active".
+  /// Mono line under the body: "2% fee".
   final String? footnote;
 
   /// Beside the title, e.g. `DMTag(label: 'mainnet only', mono: true)`.
