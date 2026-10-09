@@ -1,0 +1,793 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<title>Deadman</title>
+<meta name="description" content="Deadman: a dead man's switch for your Solana wallet. Check in, or check out.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=Schibsted+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+/* Layout: dark product page, one-column narrative (hero → steps → live pulse demo → moods → FAQ → poster CTA), pixel grid as the recurring motif */
+:root{
+  --void:#0A0B0D;   /* ground */
+  --grave:#16181C;  /* cards */
+  --grave-2:#1E2126;
+  --line:#262A31;
+  --bone:#F1F0EA;   /* text */
+  --pulse:#3EF5A8;  /* alive, primary */
+  --missed:#FFB547; /* warning */
+  --flat:#FF4D5E;   /* release due */
+  --ash:#8B8F98;    /* secondary text */
+  --f-pixel:"Silkscreen", ui-monospace, "Courier New", monospace;
+  --f-sans:"Schibsted Grotesk", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r:18px;
+  --max:1160px;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--void);color:var(--bone);font-family:var(--f-sans);font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit}
+img{max-width:100%;display:block}
+svg.px{shape-rendering:crispEdges;display:block}
+:focus-visible{outline:2px solid var(--pulse);outline-offset:3px;border-radius:6px}
+.wrap{max-width:var(--max);margin-inline:auto;padding-inline:clamp(16px,4vw,32px)}
+.pixel{font-family:var(--f-pixel);text-transform:uppercase;letter-spacing:.06em}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.eyebrow{font-family:var(--f-pixel);font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--pulse);margin:0}
+h1,h2,h3{text-wrap:balance;margin:0}
+h2{font-size:clamp(30px,4.2vw,48px);line-height:1.08;font-weight:700;letter-spacing:-.02em}
+.lede{color:var(--ash);font-size:clamp(17px,1.6vw,19px);max-width:56ch;margin:0}
+
+/* ---------- buttons ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;height:52px;padding:0 24px;border-radius:14px;border:0;font:600 16px/1 var(--f-sans);cursor:pointer;text-decoration:none;transition:transform .15s ease, background .2s ease, box-shadow .2s ease;white-space:nowrap}
+.btn:active{transform:scale(.97)}
+.btn-pulse{background:var(--pulse);color:var(--void)}
+.btn-pulse:hover{box-shadow:0 0 0 6px color-mix(in srgb,var(--pulse) 22%,transparent)}
+.btn-ghost{background:var(--grave);color:var(--bone);border:1px solid var(--line)}
+.btn-ghost:hover{background:var(--grave-2)}
+.btn svg{width:20px;height:20px}
+
+/* ---------- nav ---------- */
+.nav{position:fixed;inset:0 0 auto 0;z-index:40;padding-top:env(safe-area-inset-top,0px);transition:background .3s ease,border-color .3s ease;border-bottom:1px solid transparent}
+.nav.scrolled{background:color-mix(in srgb,var(--void) 82%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom-color:var(--line)}
+.nav-in{display:flex;align-items:center;gap:28px;height:72px}
+.brand{display:flex;align-items:center;text-decoration:none}
+.brand svg{height:22px;width:auto}
+.nav-links{display:flex;gap:26px;margin-left:auto}
+.nav-links a{text-decoration:none;color:var(--ash);font-size:15px;font-weight:500;transition:color .2s}
+.nav-links a:hover{color:var(--bone)}
+.nav-right{display:flex;align-items:center;gap:12px}
+.lang{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.lang button{background:none;border:0;color:var(--ash);font:500 12px/1 var(--f-mono);padding:9px 10px;cursor:pointer}
+.lang button[aria-pressed="true"]{background:var(--grave-2);color:var(--bone)}
+.nav .btn{height:42px;padding:0 18px;font-size:15px;border-radius:11px}
+@media (max-width:860px){.nav-links{display:none}.nav-right{margin-left:auto}}
+@media (max-width:420px){.nav .btn{display:none}}
+
+/* ---------- hero ---------- */
+.hero{position:relative;padding-top:clamp(120px,16vh,170px);padding-bottom:40px;overflow:hidden}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:clamp(32px,5vw,72px);align-items:center}
+.hero h1{font-family:var(--f-pixel);font-weight:400;font-size:clamp(40px,6.4vw,84px);line-height:1.02;letter-spacing:.01em;text-transform:uppercase;margin:18px 0 22px}
+.hero h1 .hl{color:var(--pulse)}
+.hero .lede{margin-bottom:30px}
+.signup{display:flex;gap:10px;flex-wrap:wrap;max-width:520px}
+.signup input{flex:1 1 220px;min-width:0;height:52px;padding:0 18px;border-radius:14px;border:1px solid var(--line);background:var(--grave);color:var(--bone);font:400 16px var(--f-sans)}
+.signup input::placeholder{color:var(--ash)}
+.signup input:focus{outline:none;border-color:var(--pulse)}
+.form-note{font:400 13px var(--f-mono);color:var(--ash);margin:12px 0 0;min-height:1.3em}
+.form-note.ok{color:var(--pulse)}
+.hero-meta{display:flex;gap:22px;flex-wrap:wrap;margin-top:34px;color:var(--ash);font-size:14px}
+.hero-meta span{display:inline-flex;align-items:center;gap:8px}
+.hero-meta svg{width:14px;height:14px}
+
+.phone-stage{position:relative;display:grid;place-items:center;min-height:560px}
+.phone{position:relative;width:min(300px,78vw);aspect-ratio:1170/2532;max-width:100%;border-radius:44px;padding:10px;background:linear-gradient(160deg,#2a2e35,#121418 40%,#1d2026);box-shadow:0 40px 90px -20px rgba(0,0,0,.8),0 0 0 1px #2d3138 inset;z-index:2;animation:float 7s ease-in-out infinite}
+.phone .screen{position:relative;width:100%;height:100%;border-radius:35px;overflow:hidden;background:var(--void)}
+.phone .screen img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .7s ease}
+.phone .screen img.on{opacity:1}
+.phone .notch{position:absolute;top:18px;left:50%;transform:translateX(-50%);width:78px;height:22px;border-radius:12px;background:#000;z-index:3}
+@keyframes float{50%{transform:translateY(-12px)}}
+.glow{position:absolute;width:420px;height:420px;border-radius:50%;filter:blur(70px);opacity:.28;background:var(--pulse);transition:background .8s ease;z-index:0}
+.sticker{position:absolute;z-index:3;display:flex;align-items:center;gap:8px;padding:9px 13px;border-radius:10px;font:400 12px/1 var(--f-pixel);letter-spacing:.12em;text-transform:uppercase;color:var(--void);box-shadow:0 10px 24px -8px rgba(0,0,0,.6);border:2px solid var(--void)}
+.sticker svg{width:18px;height:18px}
+.st-1{top:8%;left:-2%;background:var(--bone);transform:rotate(-6deg)}
+.st-2{bottom:16%;right:-4%;background:var(--pulse);transform:rotate(5deg)}
+.st-3{bottom:4%;left:4%;background:var(--grave);color:var(--bone);border-color:var(--line);transform:rotate(-3deg)}
+.state-chip{transition:background .5s ease}
+
+.ecg{position:absolute;left:0;right:0;bottom:0;height:120px;pointer-events:none;opacity:.5;z-index:0}
+.ecg path{fill:none;stroke:var(--pulse);stroke-width:2;stroke-linejoin:miter;vector-effect:non-scaling-stroke}
+.ecg .trace{stroke-dasharray:240 2400;animation:trace 4.2s linear infinite;filter:drop-shadow(0 0 6px var(--pulse))}
+.ecg .base{opacity:.18}
+@keyframes trace{from{stroke-dashoffset:2640}to{stroke-dashoffset:0}}
+
+@media (max-width:900px){
+  .hero-grid{grid-template-columns:1fr}
+  .phone-stage{min-height:520px}
+  .st-1{left:2%}.st-2{right:2%}
+}
+
+/* ---------- ticker ---------- */
+.ticker{border-block:1px solid var(--line);overflow:hidden;padding:18px 0;background:var(--void);position:relative}
+.ticker-track{display:flex;gap:18px;width:max-content;animation:marquee 38s linear infinite}
+.ticker:hover .ticker-track{animation-play-state:paused}
+@keyframes marquee{to{transform:translateX(-50%)}}
+.tag{display:inline-flex;align-items:center;gap:10px;padding:10px 16px;border-radius:10px;font:400 13px/1 var(--f-pixel);letter-spacing:.14em;text-transform:uppercase;white-space:nowrap}
+.tag svg{width:20px;height:20px}
+.tag.t-pulse{background:var(--pulse);color:var(--void)}
+.tag.t-bone{background:var(--bone);color:var(--void)}
+.tag.t-missed{background:var(--missed);color:var(--void)}
+.tag.t-flat{background:var(--flat);color:var(--void)}
+.tag.t-ash{background:var(--ash);color:var(--void)}
+.tag.t-grave{background:var(--grave);color:var(--bone);border:1px solid var(--line)}
+
+/* ---------- sections ---------- */
+section.block{padding-block:clamp(80px,11vw,140px)}
+.sec-head{display:grid;gap:18px;margin-bottom:clamp(40px,6vw,64px);max-width:720px}
+
+/* steps */
+.steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.step{background:var(--grave);border:1px solid var(--line);border-radius:var(--r);padding:26px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.step-n{display:flex;align-items:center;justify-content:space-between}
+.step-n .num{font:400 13px var(--f-pixel);letter-spacing:.14em;color:var(--ash)}
+.step-n svg{width:34px;height:34px}
+.step h3{font-size:22px;font-weight:700;letter-spacing:-.01em}
+.step p{margin:0;color:var(--ash);font-size:15.5px}
+.mini{margin-top:auto;background:var(--void);border:1px solid var(--line);border-radius:12px;padding:14px;font:400 13px/1.7 var(--f-mono);color:var(--bone);display:grid;gap:4px;min-width:0}
+.mini .row{display:flex;justify-content:space-between;gap:10px;min-width:0}
+.mini .row span:first-child{color:var(--ash)}
+.mini .row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini .g{color:var(--pulse)}.mini .o{color:var(--missed)}.mini .r{color:var(--flat)}
+.mini .bar{height:6px;border-radius:3px;background:var(--grave-2);overflow:hidden;margin:6px 0 2px}
+.mini .bar i{display:block;height:100%;background:var(--pulse)}
+@media (max-width:900px){.steps{grid-template-columns:1fr}}
+
+/* pulse demo */
+.demo{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:clamp(28px,4vw,56px);align-items:center}
+.ring-card{background:var(--grave);border:1px solid var(--line);border-radius:28px;padding:clamp(22px,3vw,34px);display:grid;gap:22px;justify-items:center;position:relative;overflow:hidden}
+.ring-card .demo-label{position:absolute;top:16px;right:18px;font:400 11px var(--f-mono);color:var(--ash)}
+.ring{position:relative;width:min(320px,100%);aspect-ratio:1}
+.ring svg{width:100%;height:100%}
+.ring-center{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:8px;text-align:center}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border-radius:8px;font:400 11px/1 var(--f-pixel);letter-spacing:.14em;text-transform:uppercase;background:color-mix(in srgb,var(--c,var(--pulse)) 16%,transparent);color:var(--c,var(--pulse))}
+.chip svg{width:14px;height:14px}
+.timer{font:500 clamp(40px,6vw,56px)/1 var(--f-mono);color:var(--c,var(--pulse));letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.timer-sub{font-size:14px;color:var(--bone);max-width:22ch}
+.ring-card .btn{width:100%}
+.ring-card .btn.danger{background:var(--pulse)}
+.toast{font:400 13px var(--f-sans);color:var(--ash);display:flex;align-items:center;gap:8px;min-height:20px}
+.toast svg{width:16px;height:16px}
+
+.moods{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.mood{background:var(--grave);border:1px solid var(--line);border-radius:var(--r);padding:22px;display:grid;gap:12px;transition:border-color .3s ease, transform .3s ease, background .3s ease;min-width:0}
+.mood svg{width:56px;height:56px}
+.mood h3{font-size:18px;font-weight:700;color:var(--c)}
+.mood p{margin:0;color:var(--ash);font-size:14.5px}
+.mood.active{border-color:var(--c);background:color-mix(in srgb,var(--c) 7%,var(--grave));transform:translateY(-3px)}
+@media (max-width:900px){.demo{grid-template-columns:1fr}}
+@media (max-width:460px){.moods{grid-template-columns:1fr}}
+
+/* features */
+.feats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.feat{background:var(--void);padding:30px 26px;display:grid;gap:12px;align-content:start}
+.feat svg{width:40px;height:40px}
+.feat h3{font-size:19px;font-weight:700}
+.feat p{margin:0;color:var(--ash);font-size:15px}
+@media (max-width:900px){.feats{grid-template-columns:1fr}}
+
+/* faq */
+.faq{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:clamp(28px,5vw,72px)}
+.faq-list{border-top:1px solid var(--line)}
+details{border-bottom:1px solid var(--line)}
+summary{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:22px 0;font-size:18px;font-weight:600}
+summary::-webkit-details-marker{display:none}
+summary .pm{font:400 18px var(--f-pixel);color:var(--pulse);transition:transform .25s ease;flex:none}
+details[open] summary .pm{transform:rotate(45deg)}
+details p{margin:0 0 22px;color:var(--ash);max-width:60ch}
+@media (max-width:900px){.faq{grid-template-columns:1fr}}
+
+/* poster cta */
+.poster{background:var(--pulse);color:var(--void);border-radius:28px;padding:clamp(36px,6vw,72px);position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;align-items:center}
+.poster h2{font-family:var(--f-pixel);font-weight:400;text-transform:uppercase;font-size:clamp(32px,5.4vw,68px);letter-spacing:.04em;line-height:1.1}
+.poster p{margin:18px 0 28px;font-size:18px;max-width:44ch;color:color-mix(in srgb,var(--void) 80%,var(--pulse))}
+.poster .btn{background:var(--void);color:var(--pulse)}
+.poster .btn:hover{box-shadow:0 0 0 6px color-mix(in srgb,var(--void) 20%,transparent)}
+.poster .big-skull{width:clamp(140px,20vw,240px);height:auto}
+.poster .bite{position:absolute;background:var(--void)}
+@media (max-width:760px){.poster{grid-template-columns:1fr}.poster .big-skull{width:120px;order:-1}}
+
+/* footer */
+footer{padding-block:64px 40px;color:var(--ash);font-size:14px}
+.foot{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(2,minmax(0,.6fr));gap:32px;padding-bottom:40px;border-bottom:1px solid var(--line)}
+.foot h4{margin:0 0 14px;font:400 12px var(--f-pixel);letter-spacing:.14em;text-transform:uppercase;color:var(--bone)}
+.foot ul{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.foot a{text-decoration:none}.foot a:hover{color:var(--bone)}
+.foot .brand svg{height:26px}
+.foot-bottom{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:24px}
+.linkbtn{background:none;border:0;color:var(--ash);font:inherit;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:3px}
+.linkbtn:hover{color:var(--pulse)}
+@media (max-width:700px){.foot{grid-template-columns:1fr 1fr}.foot>div:first-child{grid-column:1/-1}}
+
+/* reveal on scroll: visible at rest, only animates when JS marks it */
+.js .rv{opacity:0;transform:translateY(24px);transition:opacity .8s cubic-bezier(.2,.7,.2,1),transform .8s cubic-bezier(.2,.7,.2,1)}
+.js .rv.in{opacity:1;transform:none}
+
+/* ---------- INTRO ---------- */
+#intro{position:fixed;inset:0;z-index:100;display:grid;place-items:center;pointer-events:auto}
+#intro canvas{position:absolute;inset:0;width:100%;height:100%}
+#intro .stage{position:relative;z-index:2;display:grid;justify-items:center;gap:34px;width:min(860px,88vw);transition:opacity .35s ease, transform .5s ease}
+#intro .lock{width:100%;height:auto;overflow:visible}
+#intro .lock rect{opacity:0;transform-box:fill-box;transform-origin:center}
+#intro .lock rect.on{animation:pxIn .28s steps(3) forwards}
+@keyframes pxIn{0%{opacity:0;transform:scale(.2)}60%{opacity:1;transform:scale(1.25)}100%{opacity:1;transform:scale(1)}}
+#intro #skullG{transform-box:fill-box;transform-origin:center;transition:transform .7s cubic-bezier(.7,0,.2,1)}
+#intro #skullG.beat{animation:beat .62s ease-out}
+@keyframes beat{0%{transform:var(--t) scale(1)}15%{transform:var(--t) scale(1.09)}30%{transform:var(--t) scale(1)}45%{transform:var(--t) scale(1.05)}70%{transform:var(--t) scale(1)}}
+#intro .readout{display:grid;justify-items:center;gap:12px;width:min(520px,100%)}
+#intro .ecg-i{width:100%;height:56px;overflow:visible}
+#intro .ecg-i path{fill:none;stroke:var(--pulse);stroke-width:2.2;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 6px var(--pulse))}
+#intro .status{display:flex;gap:18px;font:400 13px var(--f-pixel);letter-spacing:.16em;text-transform:uppercase;color:var(--ash)}
+#intro .status b{font-weight:400;color:var(--pulse);min-width:4ch;text-align:right}
+#intro .skip{position:absolute;right:max(16px,3vw);bottom:calc(max(16px,3vh) + env(safe-area-inset-bottom,0px));z-index:3;background:none;border:1px solid var(--line);color:var(--ash);font:400 11px var(--f-pixel);letter-spacing:.16em;text-transform:uppercase;padding:9px 12px;border-radius:9px;cursor:pointer}
+#intro .skip:hover{color:var(--bone);border-color:var(--ash)}
+#intro .corner{position:absolute;z-index:2;font:400 12px var(--f-sans);color:var(--ash);transition:opacity .3s}
+#intro .c-tl{top:calc(max(16px,3vh) + env(safe-area-inset-top,0px));left:max(16px,3vw)}
+#intro .c-tr{top:calc(max(16px,3vh) + env(safe-area-inset-top,0px));right:max(16px,3vw)}
+#intro .c-bl{bottom:calc(max(16px,3vh) + env(safe-area-inset-bottom,0px));left:max(16px,3vw)}
+#intro.leaving .stage,#intro.leaving .corner,#intro.leaving .skip{opacity:0}
+#intro.leaving .stage{transform:scale(.96)}
+body.intro-on{overflow:hidden}
+/* hero entrance after intro */
+.js .hero .enter{opacity:0;transform:translateY(18px)}
+.js .hero.go .enter{opacity:1;transform:none;transition:opacity .8s cubic-bezier(.2,.7,.2,1) var(--d,0s),transform .8s cubic-bezier(.2,.7,.2,1) var(--d,0s)}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .js .rv,.js .hero .enter{opacity:1;transform:none}
+}
+</style>
+</head>
+<body>
+
+<div id="intro" aria-hidden="true">
+  <canvas id="introCanvas"></canvas>
+  <span class="corner c-tl">Deadman</span>
+  <span class="corner c-tr" data-pt="Prova de vida, na Solana">Proof of life, on Solana</span>
+  <span class="corner c-bl" data-pt="Feito para o Solana Seeker">Built for Solana Seeker</span>
+  <div class="stage">
+    <svg class="lock px" id="lock" viewBox="0 0 55 11" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="readout">
+      <svg class="ecg-i" viewBox="0 0 520 56" preserveAspectRatio="none"><path id="ecgI" d=""/></svg>
+      <div class="status"><span id="introLabel" data-pt="Checando pulso">Checking pulse</span><b id="introPct">000</b></div>
+    </div>
+  </div>
+  <button class="skip" id="skip" type="button" data-pt="Pular">Skip</button>
+</div>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="Deadman home"><svg class="px" data-lockup viewBox="0 0 55 11" aria-hidden="true"></svg></a>
+    <nav class="nav-links" aria-label="Main">
+      <a href="#how" data-pt="Como funciona">How it works</a>
+      <a href="#pulse" data-pt="Pulso">Pulse</a>
+      <a href="#security" data-pt="Segurança">Security</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="nav-right">
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="pt" aria-pressed="false">PT</button>
+      </div>
+      <a class="btn btn-pulse" href="#join" data-pt="Entrar na lista">Join waitlist</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero" id="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow enter" style="--d:.05s" data-pt="Um dead man's switch para sua carteira Solana">A dead man's switch for your Solana wallet</p>
+        <h1 class="enter" style="--d:.15s"><span data-pt="Faça check-in,">Check in,</span><br><span class="hl" data-pt="ou faça check-out.">or check out.</span></h1>
+        <p class="lede enter" style="--d:.28s" data-pt="Um toque prova que você está vivo. Se você ficar em silêncio, seus SOL e USDC vão para quem você escolheu, uma etapa de cada vez.">One tap proves you're alive. If you go silent, your SOL and USDC go to the people you chose, one release tier at a time.</p>
+        <form class="signup enter" style="--d:.4s" id="join" novalidate>
+          <label class="sr" for="email" style="position:absolute;left:-9999px">Email</label>
+          <input id="email" type="email" placeholder="you@email.com" autocomplete="email" data-pt-ph="voce@email.com" required>
+          <button class="btn btn-pulse" type="submit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 11c0 3.5-1 6.5-3 9M8.5 6.6A6 6 0 0 1 18 11c0 2-.2 4-.8 6M6 9.5c-.4.9-.5 1.8-.5 2.5 0 2.3-.6 4.3-1.5 6M15 13c0 2.6-.5 5-1.5 7M12 7.5a3.5 3.5 0 0 0-3.5 3.5"/></svg>
+            <span data-pt="Quero acesso">Get early access</span>
+          </button>
+        </form>
+        <p class="form-note enter" style="--d:.45s" id="formNote" aria-live="polite"></p>
+        <div class="hero-meta enter" style="--d:.5s">
+          <span><svg class="px" data-icon="heart" data-color="var(--pulse)"></svg><span data-pt="Prova de vida on-chain">Proof of life, on-chain</span></span>
+          <span><svg class="px" data-icon="alive" data-color="var(--pulse)"></svg><span data-pt="Feito para o Seeker">Built for Seeker</span></span>
+          <span><svg class="px" data-icon="ghost" data-color="var(--ash)"></svg><span data-pt="SOL e USDC">SOL and USDC</span></span>
+        </div>
+      </div>
+
+      <div class="phone-stage enter" style="--d:.3s">
+        <div class="glow" id="glow"></div>
+        <div class="phone">
+          <div class="screen">
+            <span class="notch"></span>
+            <img src="assets/app-alive.jpg" alt="Deadman app: Pulse screen, Alive, 1m 55s until next check-in" class="on" data-state="alive">
+            <img src="assets/app-missed.jpg" alt="Deadman app: Missed, 57s until tier 1 releases" data-state="missed">
+            <img src="assets/app-tierdue.jpg" alt="Deadman app: Tier due, 48m 12s past due" data-state="due">
+          </div>
+        </div>
+        <div class="sticker st-1"><svg class="px" data-icon="heart" data-color="var(--flat)"></svg><span data-pt="GM. Ainda vivo.">GM. Still alive.</span></div>
+        <div class="sticker st-2 state-chip" id="heroChip"><svg class="px" data-icon="alive" data-color="var(--void)"></svg><span id="heroChipTxt">Alive</span></div>
+        <div class="sticker st-3"><span class="mono" style="font-family:var(--f-mono);letter-spacing:0;text-transform:none">AppA…9PbA</span></div>
+      </div>
+    </div>
+    <svg class="ecg" viewBox="0 0 1200 120" preserveAspectRatio="none" aria-hidden="true"><path class="base" id="ecgBase"/><path class="trace" id="ecgTrace"/></svg>
+  </section>
+
+  <div class="ticker" aria-hidden="true">
+    <div class="ticker-track" id="ticker"></div>
+  </div>
+
+  <section class="block" id="how">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="eyebrow" data-pt="Como funciona">How it works</p>
+        <h2 data-pt="Do plano ao pagamento, sem ninguém apertar botão.">From plan to payout, with nobody pressing a button.</h2>
+        <p class="lede" data-pt="Você decide quem recebe, quanto e depois de quanto silêncio. O Deadman cuida do resto.">You decide who gets what, and after how much silence. Deadman handles the rest.</p>
+      </div>
+      <div class="steps">
+        <article class="step rv">
+          <div class="step-n"><span class="num" data-pt="Passo 1">Step 1</span><svg class="px" data-icon="ghost" data-color="var(--bone)"></svg></div>
+          <h3 data-pt="Monte um plano">Make a plan</h3>
+          <p data-pt="Cole uma carteira ou um código de resgate, dê um nome e divida os fundos em etapas de liberação.">Paste a wallet or a claim code, give it a name, and split the funds into release tiers.</p>
+          <div class="mini">
+            <div class="row"><span data-pt="Plano">Plan</span><span>Kids</span></div>
+            <div class="row"><span data-pt="Protegido">Protected</span><span>0.099 SOL · 0 USDC</span></div>
+            <div class="row"><span>Tier 1</span><span>25% → Mom</span></div>
+            <div class="row"><span>Tier 2</span><span>25% → Kids</span></div>
+            <div class="row"><span>Tier 3</span><span>50% → 2bLC…4XMU</span></div>
+          </div>
+        </article>
+        <article class="step rv" style="transition-delay:.08s">
+          <div class="step-n"><span class="num" data-pt="Passo 2">Step 2</span><svg class="px" data-icon="heart" data-color="var(--pulse)"></svg></div>
+          <h3 data-pt="Faça check-in">Check in</h3>
+          <p data-pt="Um toque reinicia o relógio. Enquanto você aparece, nada se mexe.">One tap resets the clock. As long as you show up, nothing moves.</p>
+          <div class="mini">
+            <div class="row"><span>Status</span><span class="g">ALIVE</span></div>
+            <div class="row"><span data-pt="Próximo check-in">Next check-in</span><span class="g">14h 02m</span></div>
+            <div class="bar"><i style="width:62%"></i></div>
+            <div class="row"><span data-pt="Pulso registrado">Pulse recorded</span><span data-pt="em 4 planos">on 4 plans</span></div>
+          </div>
+        </article>
+        <article class="step rv" style="transition-delay:.16s">
+          <div class="step-n"><span class="num" data-pt="Passo 3">Step 3</span><svg class="px" data-icon="tomb" data-color="var(--flat)"></svg></div>
+          <h3 data-pt="O silêncio libera">Silence releases</h3>
+          <p data-pt="Perdeu o check-in? Começa a contagem. Cada etapa vencida paga direto para o beneficiário.">Miss a check-in and a countdown starts. Each tier that comes due pays the beneficiary directly.</p>
+          <div class="mini">
+            <div class="row"><span>Status</span><span class="r">TIER DUE</span></div>
+            <div class="row"><span>Tier 1</span><span class="r">48m 12s</span></div>
+            <div class="row"><span data-pt="Liberando para">Releasing to</span><span>4Yep…KMbF</span></div>
+            <div class="row"><span data-pt="Taxa">Fee</span><span>0</span></div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="pulse" style="padding-top:0">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="eyebrow" data-pt="Uma caveira, quatro humores">One skull, four moods</p>
+        <h2 data-pt="Teste o pulso. Depois pare de apertar.">Try the pulse. Then stop tapping.</h2>
+        <p class="lede" data-pt="Uma demonstração acelerada: faça check-in para manter o status vivo, ou deixe o relógio correr e veja cada etapa acontecer.">A sped-up demo. Check in to stay alive, or let the clock run and watch each stage play out.</p>
+      </div>
+      <div class="demo">
+        <div class="ring-card rv">
+          <span class="demo-label" data-pt="demo · 1s = 1h">demo · 1s = 1h</span>
+          <div class="ring">
+            <svg viewBox="0 0 200 200" id="ring" aria-hidden="true"></svg>
+            <div class="ring-center">
+              <span class="chip" id="dChip"><svg class="px" data-icon="alive" data-color="currentColor"></svg><span id="dChipTxt">Alive</span></span>
+              <span class="timer" id="dTimer" aria-live="off">12s</span>
+              <span class="timer-sub" id="dSub">until next check-in</span>
+            </div>
+          </div>
+          <button class="btn btn-pulse" type="button" id="dBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 11c0 3.5-1 6.5-3 9M8.5 6.6A6 6 0 0 1 18 11c0 2-.2 4-.8 6M6 9.5c-.4.9-.5 1.8-.5 2.5 0 2.3-.6 4.3-1.5 6M15 13c0 2.6-.5 5-1.5 7M12 7.5a3.5 3.5 0 0 0-3.5 3.5"/></svg>
+            <span id="dBtnTxt">Check in</span>
+          </button>
+          <div class="toast" id="dToast" aria-live="polite"></div>
+        </div>
+        <div class="moods">
+          <article class="mood rv active" data-mood="alive" style="--c:var(--pulse)"><svg class="px" data-icon="alive" data-color="var(--pulse)"></svg><h3 data-pt="Vivo">Alive</h3><p data-pt="Check-in em dia. Nada se mexe.">Checked in on time. Nothing moves.</p></article>
+          <article class="mood rv" data-mood="missed" style="--c:var(--missed);transition-delay:.06s"><svg class="px" data-icon="missed" data-color="var(--missed)"></svg><h3 data-pt="Check-in perdido">Missed a check-in</h3><p data-pt="O silêncio começou. A próxima etapa está em contagem.">Silence has started. The next release tier is counting down.</p></article>
+          <article class="mood rv" data-mood="due" style="--c:var(--flat);transition-delay:.12s"><svg class="px" data-icon="due" data-color="var(--flat)"></svg><h3 data-pt="Etapa vencida">Silent past a release tier</h3><p data-pt="Uma etapa venceu. Os fundos vão para o beneficiário.">A tier is due. Funds go to the beneficiary.</p></article>
+          <article class="mood rv" data-mood="released" style="--c:var(--ash);transition-delay:.18s"><svg class="px" data-icon="released" data-color="var(--ash)"></svg><h3 data-pt="Plano liberado">Plan fully released</h3><p data-pt="Todas as etapas foram pagas. Descanse em paz.">Every tier has paid out. Rest easy.</p></article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="security" style="padding-top:0">
+    <div class="wrap">
+      <div class="sec-head rv">
+        <p class="eyebrow" data-pt="Segurança">Security</p>
+        <h2 data-pt="Você escolhe como o dinheiro chega.">You choose how the money arrives.</h2>
+      </div>
+      <div class="feats rv">
+        <div class="feat"><svg class="px" data-icon="heart" data-color="var(--pulse)"></svg><h3 data-pt="Transferência normal">Normal transfer</h3><p data-pt="Direto para a carteira Solana do beneficiário. Qualquer pessoa pode ver na blockchain. Sem taxa.">Straight to the beneficiary's Solana wallet, visible on-chain like any transfer. No fee.</p></div>
+        <div class="feat"><svg class="px" data-icon="ghost" data-color="var(--bone)"></svg><h3 data-pt="Privada (Cloak)">Private (Cloak)</h3><p data-pt="Oculta na Solana. O beneficiário usa o app Deadman e o código de resgate que você enviar.">Hidden on Solana. The beneficiary claims it in the Deadman app with a code you send them.</p></div>
+        <div class="feat"><svg class="px" data-icon="tomb" data-color="var(--missed)"></svg><h3 data-pt="Liberação em etapas">Tiered release</h3><p data-pt="Nada sai de uma vez. Cada etapa tem seu próprio prazo e destino, e um check-in interrompe tudo.">Nothing leaves at once. Each tier has its own deadline and destination, and one check-in stops the clock.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="faq" style="padding-top:0">
+    <div class="wrap faq">
+      <div class="sec-head rv" style="margin:0">
+        <p class="eyebrow">FAQ</p>
+        <h2 data-pt="Perguntas que ninguém gosta de fazer.">Questions nobody likes asking.</h2>
+      </div>
+      <div class="faq-list rv">
+        <details><summary><span data-pt="O que é um dead man's switch?">What is a dead man's switch?</span><span class="pm">+</span></summary><p data-pt="Um mecanismo que age quando você para de responder. No Deadman, você faz check-in regularmente; se parar, seus planos de liberação entram em ação.">A mechanism that acts when you stop responding. In Deadman you check in regularly. If you stop, your release plans kick in.</p></details>
+        <details><summary><span data-pt="Quem pode receber os fundos?">Who can receive the funds?</span><span class="pm">+</span></summary><p data-pt="Qualquer carteira Solana, ou alguém sem carteira por meio de um código de resgate. O nome do beneficiário fica salvo só no seu celular.">Any Solana wallet, or someone without one through a claim code. The beneficiary's name is only saved on your phone.</p></details>
+        <details><summary><span data-pt="O que é uma etapa de liberação?">What is a release tier?</span><span class="pm">+</span></summary><p data-pt="Uma parte do plano com prazo próprio. Ex.: 25% para a mãe após 10 dias de silêncio, 50% para os filhos depois.">A slice of the plan with its own deadline. For example, 25% to Mom after 10 days of silence, then 50% to the kids.</p></details>
+        <details><summary><span data-pt="Quais tokens são suportados?">Which tokens are supported?</span><span class="pm">+</span></summary><p data-pt="SOL e USDC na Solana.">SOL and USDC on Solana.</p></details>
+        <details><summary><span data-pt="E se eu só esquecer?">What if I just forget?</span><span class="pm">+</span></summary><p data-pt="Você recebe avisos quando o check-in está perto e quando passa do prazo. Um check-in a qualquer momento antes de uma etapa vencer interrompe a liberação.">You get nudges when a check-in is close and when it's overdue. Checking in any time before a tier comes due stops the release.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" style="padding-bottom:40px">
+    <div class="poster rv">
+      <div>
+        <h2><span data-pt="Faça check-in,">Check in,</span><br><span data-pt="ou faça check-out.">or check out.</span></h2>
+        <p data-pt="Deadman chega primeiro ao Solana Seeker. Entre na lista e seja avisado no lançamento.">Deadman is coming to Solana Seeker first. Join the list and hear the moment it ships.</p>
+        <a class="btn" href="#join" data-pt="Entrar na lista">Join waitlist</a>
+      </div>
+      <svg class="px big-skull" data-icon="alive" data-color="var(--void)" aria-hidden="true"></svg>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div style="display:grid;gap:14px;align-content:start">
+        <a class="brand" href="#top" aria-label="Deadman"><svg class="px" data-lockup viewBox="0 0 55 11" aria-hidden="true"></svg></a>
+        <p style="margin:0;max-width:34ch" data-pt="Um dead man's switch para sua carteira Solana. Feito para o Solana Seeker.">A dead man's switch for your Solana wallet. Built for Solana Seeker.</p>
+      </div>
+      <div><h4 data-pt="Produto">Product</h4><ul><li><a href="#how" data-pt="Como funciona">How it works</a></li><li><a href="#pulse" data-pt="Pulso">Pulse</a></li><li><a href="#security" data-pt="Segurança">Security</a></li></ul></div>
+      <div><h4 data-pt="Projeto">Project</h4><ul><li><a href="#faq">FAQ</a></li><li><a href="#join" data-pt="Lista de espera">Waitlist</a></li><li><button class="linkbtn" type="button" id="replay" data-pt="Rever abertura">Replay intro</button></li></ul></div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 Deadman</span>
+      <span class="pixel" style="font-size:11px;letter-spacing:.16em;color:var(--pulse)" data-pt="Ainda batendo">Still beating</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  document.documentElement.classList.add('js');
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---------- pixel art (traced from the brand identity) ---------- */
+  var TOP = ["...#####...",".#########.","###########","###########"];
+  var JAW = ["#####.#####",".#########.","..#######..","..#.#.#.#.."];
+  var G = {
+    logo:     TOP.concat(["##...#...##","##...#...##","##...#...##"], JAW),
+    alive:    TOP.concat(["##...######","##...##.###","##...#.#.##"], JAW),
+    missed:   TOP.concat(["##...#...##","##..##..###","##...#...##"], JAW),
+    due:      TOP.concat(["##.#.#.#.##","###.###.###","##.#.#.#.##"], JAW),
+    released: TOP.concat(["###########","##...#...##","###########"], JAW),
+    heart: [".###...###.","#####.#####","###########","####.######","#...##....#",".####.####.","..#######..","...#####...","....###....",".....#....."],
+    ghost: ["...#####...",".#########.",".#########.","##..###..##","##..###..##","###########","###########","###.....###","###########","###########","##.##.##.##"],
+    tomb:  ["...#####...",".#########.","###########","#..##.#..##","#.#.#.#.#.#","#..##.#..##","#.#.#.#.###","#.#.#.#.###","###########","###########","###########"]
+  };
+  var WORD = [
+    "####..#####..###..####..#...#..###..#...#",
+    "#...#.#.....#...#.#...#.##.##.#...#.##..#",
+    "#...#.#.....#...#.#...#.#.#.#.#...#.##..#",
+    "#...#.####..#####.#...#.#.#.#.#####.#.#.#",
+    "#...#.#.....#...#.#...#.#...#.#...#.#..##",
+    "#...#.#.....#...#.#...#.#...#.#...#.#..##",
+    "####..#####.#...#.####..#...#.#...#.#...#"
+  ];
+  var NS = 'http://www.w3.org/2000/svg';
+  function runs(grid, dx, dy){ // merge horizontal runs into rects
+    var out = '';
+    grid.forEach(function(row, y){
+      var x = 0;
+      while (x < row.length){
+        if (row[x] === '#'){ var s = x; while (row[x] === '#') x++; out += '<rect x="'+(s+dx)+'" y="'+(y+dy)+'" width="'+(x-s)+'" height="1"/>'; }
+        else x++;
+      }
+    });
+    return out;
+  }
+  document.querySelectorAll('svg[data-icon]').forEach(function(svg){
+    var g = G[svg.dataset.icon]; if (!g) return;
+    svg.setAttribute('viewBox', '0 0 ' + g[0].length + ' ' + g.length);
+    svg.innerHTML = '<g fill="' + (svg.dataset.color || 'currentColor') + '">' + runs(g, 0, 0) + '</g>';
+  });
+  document.querySelectorAll('svg[data-lockup]').forEach(function(svg){
+    svg.innerHTML = '<g style="fill:var(--pulse)">' + runs(G.logo, 0, 0) + '</g><g style="fill:var(--bone)">' + runs(WORD, 14, 2) + '</g>';
+  });
+
+  /* ---------- language toggle ---------- */
+  var lang = 'en';
+  try { lang = localStorage.getItem('dm-lang') || (navigator.language || '').toLowerCase().indexOf('pt') === 0 && 'pt' || 'en'; } catch(e){}
+  var tr = { alive:['Alive','Vivo'], missed:['Missed','Perdido'], due:['Tier due','Etapa vencida'], released:['Released','Liberado'],
+    untilNext:['until next check-in','até o próximo check-in'], untilTier:['until tier 1 releases','até a etapa 1 liberar'],
+    pastDue:['past due, releasing to 4Yep…KMbF','vencida, liberando para 4Yep…KMbF'], restEasy:['tiers paid out. Rest easy.','etapas pagas. Descanse em paz.'],
+    checkin:['Check in','Fazer check-in'], stop:['Check in to stop','Check-in para parar'], again:['Start again','Começar de novo'],
+    recorded:['Pulse recorded on 4 plans.','Pulso registrado em 4 planos.'], thanks:['You are on the list. Stay alive.','Você está na lista. Continue vivo.'],
+    bad:['Enter a valid email so we can reach you.','Digite um email válido para podermos te avisar.'], pct:['Checking pulse','Checando pulso'], ok:['Alive.','Vivo.'] };
+  function t(k){ return tr[k][lang === 'pt' ? 1 : 0]; }
+  function applyLang(){
+    document.documentElement.lang = lang === 'pt' ? 'pt-BR' : 'en';
+    document.querySelectorAll('[data-pt]').forEach(function(el){
+      if (el.dataset.en === undefined) el.dataset.en = el.textContent;
+      el.textContent = lang === 'pt' ? el.dataset.pt : el.dataset.en;
+    });
+    document.querySelectorAll('[data-pt-ph]').forEach(function(el){
+      if (el.dataset.enPh === undefined) el.dataset.enPh = el.placeholder;
+      el.placeholder = lang === 'pt' ? el.dataset.ptPh : el.dataset.enPh;
+    });
+    document.querySelectorAll('.lang button').forEach(function(b){ b.setAttribute('aria-pressed', b.dataset.lang === lang); });
+    if (window.__demoRender) window.__demoRender();
+    if (window.__heroChip) window.__heroChip();
+  }
+  document.querySelectorAll('.lang button').forEach(function(b){
+    b.addEventListener('click', function(){ lang = b.dataset.lang; try{ localStorage.setItem('dm-lang', lang); }catch(e){} applyLang(); });
+  });
+
+  /* ---------- nav ---------- */
+  var nav = document.getElementById('nav');
+  function onScroll(){ nav.classList.toggle('scrolled', scrollY > 20); }
+  addEventListener('scroll', onScroll, {passive:true}); onScroll();
+
+  /* ---------- ECG paths ---------- */
+  function beatPath(w, h, every, mid){
+    var d = 'M0 ' + mid, x = 0;
+    while (x < w){
+      var b = x + every * 0.55;
+      d += ' L' + b + ' ' + mid + ' L' + (b+8) + ' ' + (mid-6) + ' L' + (b+14) + ' ' + mid + ' L' + (b+22) + ' ' + mid +
+           ' L' + (b+28) + ' ' + (mid+10) + ' L' + (b+36) + ' ' + (mid-h) + ' L' + (b+44) + ' ' + (mid+h*0.55) + ' L' + (b+50) + ' ' + mid +
+           ' L' + (b+62) + ' ' + mid + ' L' + (b+72) + ' ' + (mid-9) + ' L' + (b+82) + ' ' + mid;
+      x += every;
+    }
+    return d + ' L' + w + ' ' + mid;
+  }
+  var hp = beatPath(1200, 46, 300, 72);
+  document.getElementById('ecgBase').setAttribute('d', hp);
+  document.getElementById('ecgTrace').setAttribute('d', hp);
+
+  /* ---------- ticker ---------- */
+  var tags = [['t-pulse','alive','Check in'],['t-bone','heart','Still alive'],['t-missed','missed','Missed'],['t-grave','heart','Proof of life'],
+              ['t-flat','due','Tier due'],['t-bone','tomb','Here lies my seed phrase'],['t-ash','ghost','Released. Rest easy.'],['t-pulse',null,'Built for Seeker'],['t-grave','alive',"Dead man's switch"]];
+  var tk = document.getElementById('ticker'), html = '';
+  tags.forEach(function(x){
+    var ic = x[1] ? '<svg class="px" viewBox="0 0 11 ' + G[x[1]].length + '"><g fill="currentColor">' + runs(G[x[1]],0,0) + '</g></svg>' : '';
+    html += '<span class="tag ' + x[0] + '">' + ic + x[2] + '</span>';
+  });
+  tk.innerHTML = html + html;
+
+  /* ---------- hero phone: cycle app states ---------- */
+  var shots = document.querySelectorAll('.phone img'), heroChip = document.getElementById('heroChip'), glow = document.getElementById('glow');
+  var heroStates = [['alive','var(--pulse)'],['missed','var(--missed)'],['due','var(--flat)']], hi = 0;
+  window.__heroChip = function(){
+    var s = heroStates[hi];
+    document.getElementById('heroChipTxt').textContent = t(s[0]);
+    heroChip.style.background = s[1];
+    heroChip.querySelector('svg').innerHTML = '<g fill="var(--void)">' + runs(G[s[0]],0,0) + '</g>';
+    glow.style.background = s[1];
+    shots.forEach(function(im){ im.classList.toggle('on', im.dataset.state === s[0]); });
+  };
+  if (!reduce) setInterval(function(){ hi = (hi + 1) % heroStates.length; window.__heroChip(); }, 3200);
+
+  /* ---------- waitlist form (no backend yet) ---------- */
+  var form = document.getElementById('join'), note = document.getElementById('formNote');
+  form.addEventListener('submit', function(e){
+    e.preventDefault();
+    var v = document.getElementById('email').value.trim();
+    var ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+    note.textContent = ok ? t('thanks') : t('bad');
+    note.classList.toggle('ok', ok);
+    if (ok) form.reset();
+  });
+
+  /* ---------- pulse demo ---------- */
+  var ring = document.getElementById('ring'), SEG = 60, segs = [];
+  for (var i = 0; i < SEG; i++){
+    var a = (i / SEG) * Math.PI * 2 - Math.PI / 2;
+    var r1 = 80, r2 = 96, ln = document.createElementNS(NS, 'line');
+    ln.setAttribute('x1', 100 + Math.cos(a) * r1); ln.setAttribute('y1', 100 + Math.sin(a) * r1);
+    ln.setAttribute('x2', 100 + Math.cos(a) * r2); ln.setAttribute('y2', 100 + Math.sin(a) * r2);
+    ln.setAttribute('stroke-width', 5.2); ln.setAttribute('stroke-linecap', 'butt');
+    ring.appendChild(ln); segs.push(ln);
+  }
+  var COL = {alive:'var(--pulse)', missed:'var(--missed)', due:'var(--flat)', released:'var(--ash)'};
+  var DUR = {alive:12, missed:8, due:6};
+  var st = 'alive', left = DUR.alive, toastMsg = '';
+  var dChip = document.getElementById('dChip'), dTimer = document.getElementById('dTimer'), dSub = document.getElementById('dSub'), dBtnTxt = document.getElementById('dBtnTxt'), dToast = document.getElementById('dToast');
+  var moods = document.querySelectorAll('.mood');
+  function render(){
+    var c = COL[st];
+    dChip.style.setProperty('--c', c); dTimer.style.setProperty('--c', c);
+    document.getElementById('dChipTxt').textContent = t(st);
+    dChip.querySelector('svg').innerHTML = '<g fill="currentColor">' + runs(G[st],0,0) + '</g>';
+    if (st === 'released'){ dTimer.textContent = '3 of 3'; dSub.textContent = t('restEasy'); }
+    else { dTimer.textContent = (st === 'due' ? '' : '') + Math.max(0, Math.ceil(left)) + 's'; dSub.textContent = t(st === 'alive' ? 'untilNext' : st === 'missed' ? 'untilTier' : 'pastDue'); }
+    dBtnTxt.textContent = st === 'released' ? t('again') : st === 'due' ? t('stop') : t('checkin');
+    var frac = st === 'released' ? 0 : left / DUR[st];
+    var lit = Math.round(frac * SEG);
+    segs.forEach(function(s, i){ s.setAttribute('stroke', i < lit ? c : 'var(--grave-2)'); });
+    moods.forEach(function(m){ m.classList.toggle('active', m.dataset.mood === st); });
+    dToast.innerHTML = toastMsg ? '<svg class="px" viewBox="0 0 11 10"><g fill="var(--pulse)">' + runs(G.heart,0,0) + '</g></svg>' + toastMsg : '';
+  }
+  window.__demoRender = function(){ if (toastMsg) toastMsg = t('recorded'); render(); };
+  var last = performance.now(), demoVisible = false;
+  new IntersectionObserver(function(es){ demoVisible = es[0].isIntersecting; }, {threshold:.2}).observe(ring);
+  function tick(now){
+    var dt = Math.min(.25, (now - last) / 1000); last = now;
+    if (demoVisible && st !== 'released'){
+      left -= dt;
+      if (left <= 0){
+        if (st === 'alive'){ st = 'missed'; left = DUR.missed; toastMsg = ''; }
+        else if (st === 'missed'){ st = 'due'; left = DUR.due; }
+        else if (st === 'due'){ st = 'released'; left = 0; }
+      }
+      render();
+    }
+    requestAnimationFrame(tick);
+  }
+  document.getElementById('dBtn').addEventListener('click', function(){
+    st = 'alive'; left = DUR.alive; toastMsg = t('recorded'); render();
+  });
+  render(); requestAnimationFrame(tick);
+
+  /* ---------- reveal on scroll ---------- */
+  var rv = document.querySelectorAll('.rv');
+  if ('IntersectionObserver' in window && !reduce){
+    var io = new IntersectionObserver(function(es){ es.forEach(function(e){ if (e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } }); }, {rootMargin:'0px 0px -8% 0px'});
+    rv.forEach(function(el){ io.observe(el); });
+  } else rv.forEach(function(el){ el.classList.add('in'); });
+
+  /* ---------- INTRO ---------- */
+  var intro = document.getElementById('intro'), hero = document.getElementById('hero');
+  var cv = document.getElementById('introCanvas'), ctx = cv.getContext('2d');
+  var lock = document.getElementById('lock'), timers = [];
+  function later(fn, ms){ timers.push(setTimeout(fn, ms)); }
+  function clearTimers(){ timers.forEach(clearTimeout); timers = []; }
+  var cells = [], CELL = 0, cols = 0, rows = 0, dissolving = false, dStart = 0;
+
+  function sizeCanvas(){
+    var dpr = Math.min(2, devicePixelRatio || 1);
+    cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    CELL = Math.max(28, Math.round(Math.min(innerWidth, innerHeight) / 14));
+    cols = Math.ceil(innerWidth / CELL); rows = Math.ceil(innerHeight / CELL);
+    cells = [];
+    for (var y = 0; y < rows; y++) for (var x = 0; x < cols; x++){
+      // diagonal wave from bottom-left with jitter, like pixels dying out
+      var d = ((x / cols) + (1 - y / rows)) / 2;
+      cells.push({x:x, y:y, t: d * 0.75 + Math.random() * 0.25});
+    }
+    drawCells(0);
+  }
+  function drawCells(p){ // p: 0 = fully covered, 1 = fully revealed
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    cells.forEach(function(c){
+      var k = Math.min(1, Math.max(0, (p - c.t * 0.8) / 0.2)); // 0..1 local progress
+      if (k >= 1) return;
+      var s = CELL * (1 - k);
+      var flash = k > 0 && k < 0.5;
+      ctx.fillStyle = flash ? '#3EF5A8' : '#0A0B0D';
+      ctx.globalAlpha = flash ? 0.9 : 1;
+      ctx.fillRect(c.x * CELL + (CELL - s) / 2, c.y * CELL + (CELL - s) / 2, s + 0.5, s + 0.5);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function buildLock(){
+    var out = '<g id="skullG" style="fill:var(--pulse)">', i = 0, sk = [];
+    G.logo.forEach(function(row, y){ for (var x = 0; x < row.length; x++) if (row[x] === '#') sk.push([x, y]); });
+    sk.forEach(function(p){ out += '<rect class="s" x="' + p[0] + '" y="' + p[1] + '" width="1.02" height="1.02"/>'; });
+    out += '</g><g id="wordG" style="fill:var(--bone)">';
+    WORD.forEach(function(row, y){ for (var x = 0; x < row.length; x++) if (row[x] === '#') out += '<rect class="w" data-c="' + x + '" x="' + (x + 14) + '" y="' + (y + 2) + '" width="1.02" height="1.02"/>'; });
+    lock.innerHTML = out + '</g>';
+  }
+
+  function ecgIntro(){
+    var path = document.getElementById('ecgI');
+    var d = 'M0 34 L150 34 L162 28 L170 34 L182 34 L190 44 L200 4 L210 52 L218 34 L240 34 L252 26 L264 34 L290 34 L302 28 L310 34 L322 34 L330 44 L340 4 L350 52 L358 34 L380 34 L392 26 L404 34 L520 34';
+    path.setAttribute('d', d);
+    var len = path.getTotalLength();
+    path.style.strokeDasharray = len; path.style.strokeDashoffset = len;
+    path.getBoundingClientRect();
+    path.style.transition = 'stroke-dashoffset 1.9s cubic-bezier(.5,0,.3,1)';
+    path.style.strokeDashoffset = 0;
+  }
+
+  function finish(){
+    clearTimers();
+    intro.hidden = true; intro.classList.remove('leaving');
+    document.body.classList.remove('intro-on');
+    hero.classList.add('go');
+  }
+
+  function dissolve(){
+    intro.classList.add('leaving');
+    hero.classList.add('go');
+    dissolving = true; dStart = performance.now();
+    (function step(now){
+      var p = Math.min(1, (now - dStart) / 1000);
+      drawCells(p * 1.05);
+      if (p < 1 && dissolving) requestAnimationFrame(step); else finish();
+    })(dStart);
+  }
+
+  function playIntro(){
+    clearTimers(); dissolving = false;
+    intro.hidden = false; intro.classList.remove('leaving');
+    document.body.classList.add('intro-on');
+    hero.classList.remove('go');
+    sizeCanvas(); buildLock();
+    var label = document.getElementById('introLabel'), pct = document.getElementById('introPct');
+    label.textContent = t('pct'); pct.textContent = '000';
+    var skullG = document.getElementById('skullG');
+    skullG.style.transition = 'none';
+    skullG.style.setProperty('--t', 'translate(22px,0)');
+    skullG.style.transform = 'translate(22px,0)';   // start centred in the 55-unit lockup
+    skullG.getBoundingClientRect(); skullG.style.transition = '';
+
+    // 1. skull pixels pop in, random order
+    var s = Array.prototype.slice.call(lock.querySelectorAll('rect.s')).sort(function(){ return Math.random() - .5; });
+    s.forEach(function(r, i){ later(function(){ r.classList.add('on'); }, 120 + i * (900 / s.length)); });
+    ecgIntro();
+    var t0 = performance.now();
+    (function count(now){
+      var p = Math.min(1, (now - t0) / 1900);
+      pct.textContent = String(Math.round(p * 100)).padStart(3, '0');
+      if (p < 1 && !intro.hidden) requestAnimationFrame(count);
+    })(t0);
+
+    // 2. heartbeat
+    later(function(){ skullG.classList.remove('beat'); skullG.getBoundingClientRect(); skullG.classList.add('beat'); }, 1150);
+    later(function(){ label.textContent = t('ok'); label.style.color = 'var(--pulse)'; pct.textContent = '100'; }, 1950);
+
+    // 3. skull slides left, wordmark sweeps in column by column
+    later(function(){
+      skullG.classList.remove('beat');
+      skullG.style.setProperty('--t', 'translate(0px,0)');
+      skullG.style.transform = 'translate(0px,0)';
+      lock.querySelectorAll('rect.w').forEach(function(r){
+        var c = +r.dataset.c;
+        later(function(){ r.classList.add('on'); }, 260 + c * 16 + Math.random() * 60);
+      });
+    }, 1700);
+
+    // 4. pixel dissolve into the page
+    later(dissolve, 3350);
+    later(function(){ label.style.color = ''; }, 3600);
+  }
+
+  document.getElementById('skip').addEventListener('click', function(){ if (!dissolving) { clearTimers(); dissolve(); } });
+  addEventListener('keydown', function(e){ if (!intro.hidden && (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ')) { if (!dissolving){ clearTimers(); dissolve(); } } });
+  addEventListener('resize', function(){ if (!intro.hidden && !dissolving) sizeCanvas(); });
+  document.getElementById('replay').addEventListener('click', function(){ scrollTo({top:0, behavior:'instant'}); playIntro(); });
+
+  applyLang();
+  if (reduce){ finish(); } else { playIntro(); }
+})();
+</script>
+</body>
+</html>
