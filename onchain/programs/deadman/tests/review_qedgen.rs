@@ -1199,7 +1199,9 @@ fn blank_vault(kind: PlanKind) -> Vault {
         bump: 255,
         stipend_paid: 0,
         vest_period_secs: 0,
-        _reserved: [0; 55],
+        skr_fee_reserve: 0,
+        skr_reserve_mint: Pubkey::default(),
+        _reserved: [0; 15],
     }
 }
 

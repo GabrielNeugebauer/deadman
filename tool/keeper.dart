@@ -14,6 +14,16 @@
 // (same policy) once it can pay, and never skips it again. At most one
 // action per vault per sweep.
 //
+// SKR fee reserve: a plan that holds one pays the fee of a payout that is
+// not in SKR in SKR (1.5% of its value at the Pyth prices, 10% burned) and
+// the beneficiary gets the whole payout, when both prices are fresh and the
+// reserve covers it; otherwise the normal 2% in the asset. The keeper
+// passes the oracle accounts for every payout of such a plan (the program
+// requires them), works out which path the program will take, and counts
+// the treasury's SKR share: at --price for SKR when given, else as 1.35%
+// of the payout's value (the payout asset's price). The reserve itself is
+// never tier funds.
+//
 // Vesting plans: releases what has vested on each schedule under the same
 // rules, at most once per --vest-interval per schedule (and always once
 // fully vested), installments included. Inheritance-only actions never
@@ -43,9 +53,9 @@ import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/solana/deadman_client.dart';
 import 'package:solana/base58.dart';
 import 'package:solana/dto.dart' show Account, BinaryAccountData, Encoding;
+import 'package:solana/encoder.dart' show AccountMeta;
 import 'package:solana/solana.dart';
 
-const nativeMint = 'So11111111111111111111111111111111111111112';
 const tokenAccountSize = 165;
 
 enum KeeperAction { execute, skip, wait }
@@ -74,6 +84,7 @@ class Decision {
     this.reason, {
     this.createAtasFor = const [],
     this.treasuryFee = true,
+    this.skrFeeAccounts = const [],
   });
 
   final KeeperAction action;
@@ -85,6 +96,18 @@ class Decision {
   /// Whether the payout leaves a fee for the treasury, so its token account
   /// must be passed (FUNDS-5).
   final bool treasuryFee;
+
+  /// The oracle and SKR accounts a payout of a plan with an SKR fee
+  /// reserve passes (see `skrFeeAccounts`); empty otherwise.
+  final List<AccountMeta> skrFeeAccounts;
+
+  Decision withSkrFeeAccounts(List<AccountMeta> accounts) => Decision(
+    action,
+    reason,
+    createAtasFor: createAtasFor,
+    treasuryFee: treasuryFee,
+    skrFeeAccounts: accounts,
+  );
 
   @override
   String toString() =>
@@ -148,6 +171,38 @@ bool skipUnblocks(VaultState v, int index) {
   return false;
 }
 
+/// What the program takes from a plan's SKR fee reserve for one payout:
+/// [fee] SKR base units, [burnBps] of it burned, the rest to the treasury,
+/// worth [treasuryLamports] (see [skrShareLamports]).
+typedef SkrFee = ({int fee, int burnBps, int treasuryLamports});
+
+/// Lamports the treasury's share of an SKR fee of [fee] base units is
+/// worth: at [skrLamportsPerUnit] when known, else as the share of the
+/// payout's value the fee stands for ([gross] units of an asset worth
+/// [assetLamportsPerUnit] each, [feeBpsSkr] of it, minus the burned
+/// [burnBps]); 0 when neither price is known.
+int skrShareLamports({
+  required int fee,
+  required int burnBps,
+  required int gross,
+  required int feeBpsSkr,
+  double? skrLamportsPerUnit,
+  double? assetLamportsPerUnit,
+}) {
+  if (skrLamportsPerUnit != null) {
+    return ((fee - bpsShare(fee, burnBps)) * skrLamportsPerUnit).floor();
+  }
+  if (assetLamportsPerUnit == null) return 0;
+  final share = bpsShare(feeBpsSkr, Limits.bpsDenominator - burnBps);
+  return (gross * assetLamportsPerUnit * share / Limits.bpsDenominator).floor();
+}
+
+String _skrPayout(String net, SkrFee s) {
+  final burned = bpsShare(s.fee, s.burnBps);
+  return 'pays $net, fee ${s.fee} SKR from the reserve'
+      '${burned > 0 ? ' ($burned burned)' : ''}';
+}
+
 Decision _leaveToBeneficiary(String payout, int earned, int cost, String of) =>
     Decision(
       KeeperAction.wait,
@@ -165,6 +220,7 @@ class SolFacts {
     required this.treasuryRentMin,
     this.otherReserved = 0,
     this.networkFee = lamportsPerSignature,
+    this.skrFee,
   });
 
   /// Vault lamports above its rent-exempt minimum.
@@ -180,6 +236,9 @@ class SolFacts {
   final int beneficiaryRentMin;
   final int treasuryLamports;
   final int treasuryRentMin;
+
+  /// Set when the program will take the fee from the plan's SKR reserve.
+  final SkrFee? skrFee;
 }
 
 /// A due or skipped SOL rule: cannot pay when the payout is 0 or would leave
@@ -194,15 +253,21 @@ Decision decideSol(RuleSpec rule, SolFacts f, {required bool canSkip}) {
     net += fee;
     fee = 0;
   }
+  // The program tries the SKR reserve only for a fee the treasury takes.
+  final skr = fee > 0 ? f.skrFee : null;
+  if (skr != null) (net, fee) = (gross, 0);
   if (f.beneficiaryLamports + net < f.beneficiaryRentMin) {
     return _cannotPay(
       'payout $net lamports leaves the beneficiary below rent exemption',
       canSkip,
     );
   }
-  final payout = 'pays $net lamports, fee $fee';
-  if (fee < f.networkFee) {
-    return _leaveToBeneficiary(payout, fee, f.networkFee, 'network fee');
+  final payout = skr == null
+      ? 'pays $net lamports, fee $fee'
+      : _skrPayout('$net lamports', skr);
+  final earned = skr?.treasuryLamports ?? fee;
+  if (earned < f.networkFee) {
+    return _leaveToBeneficiary(payout, earned, f.networkFee, 'network fee');
   }
   return Decision(KeeperAction.execute, payout);
 }
@@ -221,11 +286,14 @@ class TokenFacts {
     this.otherReserved = 0,
     this.burnBps = 0,
     this.networkFee = lamportsPerSignature,
+    this.skrFee,
   });
 
   /// The mint is owned by the classic SPL Token program (the only one the
   /// client builds for).
   final bool classicMint;
+
+  /// The vault's balance of the mint, its SKR fee reserve left out.
   final int vaultBalance;
   final int feeBps;
   final AtaStatus beneficiaryAta;
@@ -245,6 +313,9 @@ class TokenFacts {
 
   /// What sending the release costs the keeper, ATA creates included.
   final int networkFee;
+
+  /// Set when the program will take the fee from the plan's SKR reserve.
+  final SkrFee? skrFee;
 }
 
 /// A due or skipped token rule: execute only when the vault holds the mint
@@ -270,7 +341,10 @@ Decision decideToken(
   final (net, fee) = splitFee(gross, f.feeBps);
   final burned = bpsShare(fee, f.burnBps);
   final toTreasury = fee - burned;
+  // The program passes treasury_token whenever the asset fee is due, even
+  // when the SKR reserve ends up paying it (it may fall back).
   final treasuryFee = toTreasury > 0;
+  final skr = fee > 0 ? f.skrFee : null;
   if (treasuryFee && f.treasuryAta == AtaStatus.unusable) {
     return const Decision(KeeperAction.wait, 'treasury ATA unusable');
   }
@@ -281,8 +355,12 @@ Decision decideToken(
   final rent = missing.length * f.ataRent;
   final cost = f.networkFee + rent;
   final price = f.lamportsPerUnit;
-  final feeValue = price == null ? 0 : (toTreasury * price).floor();
-  final payout = 'pays $net, fee $fee${burned > 0 ? ' ($burned burned)' : ''}';
+  final feeValue =
+      skr?.treasuryLamports ??
+      (price == null ? 0 : (toTreasury * price).floor());
+  final payout = skr == null
+      ? 'pays $net, fee $fee${burned > 0 ? ' ($burned burned)' : ''}'
+      : _skrPayout('$gross', skr);
   if (feeValue < cost) {
     return _leaveToBeneficiary(
       payout,
@@ -346,6 +424,17 @@ const clusters = <String, ({String genesisHash, String rpc, String usdcMint})>{
   ),
 };
 
+/// The SKR fee side of a payout (`DeadmanClient.skrFeeFor`): the accounts
+/// to pass and the SKR fee the program would take, if any.
+typedef SkrFeeLookup =
+    Future<({List<AccountMeta> accounts, int? fee})> Function(
+      VaultState vault,
+      RuleSpec rule,
+      FeeSchedule fees,
+      int gross,
+      bool treasuryFee,
+    );
+
 class Keeper {
   Keeper(
     this.sol,
@@ -355,10 +444,12 @@ class Keeper {
     this.prices = const {},
     this.vestInterval = 86400,
     this.cuPrice = 0,
-  });
+    SkrFeeLookup? skrFeeFor,
+  }) : _skrFeeFor = skrFeeFor ?? client.skrFeeFor;
 
   final SolanaClient sol;
   final DeadmanClient client;
+  final SkrFeeLookup _skrFeeFor;
   final Ed25519HDKeyPair key;
   final bool dryRun;
   final Map<String, double> prices;
@@ -420,8 +511,38 @@ class Keeper {
     final otherReserved = asTier == null ? reservedFor(v, i) : 0;
     final mint = rule.mint;
     final bps = fees.bpsFor(rule.rail, mint);
+    final assetPrice = mint == null
+        ? 1.0
+        : prices[mint] ?? (mint == nativeMint ? 1.0 : null);
+
+    /// The SKR side of a payout from [funds]: the accounts a plan with a
+    /// reserve must pass, and the fee the program would take from it.
+    Future<(List<AccountMeta>, SkrFee?)> skrSide(int funds) async {
+      if (!v.paysFeeInSkr(fees, mint)) return (const <AccountMeta>[], null);
+      final gross = tierGross(rule, funds, otherReserved: otherReserved);
+      final q = await _skrFeeFor(v, rule, fees, gross, true);
+      final fee = q.fee;
+      if (fee == null) return (q.accounts, null);
+      return (
+        q.accounts,
+        (
+          fee: fee,
+          burnBps: fees.skrBurnBps,
+          treasuryLamports: skrShareLamports(
+            fee: fee,
+            burnBps: fees.skrBurnBps,
+            gross: gross,
+            feeBpsSkr: fees.feeBpsSkr,
+            skrLamportsPerUnit: prices[fees.skrMint],
+            assetLamportsPerUnit: assetPrice,
+          ),
+        ),
+      );
+    }
+
     if (mint == null) {
       final [ben, tre] = await _accounts([rule.beneficiary, fees.treasury]);
+      final (skrAccounts, skrFee) = await skrSide(v.withdrawableLamports);
       return decideSol(
         rule,
         SolFacts(
@@ -433,9 +554,10 @@ class Keeper {
           treasuryRentMin: await _rentMin(_data(tre)?.length ?? 0),
           otherReserved: otherReserved,
           networkFee: networkFeeLamports(cuPrice: cuPrice),
+          skrFee: skrFee,
         ),
         canSkip: canSkip,
-      );
+      ).withSkrFeeAccounts(skrAccounts);
     }
     final [mintAcct, vaultAta, benAta, treAta] = await _accounts([
       mint,
@@ -444,29 +566,34 @@ class Keeper {
       ataAddress(fees.treasury, mint),
     ]);
     final vaultData = _data(vaultAta);
+    final funds = v.tierFunds(
+      mint,
+      vaultAta?.owner == tokenProgramId &&
+              vaultData != null &&
+              vaultData.length >= 165
+          ? decodeTokenAmount(vaultData)
+          : 0,
+    );
+    final (skrAccounts, skrFee) = await skrSide(funds);
     return decideToken(
       rule,
       fees.treasury,
       TokenFacts(
         classicMint: mintAcct?.owner == tokenProgramId,
-        vaultBalance:
-            vaultAta?.owner == tokenProgramId &&
-                vaultData != null &&
-                vaultData.length >= 165
-            ? decodeTokenAmount(vaultData)
-            : 0,
+        vaultBalance: funds,
         feeBps: bps,
         beneficiaryAta: _ataStatus(benAta, mint, rule.beneficiary),
         treasuryAta: _ataStatus(treAta, mint, fees.treasury),
         ataRent: await _rentMin(tokenAccountSize),
-        lamportsPerUnit: prices[mint] ?? (mint == nativeMint ? 1 : null),
+        lamportsPerUnit: assetPrice,
         otherReserved: otherReserved,
         burnBps: fees.isSkr(mint) ? fees.skrBurnBps : 0,
         // Up to two ATA creates and the payout.
         networkFee: networkFeeLamports(instructions: 3, cuPrice: cuPrice),
+        skrFee: skrFee,
       ),
       canSkip: canSkip,
-    );
+    ).withSkrFeeAccounts(skrAccounts);
   }
 
   /// Sends the rule's instructions minus the ATA creates the decision did not
@@ -490,6 +617,7 @@ class Keeper {
         index: i,
         treasury: fees.treasury,
         treasuryFee: d.treasuryFee,
+        skrFee: d.skrFeeAccounts,
       ))
         if (ix.programId.toBase58() != ataProgramId ||
             d.createAtasFor.contains(ix.accounts[2].pubKey.toBase58()))

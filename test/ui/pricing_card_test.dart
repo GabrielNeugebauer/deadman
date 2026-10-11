@@ -91,9 +91,7 @@ void main() {
     );
     await tester.pump();
     expect(
-      find.text(
-        '2% on release · 1.5% for SKR (10% burned) · withdrawals free.',
-      ),
+      find.text('2% on release · 1.5% in SKR (10% burned) · withdrawals free.'),
       findsOneWidget,
     );
   });

@@ -631,6 +631,19 @@ class PricingCard extends ConsumerWidget {
                 rail: 'Payouts in SKR',
                 rate: percentText(fees.feeBpsSkr / 10000),
               ),
+              const Divider(),
+              _RateRow(
+                rail: 'Any payout, fee paid in SKR',
+                rate: percentText(fees.feeBpsSkr / 10000),
+              ),
+              const SizedBox(height: DMSpace.sm),
+              Text(
+                'Keep an SKR fee reserve in a plan and each payout pays its '
+                'fee in SKR from it, so the beneficiary receives the whole '
+                'payout. If the reserve runs short, the payout pays the '
+                'normal fee instead.',
+                style: small,
+              ),
               if (fees.skrBurnBps > 0) ...[
                 const SizedBox(height: DMSpace.sm),
                 Text(

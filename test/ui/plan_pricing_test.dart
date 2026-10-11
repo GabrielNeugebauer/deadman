@@ -92,7 +92,7 @@ void main() {
       expect(find.text('Fees'), findsOneWidget);
       expect(
         find.text(
-          '2% on release · 1.5% for SKR (10% burned) · withdrawals free',
+          '2% on release · 1.5% in SKR (10% burned) · withdrawals free',
         ),
         findsOneWidget,
       );
@@ -100,7 +100,8 @@ void main() {
       expect(
         find.text(
           'Payouts in SKR pay 1.5% on every rail, and 10% of that fee is '
-          'burned.',
+          'burned. Any other payout can pay 1.5% in SKR too, from an SKR fee '
+          'reserve kept in the plan: its beneficiary then receives all of it.',
         ),
         findsOneWidget,
       );
@@ -123,7 +124,7 @@ void main() {
       );
       expect(
         find.text(
-          '2.5% (3% private rails) on release · 1% for SKR (20% burned) · '
+          '2.5% (3% private rails) on release · 1% in SKR (20% burned) · '
           'withdrawals free',
         ),
         findsOneWidget,
@@ -135,7 +136,7 @@ void main() {
       await _pump(tester, const FeeModelCard());
       expect(
         find.text(
-          '2% on release · 1.5% for SKR (10% burned) · withdrawals free',
+          '2% on release · 1.5% in SKR (10% burned) · withdrawals free',
         ),
         findsOneWidget,
       );

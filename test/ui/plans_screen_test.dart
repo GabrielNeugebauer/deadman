@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
+import 'package:deadman/state/prices.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/ui/screens/plans/plan_card_shell.dart';
 import 'package:deadman/ui/screens/plans_screen.dart';
@@ -11,6 +13,8 @@ import 'package:deadman/wallet/wallet_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
@@ -84,6 +88,24 @@ Future<_PlansApi> _pump(
         planUsdcProvider.overrideWith((ref, address) async => 250000000),
         planTokenBalancesProvider.overrideWith((ref) async => planTokens),
         walletTokenProvider.overrideWith((ref, mint) async => 7000000),
+        // Hermes refuses; Jupiter: SOL 150 USD, SKR 0.02 USD.
+        usdPricesServiceProvider.overrideWithValue(
+          UsdPrices(
+            client: MockClient(
+              (req) async => http.Response(
+                jsonEncode({
+                  'So11111111111111111111111111111111111111112': {
+                    'usdPrice': 150,
+                  },
+                  'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3': {
+                    'usdPrice': 0.02,
+                  },
+                }),
+                req.url.host.contains('hermes') ? 401 : 200,
+              ),
+            ),
+          ),
+        ),
         feesProvider.overrideWith(
           (ref) async => FeeSchedule(
             treasury: addr(9),
@@ -562,13 +584,114 @@ void main() {
       );
       expect(
         find.text(
-          '2% (3% private rails) on release · 1.5% for SKR (10% burned) · '
+          '2% (3% private rails) on release · 1.5% in SKR (10% burned) · '
           'withdrawals free',
         ),
         findsOneWidget,
       );
       expect(find.textContaining('Plus'), findsNothing);
       expect(find.text('Extend'), findsNothing);
+      await _unmount(tester);
+    });
+  });
+
+  group('SKR fee reserve', () {
+    const skr = AppConfig.skrMint;
+    VaultState plan(int reserve, {String? mint}) {
+      final now = _nowSecs();
+      return vault(
+        guard: addr(2),
+        lastPulse: now,
+        ownerLastSeen: now,
+        withdrawableLamports: 1000000000,
+        skrFeeReserve: reserve,
+        skrReserveMint: reserve > 0 ? (mint ?? skr) : null,
+      );
+    }
+
+    // 1 SOL at 150 USD pays 1.5% = 2.25 USD = 112.5 SKR.
+    testWidgets('the card shows the reserve and whether it covers the '
+        'remaining payouts', (tester) async {
+      await _pump(tester, [plan(200000000)]);
+      await _expandAll(tester);
+      expect(find.text('SKR fee reserve: 200 SKR'), findsOneWidget);
+      expect(
+        find.text(
+          "Covers the remaining payouts (≈ 112.5 SKR at today's prices).",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Release fee: 1.5% · paid in SKR from the reserve · SKR fees 10% '
+          'burned',
+        ),
+        findsOneWidget,
+      );
+      await _unmount(tester);
+    });
+
+    testWidgets('a short reserve says so', (tester) async {
+      await _pump(tester, [plan(100000000)]);
+      await _expandAll(tester);
+      expect(
+        find.text(
+          "May not cover the remaining payouts: ≈ 112.5 SKR at today's "
+          "prices. Payouts it can't cover pay 2% in their own asset.",
+        ),
+        findsOneWidget,
+      );
+      await _unmount(tester);
+    });
+
+    testWidgets('Top up and Withdraw reserve go through the wallet', (
+      tester,
+    ) async {
+      final api = await _pump(tester, [plan(100000000)]);
+      await _expandAll(tester);
+      await _tapText(tester, 'Top up');
+      expect(find.text('Top up SKR fee reserve'), findsOneWidget);
+      expect(find.text('7 SKR in your wallet'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '5');
+      await _tapText(tester, 'Confirm');
+      expect(api.reserveFunded, [(0, 5000000)]);
+
+      await _tapText(tester, 'Withdraw reserve');
+      expect(find.text('100 SKR in the reserve'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '101');
+      await _tapText(tester, 'Confirm');
+      expect(find.text('Only 100 SKR in the reserve'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '100');
+      await _tapText(tester, 'Confirm');
+      expect(api.reserveWithdrawn, [(0, 100000000)]);
+      await _unmount(tester);
+    });
+
+    testWidgets('a plan without one offers it; an old-mint reserve can '
+        'only be withdrawn', (tester) async {
+      final api = await _pump(tester, [
+        plan(0),
+        vault(
+          planId: 3,
+          guard: addr(2),
+          lastPulse: _nowSecs(),
+          ownerLastSeen: _nowSecs(),
+          skrFeeReserve: 5000000,
+          skrReserveMint: addr(77),
+        ),
+      ]);
+      await _expandAll(tester);
+      expect(find.text('Pay fees in SKR: 1.5% instead of 2%'), findsOneWidget);
+      await _tapText(tester, 'Add SKR');
+      expect(find.text('Pay fees in SKR'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '2');
+      await _tapText(tester, 'Confirm');
+      expect(api.reserveFunded, [(0, 2000000)]);
+      expect(
+        find.textContaining('in an older SKR token and no longer pays fees'),
+        findsOneWidget,
+      );
+      expect(find.text('Top up'), findsNothing);
       await _unmount(tester);
     });
   });

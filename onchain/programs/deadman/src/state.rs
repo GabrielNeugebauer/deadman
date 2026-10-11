@@ -67,6 +67,86 @@ impl Config {
     }
 }
 
+/// Admin registry entry: the Pyth feed that prices `mint` (SOL under the
+/// wrapped SOL mint) and the one price account payouts may read it from.
+#[account]
+#[derive(InitSpace)]
+pub struct PriceFeed {
+    pub mint: Pubkey,
+    pub feed_id: [u8; 32],
+    /// The canonical push-oracle account of `feed_id`, kept fresh by Pyth or
+    /// by our pusher. Executors cannot substitute another update.
+    pub price_account: Pubkey,
+    /// Older prices are unusable; 0 disables the feed.
+    pub max_age_secs: u32,
+    pub bump: u8,
+}
+
+impl PriceFeed {
+    pub const SPACE: usize = 8 + PriceFeed::INIT_SPACE;
+
+    /// The price in `info` as (price, exponent) if `info` is a fully
+    /// verified `PriceUpdateV2` of this feed, at most `max_age_secs` old at
+    /// `now`, with a confidence interval of at most 2% of the price.
+    /// Parsed by hand: the Pyth crates pin an older anchor-lang.
+    pub fn usable_price(&self, info: &AccountInfo, now: i64) -> Option<(u64, i32)> {
+        if info.owner != &PYTH_RECEIVER_ID {
+            return None;
+        }
+        let data = info.try_borrow_data().ok()?;
+        // discriminator, write_authority, verification_level (1 = Full,
+        // no payload), then the PriceFeedMessage.
+        if data.get(..8)? != PRICE_UPDATE_V2_DISCRIMINATOR || *data.get(40)? != 1 {
+            return None;
+        }
+        let msg = data.get(41..101)?;
+        let int = |r: core::ops::Range<usize>| -> Option<[u8; 8]> { msg.get(r)?.try_into().ok() };
+        let price = i64::from_le_bytes(int(32..40)?);
+        let conf = u64::from_le_bytes(int(40..48)?);
+        let expo = i32::from_le_bytes(msg.get(48..52)?.try_into().ok()?);
+        let publish_time = i64::from_le_bytes(int(52..60)?);
+        let price = u64::try_from(price).ok().filter(|p| *p > 0)?;
+        let fresh = publish_time.checked_add(i64::from(self.max_age_secs))? >= now;
+        let tight = u128::from(conf).checked_mul(u128::from(BPS_DENOMINATOR))?
+            <= u128::from(price).checked_mul(u128::from(MAX_PRICE_CONF_BPS))?;
+        (msg.get(..32)? == self.feed_id && self.max_age_secs > 0 && fresh && tight)
+            .then_some((price, expo))
+    }
+}
+
+/// `sha256("account:PriceUpdateV2")[..8]`.
+pub const PRICE_UPDATE_V2_DISCRIMINATOR: [u8; 8] = [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
+
+/// SKR (base units) worth `fee_bps` of `gross` units of an asset, from
+/// both assets' prices and decimals, rounded up. None on overflow.
+pub fn skr_fee_quote(
+    gross: u64,
+    asset: (u64, i32),
+    asset_decimals: u8,
+    skr: (u64, i32),
+    skr_decimals: u8,
+    fee_bps: u16,
+) -> Option<u64> {
+    // fee = gross * pa * 10^ea / 10^da * bps / 10^4 / (ps * 10^es) * 10^ds
+    let scale = i64::from(asset.1)
+        .checked_sub(i64::from(skr.1))?
+        .checked_add(i64::from(skr_decimals))?
+        .checked_sub(i64::from(asset_decimals))?;
+    let pow = 10u128.checked_pow(u32::try_from(scale.unsigned_abs()).ok()?)?;
+    let mut num = u128::from(gross)
+        .checked_mul(u128::from(asset.0))?
+        .checked_mul(u128::from(fee_bps))?;
+    let mut den = u128::from(BPS_DENOMINATOR)
+        .checked_mul(u128::from(skr.0))
+        .filter(|d| *d > 0)?;
+    if scale >= 0 {
+        num = num.checked_mul(pow)?;
+    } else {
+        den = den.checked_mul(pow)?;
+    }
+    u64::try_from(num.div_ceil(den)).ok()
+}
+
 /// Delivery rail. On-chain every rail pays a Solana key; for private rails
 /// that key is a fresh claim key whose app routes the funds onward.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
@@ -211,8 +291,15 @@ pub struct Vault {
     /// Vesting: installment length. Vesting unlocks only at whole multiples
     /// of it from `start_at` (fully at `duration_secs`); 0 = continuous.
     pub vest_period_secs: i64,
+    /// SKR the owner set aside to pay release fees in SKR (see
+    /// `fund_skr_reserve`). Held in the vault's ATA of `skr_reserve_mint`
+    /// but never paid to tiers.
+    pub skr_fee_reserve: u64,
+    /// Mint the reserve is held in: the config's SKR mint when it was
+    /// funded, so a later SKR mint change cannot strand it.
+    pub skr_reserve_mint: Pubkey,
     /// Zeroed space for future fields; see the layout note above.
-    pub _reserved: [u8; 55],
+    pub _reserved: [u8; 15],
 }
 
 impl Vault {
@@ -255,7 +342,9 @@ impl Vault {
             bump,
             stipend_paid: 0,
             vest_period_secs: 0,
-            _reserved: [0; 55],
+            skr_fee_reserve: 0,
+            skr_reserve_mint: Pubkey::default(),
+            _reserved: [0; 15],
         }
     }
 
@@ -263,6 +352,16 @@ impl Vault {
     /// the current minimum if that is higher.
     pub fn rent_reserve(&self, data_len: usize) -> Result<u64> {
         Ok(Rent::get()?.minimum_balance(data_len).max(self.rent_paid))
+    }
+
+    /// SKR fee reserve held in the vault's account of `mint`; tiers and
+    /// tier withdrawals see that account's balance minus this.
+    pub fn fee_reserve_in(&self, mint: Option<Pubkey>) -> u64 {
+        if self.skr_fee_reserve > 0 && mint == Some(self.skr_reserve_mint) {
+            self.skr_fee_reserve
+        } else {
+            0
+        }
     }
 
     pub fn require_kind(&self, kind: PlanKind) -> Result<()> {

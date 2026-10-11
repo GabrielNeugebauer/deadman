@@ -2,9 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/config.dart';
+import '../../../solana/deadman_api.dart';
 import '../../../state/fee_settings.dart';
 import '../../../state/plan_draft.dart';
+import '../../../state/prices.dart';
 import '../../../state/providers.dart';
+import '../../../state/skr_reserve.dart';
 
 /// What a beneficiary already holds, for the delivery checks. Errors give
 /// unknown.
@@ -39,6 +42,28 @@ int watchFeeReserve(WidgetRef ref) => feeReserveLamports(
   solFeeMode: ref.watch(feeModeProvider) == FeeMode.sol,
   sponsored: AppConfig.koraSponsorUrl.isNotEmpty,
 );
+
+/// The SKR fee reserve suggested for a new plan holding [deposits] (mint
+/// -> base units, null = SOL) at today's prices; null inside while a
+/// price is missing, or when the program has no SKR rate.
+AsyncValue<int?> watchSkrSuggestion(
+  WidgetRef ref,
+  FeeSchedule? fees,
+  Map<String?, int> deposits,
+) {
+  final skr = fees?.skrMint;
+  if (fees == null || skr == null) return const AsyncData(null);
+  final key = priceKey([
+    skr,
+    for (final m in deposits.keys)
+      if (skrReserveCovers(fees, m)) m,
+  ]);
+  return ref
+      .watch(usdPricesProvider(key))
+      .whenData(
+        (usd) => suggestedSkrReserve(deposits: deposits, usd: usd, fees: fees),
+      );
+}
 
 /// Beneficiary names, kept only on this phone.
 class ContactNames {

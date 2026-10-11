@@ -151,6 +151,22 @@ dart run tool/set_config.dart --keypair "$DEPLOYER" --mainnet --rpc "$RPC_URL" \
 - **Upgrading an existing deployment:** a Config created by an older build has the 77-byte layout. Until the admin runs `set_config` once (it reallocates the account to 209 bytes; the admin pays about 0.00067 SOL of extra rent at today's mainnet rate), every payout, `propose_admin` and `accept_admin` fails. Restart the gateway and the keeper afterwards.
 - Check on devnet first: `dart run tool/e2e_skr_nft.dart --dry-run`, then without `--dry-run` once the devnet Config has the devnet SKR mint (`4JX81qZWhPPT38Tn4ZswaS2DyH3PffdrFqbYgsoZCuHc`). It checks the 1.5% fee, the supply dropping by exactly the burned 10%, and the treasury getting the other 90%.
 
+### 4c. Price feeds for the SKR fee reserve
+
+A plan with an SKR fee reserve pays 1.5% of a non-SKR payout's value in SKR, priced by Pyth (see [HOW_IT_WORKS.md §3.6](HOW_IT_WORKS.md#36-fees-your-new-pricing-policy)). Until the feeds below are registered, every such payout pays the normal 2% in its asset. As `Config.admin`:
+
+```bash
+for a in sol usdc skr ore jitosol; do
+  dart run tool/set_price_feed.dart --keypair "$DEPLOYER" --mainnet --rpc "$RPC_URL" --asset $a
+done
+spl-token create-account SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3 \
+  --owner <TREASURY_ADDRESS> --fee-payer "$DEPLOYER" --url "$RPC_URL"
+dart run tool/set_price_feed.dart show --mainnet --rpc "$RPC_URL"   # each feed "usable"
+```
+
+- **Pusher:** Pyth keeps SOL/USD and USDC/USD fresh; SKR/USD is not sponsored. Run `CLUSTER=mainnet-beta CONFIRM_MAINNET=yes scripts/pyth_pusher_start.sh` with a funded `kora/mainnet/pyth-pusher-key.json` and `RPC_URL` and `PYTH_HERMES_ACCESS_TOKEN` in `kora/.env.mainnet` ([ADMIN_DEVNET.md](ADMIN_DEVNET.md) §3). Check with `show` that ORE/USD and JitoSOL/USD are fresh too; add any that are not to `kora/pyth-price-config.yaml`.
+- **Trust assumptions:** the price comes from Pyth's publishers, verified by the Pyth receiver (only `Full` verification, the registered feed, `max_age_secs` ≤ 3600, confidence ≤ 2%). The executor cannot choose the price account. If the pusher stops or a price is unusable, payouts are not blocked: they fall back to 2% in the payout asset, so pusher liveness costs owners the 0.5% discount, not their funds. The admin key can disable a feed (`--max-age 0`), which only selects the 2% path, or register a wrong feed id, which would misprice the SKR fee (at most a plan's reserve); with option A it is a hot deploy key, so move `Config.admin` to Squads.
+
 ## 5. Publish the IDL
 
 Optional, for explorers and integrators. Anchor 1.1.2 writes it to a program-metadata account, signed by the upgrade authority (so do it before step 6, or through Squads) **(spends ≤ 0.26 SOL)**:

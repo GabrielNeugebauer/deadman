@@ -51,6 +51,8 @@ VaultState vault({
   int startAt = 0,
   bool revocable = false,
   int revokedAt = 0,
+  int skrFeeReserve = 0,
+  String? skrReserveMint,
 }) => VaultState(
   address: addr(100 + planId),
   owner: addr(1),
@@ -74,6 +76,8 @@ VaultState vault({
   startAt: startAt,
   revocable: revocable,
   revokedAt: revokedAt,
+  skrFeeReserve: skrFeeReserve,
+  skrReserveMint: skrReserveMint,
 );
 
 /// A vesting schedule: [total] of [mint] vesting over [duration] seconds
@@ -178,6 +182,37 @@ class FakeApi implements DeadmanApi {
   /// Token deposits of each [buildCreateVault] call.
   final createdDeposits = <Map<String, int>>[];
 
+  /// SKR fee reserve of each [buildCreateVault] or [buildCreateVesting]
+  /// call.
+  final createdSkrReserves = <int>[];
+
+  /// (plan id, amount) of each [buildFundSkrReserve] and
+  /// [buildWithdrawSkrReserve] call.
+  final reserveFunded = <(int, int)>[];
+  final reserveWithdrawn = <(int, int)>[];
+
+  @override
+  Future<Uint8List> buildFundSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
+  }) async {
+    if (fail != null) throw fail!;
+    reserveFunded.add((planId, amount));
+    return Uint8List(0);
+  }
+
+  @override
+  Future<Uint8List> buildWithdrawSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
+  }) async {
+    if (fail != null) throw fail!;
+    reserveWithdrawn.add((planId, amount));
+    return Uint8List(0);
+  }
+
   @override
   Future<Uint8List> buildCreateVault({
     required String owner,
@@ -189,8 +224,10 @@ class FakeApi implements DeadmanApi {
     required List<RuleSpec> rules,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     createdDeposits.add(tokenDeposits);
+    createdSkrReserves.add(skrReserve);
     return Uint8List(0);
   }
 
@@ -221,8 +258,10 @@ class FakeApi implements DeadmanApi {
     int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     if (fail != null) throw fail!;
+    createdSkrReserves.add(skrReserve);
     createdVestings.add((
       planId: planId,
       startAt: startAt,

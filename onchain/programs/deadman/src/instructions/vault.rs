@@ -361,6 +361,7 @@ pub fn handle_close_vault(ctx: Context<CloseVault>) -> Result<()> {
     let vault = &ctx.accounts.vault;
     vault.require_unlocked(now)?;
     require!(!vault.has_pending_reserve(), DeadmanError::FundsCommitted);
+    require!(vault.skr_fee_reserve == 0, DeadmanError::FeeReserveNotEmpty);
     if vault.kind == PlanKind::Vesting {
         for (i, r) in vault.rules.iter().enumerate() {
             require!(

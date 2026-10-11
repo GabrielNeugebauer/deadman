@@ -1124,7 +1124,7 @@ void main() {
   group('errors', () {
     test('error table matches the IDL exactly', () {
       final errors = loadIdl()['errors'] as List;
-      expect(errors, hasLength(33));
+      expect(errors, hasLength(36));
       expect(DeadmanException.programErrors, {
         for (final e in errors)
           e['code'] as int: (e['name'] as String, e['msg'] as String),
@@ -1334,6 +1334,8 @@ void main() {
         'bump',
         'stipend_paid',
         'vest_period_secs',
+        'skr_fee_reserve',
+        'skr_reserve_mint',
         '_reserved',
       ]);
       final kinds = [
@@ -2128,7 +2130,8 @@ void main() {
       expect(c.fees.bpsFor(Rail.solana, AppConfig.skrMint), 200);
     });
 
-    test('the vault layout keeps 55 reserved bytes after vest_period_secs', () {
+    test('the vault layout keeps 15 reserved bytes after the SKR fee '
+        'reserve', () {
       expect(plan().lastPulse, lastPulse);
       expect(
         (((idl['types'] as List).firstWhere(
@@ -2138,7 +2141,7 @@ void main() {
                 .last
             as Map)['type'],
         {
-          'array': ['u8', 55],
+          'array': ['u8', 15],
         },
       );
     });

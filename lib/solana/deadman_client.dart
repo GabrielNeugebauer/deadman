@@ -239,6 +239,16 @@ class DeadmanException implements Exception {
       "This payout charges a fee, so the treasury's token account is "
           'required',
     ),
+    6033: (
+      'SkrFeeAccountsRequired',
+      'This plan has an SKR fee reserve: pass the price feeds and SKR accounts',
+    ),
+    6034: (
+      'InvalidSkrFeeAccounts',
+      'A price feed or SKR fee account does not match the registry, plan or '
+          'config',
+    ),
+    6035: ('FeeReserveNotEmpty', 'Withdraw the SKR fee reserve first'),
   };
 
   /// Clearer wording than the program's `msg` where the user must act.
@@ -277,6 +287,15 @@ class DeadmanException implements Exception {
         'Only standard SPL tokens can go into a plan (no Token-2022 '
         'tokens)',
     6032: 'This payout charges a fee: refresh and try again',
+    6033:
+        'This plan pays its fees in SKR, so this app version cannot release '
+        'it. Update the app and try again',
+    6034:
+        "The SKR fee accounts don't match this plan or Deadman's price "
+        'registry. Refresh and try again',
+    6035:
+        'Withdraw the SKR fee reserve first: closing a plan returns it with '
+        'everything else',
   };
 
   static const vaultLocked = 6006;
@@ -295,6 +314,9 @@ class DeadmanException implements Exception {
   static const notLegacyVault = 6028;
   static const unsupportedMint = 6031;
   static const treasuryAccountRequired = 6032;
+  static const skrFeeAccountsRequired = 6033;
+  static const invalidSkrFeeAccounts = 6034;
+  static const feeReserveNotEmpty = 6035;
 
   static int? _customCode(Object? err) {
     if (err is! Map) return null;
@@ -784,9 +806,11 @@ class DeadmanClient implements DeadmanApi {
     required List<RuleSpec> rules,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     _checkAmount(depositLamports);
     tokenDeposits.values.forEach(_checkAmount);
+    _checkAmount(skrReserve);
     _checkLabel(label);
     if (guard == owner || guard == defaultPubkey) {
       throw DeadmanException.program(6005);
@@ -810,6 +834,7 @@ class DeadmanClient implements DeadmanApi {
       for (final mint in deposits.keys) mint: await _mintDecimals(mint),
     };
     await _checkWholeTokenSources(owner, deposits, decimals);
+    final reserve = await _newReserve(owner, skrReserve, deposits);
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreatePlan(
       planId: planId,
@@ -840,8 +865,9 @@ class DeadmanClient implements DeadmanApi {
             decimals: decimals[e.key]!,
             payer: payer,
           ),
+        ...?reserve?.ixs(planId, payer),
       ],
-      spend: deposits,
+      spend: reserve?.spend ?? deposits,
     );
   }
 
@@ -858,9 +884,11 @@ class DeadmanClient implements DeadmanApi {
     int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     _checkAmount(depositLamports);
     tokenDeposits.values.forEach(_checkAmount);
+    _checkAmount(skrReserve);
     _checkLabel(label);
     final vault = vaultAddressFor(owner, planId);
     final code = vestingError(
@@ -883,6 +911,7 @@ class DeadmanClient implements DeadmanApi {
       for (final mint in deposits.keys) mint: await _mintDecimals(mint),
     };
     await _checkWholeTokenSources(owner, deposits, decimals);
+    final reserve = await _newReserve(owner, skrReserve, deposits);
     final fundGuard = await _shouldFundGuard(owner, guard, depositLamports);
     final data = encodeCreateVesting(
       planId: planId,
@@ -915,8 +944,9 @@ class DeadmanClient implements DeadmanApi {
             decimals: decimals[e.key]!,
             payer: payer,
           ),
+        ...?reserve?.ixs(planId, payer),
       ],
-      spend: deposits,
+      spend: reserve?.spend ?? deposits,
     );
   }
 
@@ -954,6 +984,124 @@ class DeadmanClient implements DeadmanApi {
         payer: payer,
       ),
       spend: {mint: amount},
+    );
+  }
+
+  @override
+  Future<Uint8List> buildFundSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
+  }) async {
+    _checkAmount(amount);
+    final vault = await _ownedVault(owner, planId);
+    final mint = await _skrMint();
+    if (vault.skrFeeReserve > 0 && vault.skrReserveMint != mint) {
+      throw const DeadmanException(
+        "This plan's SKR fee reserve is in an older SKR token. Withdraw it "
+        'first, then add SKR again.',
+        code: 6010,
+        name: 'WrongAsset',
+      );
+    }
+    await _checkSkrHeld(owner, mint, amount);
+    return _build(
+      owner,
+      (payer) => fundSkrReserveIxs(
+        owner: owner,
+        planId: planId,
+        mint: mint,
+        amount: amount,
+        payer: payer,
+      ),
+      spend: {mint: amount},
+    );
+  }
+
+  @override
+  Future<Uint8List> buildWithdrawSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
+  }) async {
+    _checkAmount(amount);
+    final vault = await _ownedVault(owner, planId);
+    _checkUnlocked(vault);
+    final mint = vault.skrReserveMint;
+    if (mint == null || amount > vault.skrFeeReserve) {
+      throw DeadmanException.program(DeadmanException.insufficientFunds);
+    }
+    return _build(
+      owner,
+      (payer) => withdrawSkrReserveIxs(
+        owner: owner,
+        planId: planId,
+        mint: mint,
+        amount: amount,
+        payer: payer,
+      ),
+      spend: {mint: -amount},
+    );
+  }
+
+  /// The configured SKR mint; throws when the program has no SKR rate.
+  Future<String> _skrMint() async {
+    final mint = (await fetchFees()).skrMint;
+    if (mint == null) {
+      throw const DeadmanException(
+        'Paying fees in SKR is not available yet.',
+        name: 'NoSkrRate',
+      );
+    }
+    await _mintDecimals(mint);
+    return mint;
+  }
+
+  /// The owner's wallet must hold [amount] of the SKR [mint] (on top of
+  /// [alsoSpent] going elsewhere in the same transaction).
+  Future<void> _checkSkrHeld(
+    String owner,
+    String mint,
+    int amount, {
+    int alsoSpent = 0,
+  }) async {
+    final held = await tokenBalance(owner, mint);
+    final need = amount + alsoSpent;
+    if (held < need) {
+      final decimals = await _mintDecimals(mint);
+      throw DeadmanException(
+        'Your wallet holds ${_units(held, decimals)} SKR; this needs '
+        '${_units(need, decimals)} SKR.',
+        name: 'InsufficientTokens',
+      );
+    }
+  }
+
+  /// A new plan's SKR fee reserve of [amount] (none when 0): its
+  /// instructions, after any [deposits] (which may create the same vault
+  /// token account), and what the transaction then takes from the wallet.
+  Future<
+    ({
+      List<Instruction> Function(int planId, String payer) ixs,
+      Map<String, int> spend,
+    })?
+  >
+  _newReserve(String owner, int amount, Map<String, int> deposits) async {
+    if (amount <= 0) return null;
+    final mint = await _skrMint();
+    await _checkSkrHeld(owner, mint, amount, alsoSpent: deposits[mint] ?? 0);
+    return (
+      ixs: (int planId, String payer) {
+        final ixs = fundSkrReserveIxs(
+          owner: owner,
+          planId: planId,
+          mint: mint,
+          amount: amount,
+          payer: payer,
+        );
+        return deposits.containsKey(mint) ? [ixs.last] : ixs;
+      },
+      spend: {...deposits, mint: (deposits[mint] ?? 0) + amount},
     );
   }
 
@@ -1371,8 +1519,10 @@ class DeadmanClient implements DeadmanApi {
 
   /// What the beneficiary receives from [p]: the gross minus the release
   /// fee (the SKR rate for SKR payouts), which a SOL payout keeps when the
-  /// treasury could not hold it (mirrors the program).
+  /// treasury could not hold it (mirrors the program); all of it when the
+  /// plan's SKR fee reserve pays the fee.
   Future<int> _netPayout(_Payout p) async {
+    if (p.skrFee != null) return p.gross;
     final fee = p.fees.feeOf(p.gross, p.rule.rail, p.rule.mint);
     if (p.rule.mint == null &&
         fee > 0 &&
@@ -1531,21 +1681,34 @@ class DeadmanClient implements DeadmanApi {
     }
     final rentPayer = vault.rentPayer.isEmpty ? owner : vault.rentPayer;
     // close_vault leaves the vault's token accounts behind, so sweep every
-    // token first, in the same transaction, or it would be stranded.
+    // token first, in the same transaction, or it would be stranded. The
+    // SKR fee reserve comes out first, through its own withdrawal.
+    final reserveMint = vault.skrReserveMint;
+    final reserve = vault.skrFeeReserve;
     final mints = {
       AppConfig.usdcMint,
       for (final r in vault.rules) ?r.mint,
+      ?reserveMint,
     }.toList();
     final held = await tokenBalances([
       for (final m in mints) (vault.address, m),
     ]);
     final sweep = {
       for (final (i, m) in mints.indexed)
-        if (held[i] > 0) m: held[i],
+        if (held[i] - vault.feeReserveIn(m) > 0)
+          m: held[i] - vault.feeReserveIn(m),
     };
     return _build(
       owner,
       (payer) => [
+        if (reserveMint != null && reserve > 0)
+          ...withdrawSkrReserveIxs(
+            owner: owner,
+            planId: planId,
+            mint: reserveMint,
+            amount: reserve,
+            payer: payer,
+          ),
         for (final MapEntry(key: mint, value: amount) in sweep.entries)
           ...withdrawTokenIxs(
             owner: owner,
@@ -1556,7 +1719,10 @@ class DeadmanClient implements DeadmanApi {
           ),
         closeVaultIx(owner: owner, planId: planId, rentPayer: rentPayer),
       ],
-      spend: {for (final e in sweep.entries) e.key: -e.value},
+      spend: {
+        for (final m in {...sweep.keys, ?reserveMint})
+          m: -(sweep[m] ?? 0) - vault.feeReserveIn(m),
+      },
     );
   }
 
@@ -1855,7 +2021,7 @@ class DeadmanClient implements DeadmanApi {
       held = await tokenBalance(vault.address, mint);
       // A vault that never held the mint has no token account: the program
       // would fail with AccountNotInitialized inside the wallet's preview.
-      if (held <= 0) {
+      if (vault.tierFunds(mint, held) <= 0) {
         throw DeadmanException(
           'This plan holds none of ${_tokenName(mint)} yet, so this tier has '
           'nothing to pay. The owner must deposit it first; after the grace '
@@ -1876,12 +2042,15 @@ class DeadmanClient implements DeadmanApi {
           ? rule.amount
           : null,
     );
+    final gross = vault.payoutGross(index, held);
+    final skr = await skrFeeFor(vault, rule, fees, gross, treasuryFee);
     return (
       vault: vault,
       rule: rule,
       fees: fees,
-      gross: vault.payoutGross(index, held),
+      gross: gross,
       treasuryFee: treasuryFee,
+      skrFee: skr.fee,
       ixs: (String payer) => executeRuleIxs(
         executor: executor,
         vaultOwner: vaultOwner,
@@ -1891,6 +2060,7 @@ class DeadmanClient implements DeadmanApi {
         treasury: fees.treasury,
         payer: payer,
         treasuryFee: treasuryFee,
+        skrFee: skr.accounts,
       ),
     );
   }
@@ -1934,7 +2104,7 @@ class DeadmanClient implements DeadmanApi {
     final mint = rule.mint;
     final held = mint == null
         ? vault.withdrawableLamports
-        : await tokenBalance(vault.address, mint);
+        : vault.tierFunds(mint, await tokenBalance(vault.address, mint));
     if (held <= 0) {
       throw DeadmanException.program(DeadmanException.nothingToPay);
     }
@@ -1945,12 +2115,15 @@ class DeadmanClient implements DeadmanApi {
       rule,
       vault.vestingCap(index) - rule.released,
     );
+    final gross = due < held ? due : held;
+    final skr = await skrFeeFor(vault, rule, fees, gross, treasuryFee);
     return (
       vault: vault,
       rule: rule,
       fees: fees,
-      gross: due < held ? due : held,
+      gross: gross,
       treasuryFee: treasuryFee,
+      skrFee: skr.fee,
       ixs: (String payer) => releaseVestedIxs(
         executor: executor,
         vaultOwner: vaultOwner,
@@ -1960,8 +2133,128 @@ class DeadmanClient implements DeadmanApi {
         treasury: fees.treasury,
         payer: payer,
         treasuryFee: treasuryFee,
+        skrFee: skr.accounts,
       ),
     );
+  }
+
+  /// The SKR fee side of a payout of [gross] by [rule] of [vault]: the
+  /// remaining accounts the program needs when the plan holds an SKR fee
+  /// reserve (empty when it needs none), and the SKR fee the program
+  /// would take from the reserve, as far as the client can tell now (null
+  /// when the payout pays its fee in its own asset instead). Keepers that
+  /// build payouts themselves pass [accounts] to `executeRuleIxs` or
+  /// `releaseVestedIxs`.
+  Future<({List<AccountMeta> accounts, int? fee})> skrFeeFor(
+    VaultState vault,
+    RuleSpec rule,
+    FeeSchedule fees,
+    int gross,
+    bool treasuryFee,
+  ) async {
+    final mint = rule.mint;
+    final skrMint = fees.skrMint;
+    if (skrMint == null ||
+        !vault.paysFeeInSkr(fees, mint) ||
+        (mint != null && !treasuryFee)) {
+      return (accounts: const <AccountMeta>[], fee: null);
+    }
+    final feeds = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            [
+              priceFeedPda(mint ?? nativeMint).address,
+              priceFeedPda(skrMint).address,
+            ],
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    PriceFeedEntry? entry(Account? a) {
+      final data = _programData(a);
+      try {
+        return data == null ? null : decodePriceFeed(data);
+      } on FormatException {
+        return null;
+      }
+    }
+
+    final assetFeed = entry(feeds[0]);
+    final skrFeed = entry(feeds[1]);
+    final accounts = skrFeeAccounts(
+      vault: vault.address,
+      assetMint: mint,
+      skrMint: skrMint,
+      treasury: fees.treasury,
+      assetPriceAccount: assetFeed?.priceAccount,
+      skrPriceAccount: skrFeed?.priceAccount,
+    );
+    final assetFee = fees.feeOf(gross, rule.rail, mint);
+    if (assetFeed == null || skrFeed == null || assetFee <= 0) {
+      return (accounts: accounts, fee: null);
+    }
+    final found = await _net(
+      () => _rpc
+          .getMultipleAccounts(
+            [
+              assetFeed.priceAccount,
+              skrFeed.priceAccount,
+              ataAddress(vault.address, skrMint),
+              ataAddress(fees.treasury, skrMint),
+            ],
+            commitment: commitment,
+            encoding: Encoding.base64,
+          )
+          .value,
+    );
+    final now = _now();
+    (int, int)? price(PriceFeedEntry feed, Account? a) {
+      final data = a?.data;
+      if (a?.owner != pythReceiverId || data is! BinaryAccountData) {
+        return null;
+      }
+      try {
+        return usablePrice(feed, decodePriceUpdate(data.data), now);
+      } on FormatException {
+        return null;
+      }
+    }
+
+    List<int>? tokenData(Account? a) {
+      final data = a?.data;
+      return a?.owner == tokenProgramId &&
+              data is BinaryAccountData &&
+              data.data.length >= 165
+          ? data.data
+          : null;
+    }
+
+    final assetPx = price(assetFeed, found[0]);
+    final skrPx = price(skrFeed, found[1]);
+    final source = tokenData(found[2]);
+    final sink = tokenData(found[3]);
+    if (assetPx == null ||
+        skrPx == null ||
+        source == null ||
+        sink == null ||
+        decodeTokenFrozen(source) ||
+        decodeTokenFrozen(sink)) {
+      return (accounts: accounts, fee: null);
+    }
+    final fee = skrFeeQuote(
+      gross: gross,
+      asset: assetPx,
+      assetDecimals: mint == null ? 9 : await _mintDecimals(mint),
+      skr: skrPx,
+      skrDecimals: await _mintDecimals(skrMint),
+      feeBps: fees.feeBpsSkr,
+    );
+    final covered =
+        fee != null &&
+        fee <= vault.skrFeeReserve &&
+        fee <= decodeTokenAmount(source);
+    return (accounts: accounts, fee: covered ? fee : null);
   }
 
   /// Whether a token payout of [rule] can leave the treasury a fee, so its
@@ -2258,11 +2551,13 @@ class DeadmanClient implements DeadmanApi {
       for (var i = 0; i < atas.length; i++)
         if (accounts[i] != null) atas[i],
     };
-    // withdraw_token pays into the signer's own account.
+    // withdraw_token and withdraw_skr_reserve pay into the signer's own
+    // account.
     final own = {
       for (final ix in ixs)
         if (ix.programId.toBase58() == AppConfig.programId &&
-            hasDiscriminator(ix.data.toList(), Disc.withdrawToken))
+            (hasDiscriminator(ix.data.toList(), Disc.withdrawToken) ||
+                hasDiscriminator(ix.data.toList(), Disc.withdrawSkrReserve)))
           ix.accounts[4].pubKey.toBase58(),
     };
     var ownCreates = 0;
@@ -2621,6 +2916,10 @@ typedef _Payout = ({
 
   /// The treasury's token account is passed (see `_treasuryFeeDue`).
   bool treasuryFee,
+
+  /// SKR the fee reserve is expected to pay instead of the asset fee; null
+  /// when the payout pays its fee in its own asset.
+  int? skrFee,
   List<Instruction> Function(String payer) ixs,
 });
 

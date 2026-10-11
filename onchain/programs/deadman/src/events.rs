@@ -80,6 +80,25 @@ pub struct FeeBurned {
     pub amount: u64,
 }
 
+/// A release fee paid in SKR from the plan's fee reserve instead of in the
+/// payout asset; `burned` of `fee` was burned, the rest went to the
+/// treasury.
+#[event]
+pub struct SkrFeePaid {
+    pub vault: Pubkey,
+    pub index: u8,
+    pub fee: u64,
+    pub burned: u64,
+}
+
+#[event]
+pub struct PriceFeedSet {
+    pub mint: Pubkey,
+    pub feed_id: [u8; 32],
+    pub price_account: Pubkey,
+    pub max_age_secs: u32,
+}
+
 #[event]
 pub struct AdminProposed {
     pub admin: Pubkey,

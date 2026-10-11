@@ -1,16 +1,18 @@
 use anchor_lang::{prelude::*, solana_program::program::invoke_signed};
 use anchor_spl::{
     associated_token::get_associated_token_address_with_program_id,
-    token::Token,
+    token::{self, Token},
     token_2022::spl_token_2022,
-    token_interface::{self, Burn, Mint, TokenAccount, TokenInterface},
+    token_interface::{self, Burn, Mint, TokenAccount, TokenInterface, TransferChecked},
 };
 
 use crate::{
     constants::*,
     error::DeadmanError,
     events::*,
-    state::{split_fee, stipend_bit, Config, PlanKind, Rail, Vault},
+    state::{
+        bps_of, skr_fee_quote, split_fee, stipend_bit, Config, PlanKind, PriceFeed, Rail, Vault,
+    },
 };
 
 /// Lamports above the rent reserve (see [`Vault::rent_reserve`]).
@@ -92,6 +94,173 @@ fn vault_transfer<'info>(
     invoke_signed(&ix, &infos, &[seeds]).map_err(Into::into)
 }
 
+/// Price of `mint` per the registry. `feed` must be the mint's PriceFeed
+/// and `price` that feed's price account, or, when no feed is registered,
+/// `feed` the still-empty PriceFeed address (then there is no price).
+/// None also when the price is unusable (see [`PriceFeed::usable_price`]).
+fn registered_price(
+    feed: &AccountInfo,
+    price: &AccountInfo,
+    mint: &Pubkey,
+    now: i64,
+) -> Result<Option<(u64, i32)>> {
+    if feed.owner == &crate::ID {
+        let f = PriceFeed::try_deserialize(&mut &feed.try_borrow_data()?[..])?;
+        require!(
+            f.mint == *mint && price.key() == f.price_account,
+            DeadmanError::InvalidSkrFeeAccounts
+        );
+        return Ok(f.usable_price(price, now));
+    }
+    let (pda, _) = Pubkey::find_program_address(&[PRICE_FEED_SEED, mint.as_ref()], &crate::ID);
+    require!(
+        feed.key() == pda && feed.data_is_empty(),
+        DeadmanError::InvalidSkrFeeAccounts
+    );
+    Ok(None)
+}
+
+/// Whether the treasury's SKR account can take a fee: an SKR account the
+/// treasury owns and that is not frozen. The treasury's ATA address while
+/// still uncreated is a "no"; any other account is refused.
+fn treasury_takes_skr(info: &AccountInfo, config: &Config) -> Result<bool> {
+    if info.owner == &token::ID {
+        let t = TokenAccount::try_deserialize(&mut &info.try_borrow_data()?[..])?;
+        require!(
+            t.mint == config.skr_mint && t.owner == config.treasury,
+            DeadmanError::InvalidSkrFeeAccounts
+        );
+        return Ok(!t.is_frozen());
+    }
+    let ata = get_associated_token_address_with_program_id(
+        &config.treasury,
+        &config.skr_mint,
+        &token::ID,
+    );
+    require!(
+        info.key() == ata && info.data_is_empty(),
+        DeadmanError::InvalidSkrFeeAccounts
+    );
+    Ok(false)
+}
+
+/// Pays the release fee of a payout of `gross` units of `asset_mint` (SOL:
+/// the wrapped SOL mint) in SKR from the plan's fee reserve:
+/// `fee_bps_skr` of the payout's value, rounded up, `skr_burn_bps` of it
+/// burned and the rest sent to the treasury. Returns true if it did, so
+/// the beneficiary gets the whole payout. Returns false, leaving the asset
+/// fee to be charged, when the plan has no reserve in the config's SKR
+/// mint, a price is unregistered, disabled, stale, not fully verified or
+/// too uncertain, the reserve cannot cover the fee, or the treasury has no
+/// usable SKR account.
+///
+/// With a reserve the executor must pass, as remaining accounts in this
+/// order: the asset's PriceFeed and its price account, SKR's PriceFeed and
+/// its price account, the vault's SKR ATA, the SKR mint (writable), the
+/// treasury's SKR ATA (writable) and the Token program. All are checked
+/// against the registry, the config and the plan, so an executor cannot
+/// choose the price.
+#[allow(clippy::too_many_arguments)]
+fn pay_fee_in_skr<'info>(
+    vault: &mut Account<'info, Vault>,
+    config: &Config,
+    remaining: &'info [AccountInfo<'info>],
+    asset_mint: Pubkey,
+    asset_decimals: u8,
+    gross: u64,
+    index: u8,
+    now: i64,
+) -> Result<bool> {
+    let skr_mint = config.skr_mint;
+    if vault.skr_fee_reserve == 0
+        || skr_mint == Pubkey::default()
+        || vault.skr_reserve_mint != skr_mint
+    {
+        return Ok(false);
+    }
+    let [asset_feed, asset_price, skr_feed, skr_price, vault_skr, mint, treasury_skr, token_program, ..] =
+        remaining
+    else {
+        return err!(DeadmanError::SkrFeeAccountsRequired);
+    };
+    let vault_key = vault.key();
+    require!(
+        token_program.key() == token::ID
+            && mint.key() == skr_mint
+            && vault_skr.key()
+                == get_associated_token_address_with_program_id(&vault_key, &skr_mint, &token::ID),
+        DeadmanError::InvalidSkrFeeAccounts
+    );
+    let (Some(asset_px), Some(skr_px)) = (
+        registered_price(asset_feed, asset_price, &asset_mint, now)?,
+        registered_price(skr_feed, skr_price, &skr_mint, now)?,
+    ) else {
+        return Ok(false);
+    };
+    let source = TokenAccount::try_deserialize(&mut &vault_skr.try_borrow_data()?[..])?;
+    let decimals = token::Mint::try_deserialize(&mut &mint.try_borrow_data()?[..])?.decimals;
+    if source.is_frozen() || !treasury_takes_skr(treasury_skr, config)? {
+        return Ok(false);
+    }
+    let Some(fee) = skr_fee_quote(
+        gross,
+        asset_px,
+        asset_decimals,
+        skr_px,
+        decimals,
+        config.fee_bps_skr,
+    )
+    .filter(|f| *f <= vault.skr_fee_reserve && *f <= source.amount) else {
+        return Ok(false);
+    };
+
+    let (burned, to_treasury) = config.split_burn(fee, Some(skr_mint))?;
+    let plan_id = vault.plan_id.to_le_bytes();
+    let seeds: &[&[u8]] = &[VAULT_SEED, vault.owner.as_ref(), &plan_id, &[vault.bump]];
+    let authority = vault.to_account_info();
+    if burned > 0 {
+        token_interface::burn(
+            CpiContext::new_with_signer(
+                token::ID,
+                Burn {
+                    mint: mint.clone(),
+                    from: vault_skr.clone(),
+                    authority: authority.clone(),
+                },
+                &[seeds],
+            ),
+            burned,
+        )?;
+    }
+    if to_treasury > 0 {
+        token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                token::ID,
+                TransferChecked {
+                    from: vault_skr.clone(),
+                    mint: mint.clone(),
+                    to: treasury_skr.clone(),
+                    authority,
+                },
+                &[seeds],
+            ),
+            to_treasury,
+            decimals,
+        )?;
+    }
+    vault.skr_fee_reserve = vault
+        .skr_fee_reserve
+        .checked_sub(fee)
+        .ok_or(DeadmanError::MathOverflow)?;
+    emit!(SkrFeePaid {
+        vault: vault_key,
+        index,
+        fee,
+        burned,
+    });
+    Ok(true)
+}
+
 #[derive(Accounts)]
 pub struct WithdrawSol<'info> {
     #[account(mut)]
@@ -165,7 +334,8 @@ pub fn handle_withdraw_token<'info>(
         amount
             <= a.vault_token
                 .amount
-                .saturating_sub(a.vault.locked_for_owner(Some(a.mint.key()))?),
+                .saturating_sub(a.vault.locked_for_owner(Some(a.mint.key()))?)
+                .saturating_sub(a.vault.fee_reserve_in(Some(a.mint.key()))),
         DeadmanError::FundsCommitted
     );
     vault_transfer(
@@ -202,7 +372,10 @@ pub struct ExecuteSolRule<'info> {
 
 /// Permissionless: pays a due SOL rule. Destinations are fixed in the rule,
 /// so who executes it does not matter.
-pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+pub fn handle_execute_sol_rule<'info>(
+    ctx: Context<'info, ExecuteSolRule<'info>>,
+    index: u8,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let i = usize::from(index);
     ctx.accounts.vault.require_kind(PlanKind::Inheritance)?;
@@ -226,6 +399,21 @@ pub fn handle_execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Resul
         && treasury.lamports().saturating_add(fee) < rent.minimum_balance(treasury.data_len())
     {
         net = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
+        fee = 0;
+    }
+    if fee > 0
+        && pay_fee_in_skr(
+            &mut ctx.accounts.vault,
+            &ctx.accounts.config,
+            ctx.remaining_accounts,
+            NATIVE_MINT,
+            SOL_DECIMALS,
+            gross,
+            index,
+            now,
+        )?
+    {
+        net = gross;
         fee = 0;
     }
     // A brand-new account cannot be funded below rent exemption. The tier
@@ -306,12 +494,50 @@ pub struct ExecuteTokenRule<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+/// Pays the release fee of a token payout of `gross` in SKR from the fee
+/// reserve when it can (see [`pay_fee_in_skr`]): only for payouts that
+/// would pay a fee in the asset and are not themselves in SKR.
+fn token_fee_in_skr<'info>(
+    ctx: &mut Context<'info, ExecuteTokenRule<'info>>,
+    rail: Rail,
+    gross: u64,
+    index: u8,
+    now: i64,
+) -> Result<bool> {
+    let a = &mut ctx.accounts;
+    let mint = Some(a.mint.key());
+    if a.config.is_skr(mint) || bps_of(gross, a.config.fee_bps(rail, mint))? == 0 {
+        return Ok(false);
+    }
+    pay_fee_in_skr(
+        &mut a.vault,
+        &a.config,
+        ctx.remaining_accounts,
+        a.mint.key(),
+        a.mint.decimals,
+        gross,
+        index,
+        now,
+    )
+}
+
 /// Sends a token payout of `gross`: the net to the beneficiary's account,
 /// then the fee (for SKR, `skr_burn_bps` of it burned from the vault and
-/// the rest to the treasury). Returns (net, fee).
-fn pay_token<'info>(a: &ExecuteTokenRule<'info>, rail: Rail, gross: u64) -> Result<(u64, u64)> {
+/// the rest to the treasury). No fee when it was paid in SKR from the
+/// reserve. Returns (net, fee).
+fn pay_token<'info>(
+    a: &ExecuteTokenRule<'info>,
+    rail: Rail,
+    gross: u64,
+    fee_paid: bool,
+) -> Result<(u64, u64)> {
     let mint = a.mint.key();
-    let (net, fee) = split_fee(gross, a.config.fee_bps(rail, Some(mint)))?;
+    let fee_bps = if fee_paid {
+        0
+    } else {
+        a.config.fee_bps(rail, Some(mint))
+    };
+    let (net, fee) = split_fee(gross, fee_bps)?;
     let (burned, to_treasury) = a.config.split_burn(fee, Some(mint))?;
     let token_program = a.token_program.to_account_info();
     vault_transfer(
@@ -370,7 +596,7 @@ fn pay_token<'info>(a: &ExecuteTokenRule<'info>, rail: Rail, gross: u64) -> Resu
 /// Permissionless: pays a due token rule. Private rails also receive a small
 /// SOL stipend so a fresh claim key can pay to route the tokens onward.
 pub fn handle_execute_token_rule<'info>(
-    ctx: Context<'info, ExecuteTokenRule<'info>>,
+    mut ctx: Context<'info, ExecuteTokenRule<'info>>,
     index: u8,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
@@ -397,9 +623,14 @@ pub fn handle_execute_token_rule<'info>(
         DeadmanError::Unauthorized
     );
 
-    let gross = a.vault.payout_gross(i, a.vault_token.amount)?;
+    let tier_funds = a
+        .vault_token
+        .amount
+        .saturating_sub(a.vault.fee_reserve_in(Some(a.mint.key())));
+    let gross = a.vault.payout_gross(i, tier_funds)?;
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = pay_token(a, rule.rail, gross)?;
+    let fee_paid = token_fee_in_skr(&mut ctx, rule.rail, gross, index, now)?;
+    let (net, fee) = pay_token(ctx.accounts, rule.rail, gross, fee_paid)?;
 
     pay_stipend(
         &mut ctx.accounts.vault,
@@ -463,7 +694,9 @@ pub fn handle_skip_rule(ctx: Context<SkipRule>, index: u8) -> Result<()> {
                 token.to_account_info().owner,
             );
             require_keys_eq!(token.key(), expected, DeadmanError::WrongAsset);
-            token.amount
+            token
+                .amount
+                .saturating_sub(ctx.accounts.vault.fee_reserve_in(Some(mint)))
         }
     };
     let reserved = ctx.accounts.vault.payout_gross(i, balance)?;
@@ -482,7 +715,10 @@ pub fn handle_skip_rule(ctx: Context<SkipRule>, index: u8) -> Result<()> {
 
 /// Releases what has vested so far on a SOL vesting schedule. Anyone may
 /// call it; the destination is fixed in the schedule.
-pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+pub fn handle_release_vested_sol<'info>(
+    ctx: Context<'info, ExecuteSolRule<'info>>,
+    index: u8,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let i = usize::from(index);
     let vault = &ctx.accounts.vault;
@@ -507,6 +743,21 @@ pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Res
         && treasury.lamports().saturating_add(fee) < rent.minimum_balance(treasury.data_len())
     {
         net = net.checked_add(fee).ok_or(DeadmanError::MathOverflow)?;
+        fee = 0;
+    }
+    if fee > 0
+        && pay_fee_in_skr(
+            &mut ctx.accounts.vault,
+            &ctx.accounts.config,
+            ctx.remaining_accounts,
+            NATIVE_MINT,
+            SOL_DECIMALS,
+            gross,
+            index,
+            now,
+        )?
+    {
+        net = gross;
         fee = 0;
     }
     let beneficiary = &ctx.accounts.beneficiary;
@@ -535,7 +786,7 @@ pub fn handle_release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Res
 
 /// Token version of [`handle_release_vested_sol`].
 pub fn handle_release_vested_token<'info>(
-    ctx: Context<'info, ExecuteTokenRule<'info>>,
+    mut ctx: Context<'info, ExecuteTokenRule<'info>>,
     index: u8,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
@@ -562,9 +813,14 @@ pub fn handle_release_vested_token<'info>(
     );
 
     let due = a.vault.vested(i, now)?.saturating_sub(rule.released);
-    let gross = due.min(a.vault_token.amount);
+    let tier_funds = a
+        .vault_token
+        .amount
+        .saturating_sub(a.vault.fee_reserve_in(Some(a.mint.key())));
+    let gross = due.min(tier_funds);
     require!(gross > 0, DeadmanError::NothingToPay);
-    let (net, fee) = pay_token(a, rule.rail, gross)?;
+    let fee_paid = token_fee_in_skr(&mut ctx, rule.rail, gross, index, now)?;
+    let (net, fee) = pay_token(ctx.accounts, rule.rail, gross, fee_paid)?;
     pay_stipend(
         &mut ctx.accounts.vault,
         &ctx.accounts.beneficiary,
@@ -605,4 +861,105 @@ fn record_release(
         vault.rules[i].executed_at = now;
     }
     Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FundSkrReserve<'info> {
+    pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [VAULT_SEED, owner.key().as_ref(), &vault.plan_id.to_le_bytes()],
+        bump = vault.bump,
+        has_one = owner @ DeadmanError::Unauthorized
+    )]
+    pub vault: Box<Account<'info, Vault>>,
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(
+        address = config.skr_mint @ DeadmanError::WrongAsset,
+        mint::token_program = token_program
+    )]
+    pub mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = vault,
+        associated_token::token_program = token_program
+    )]
+    pub vault_token: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = mint,
+        token::authority = owner,
+        token::token_program = token_program
+    )]
+    pub owner_token: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
+}
+
+/// Moves `amount` SKR from the owner into the plan's fee reserve, which
+/// pays release fees in SKR instead of in the payout asset. Allowed at any
+/// time, like any deposit.
+pub fn handle_fund_skr_reserve(ctx: Context<FundSkrReserve>, amount: u64) -> Result<()> {
+    let a = &ctx.accounts;
+    let mint = a.mint.key();
+    require!(
+        a.vault.skr_fee_reserve == 0 || a.vault.skr_reserve_mint == mint,
+        DeadmanError::WrongAsset
+    );
+    token_interface::transfer_checked(
+        CpiContext::new(
+            a.token_program.key(),
+            TransferChecked {
+                from: a.owner_token.to_account_info(),
+                mint: a.mint.to_account_info(),
+                to: a.vault_token.to_account_info(),
+                authority: a.owner.to_account_info(),
+            },
+        ),
+        amount,
+        a.mint.decimals,
+    )?;
+    let vault = &mut ctx.accounts.vault;
+    vault.skr_reserve_mint = mint;
+    vault.skr_fee_reserve = vault
+        .skr_fee_reserve
+        .checked_add(amount)
+        .ok_or(DeadmanError::MathOverflow)?;
+    Ok(())
+}
+
+/// Returns up to the whole SKR fee reserve to the owner, without a fee.
+/// Like every withdrawal, blocked during lockdown.
+pub fn handle_withdraw_skr_reserve<'info>(
+    ctx: Context<'info, WithdrawToken<'info>>,
+    amount: u64,
+) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    let a = &ctx.accounts;
+    a.vault.require_unlocked(now)?;
+    require_keys_eq!(
+        a.mint.key(),
+        a.vault.skr_reserve_mint,
+        DeadmanError::WrongAsset
+    );
+    require!(
+        amount <= a.vault.skr_fee_reserve,
+        DeadmanError::InsufficientFunds
+    );
+    vault_transfer(
+        a.token_program.as_ref(),
+        &a.vault_token,
+        &a.mint,
+        a.owner_token.to_account_info(),
+        &a.vault,
+        &[],
+        amount,
+    )?;
+    let vault = &mut ctx.accounts.vault;
+    vault.skr_fee_reserve = vault
+        .skr_fee_reserve
+        .checked_sub(amount)
+        .ok_or(DeadmanError::MathOverflow)?;
+    vault.record_owner_pulse(now)
 }

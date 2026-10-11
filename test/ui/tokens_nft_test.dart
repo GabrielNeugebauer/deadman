@@ -94,6 +94,7 @@ class _Actions extends VaultActions {
     required int skipGraceSecs,
     required int depositLamports,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     created.add((rules, tokenDeposits));
     return const [];

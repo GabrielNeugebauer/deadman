@@ -67,6 +67,8 @@ List<int> vaultBytes({
   List<RuleState> rules = const [],
   int stipendPaid = 0,
   int vestPeriodSecs = 0,
+  int skrFeeReserve = 0,
+  String? skrReserveMint,
 }) => _padVault([
   ...Disc.vaultAccount,
   ...keyBytes(owner),
@@ -96,7 +98,9 @@ List<int> vaultBytes({
   254,
   stipendPaid,
   ...le(8, vestPeriodSecs),
-  ...List<int>.filled(55, 0), // _reserved
+  ...le(8, skrFeeReserve),
+  ...keyBytes(skrReserveMint ?? defaultPubkey),
+  ...List<int>.filled(15, 0), // _reserved
 ]);
 
 /// Unused rule and label space stays zeroed up to the fixed account size.
@@ -275,6 +279,45 @@ List<int> metadataBytes({
     ...List<int>.filled(679 - bytes.length - 8, 0),
   ];
 }
+
+/// A `PriceFeed` registry entry for [mint] (SOL: [nativeMint]).
+List<int> priceFeedBytes({
+  required String mint,
+  required String feedId,
+  String? priceAccount,
+  int maxAgeSecs = 120,
+}) => [
+  ...Disc.priceFeedAccount,
+  ...keyBytes(mint),
+  ...feedIdBytes(feedId),
+  ...keyBytes(priceAccount ?? pythPriceAccount(feedId)),
+  ...le(4, maxAgeSecs),
+  254,
+];
+
+/// A Pyth `PriceUpdateV2` account: [full] or partially verified (with a
+/// signature count), then the price message and the posted slot.
+List<int> priceUpdateBytes({
+  required String feedId,
+  required int price,
+  required int expo,
+  required int publishTime,
+  int conf = 0,
+  bool full = true,
+}) => [
+  ...Disc.priceUpdateV2,
+  ...keyBytes(key(90)), // write_authority
+  if (full) 1 else ...[0, 5],
+  ...feedIdBytes(feedId),
+  ...le(8, price),
+  ...le(8, conf),
+  ...le(4, expo),
+  ...le(8, publishTime),
+  ...le(8, publishTime - 1), // prev_publish_time
+  ...le(8, price), // ema_price
+  ...le(8, conf), // ema_conf
+  ...le(8, 1234), // posted_slot
+];
 
 /// Minimal JSON-RPC server for the read paths the client uses.
 class FakeRpc {

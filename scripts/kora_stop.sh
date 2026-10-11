@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Stop the Deadman gateway (:8080 sponsor, :8081 paymaster) and the Kora
-# nodes (:8090 sponsor, :8091-8093 paymaster tiers). `--all` also stops the Redis
+# Stop the Deadman gateway (:8080 sponsor, :8081 paymaster), the Kora
+# nodes (:8090 sponsor, :8091-8093 paymaster tiers) and the Pyth price
+# pusher. `--all` also stops the Redis
 # container (usage counters persist in the deadman-kora-redis volume; gateway
 # counters in kora/gateway-usage.json and kora/paymaster-*.json).
 set -uo pipefail
@@ -21,6 +22,8 @@ for name in gateway sponsor paymaster paymaster-account paymaster-basic; do
   fi
   rm -f "$pidf"
 done
+
+"$(dirname "${BASH_SOURCE[0]}")/pyth_pusher_stop.sh"
 
 if [[ "${1:-}" == "--all" ]]; then
   docker stop deadman-kora-redis >/dev/null 2>&1 && echo "redis stopped"

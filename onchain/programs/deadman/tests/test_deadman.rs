@@ -2683,7 +2683,9 @@ fn vault_layout_keeps_client_offsets_and_reserved_space() {
     assert_eq!(&data[123..131], &GRACE.to_le_bytes());
     let v = env.vault();
     assert_eq!(v._reserved_interval, [0u8; 8]);
-    assert_eq!(v._reserved, [0u8; 55]);
+    assert_eq!(v._reserved, [0u8; 15]);
+    assert_eq!(v.skr_fee_reserve, 0);
+    assert_eq!(v.skr_reserve_mint, Pubkey::default());
     assert_eq!(v.vest_period_secs, 0);
     assert_eq!(v.stipend_paid, 0);
     assert!(v.rent_paid > 0);

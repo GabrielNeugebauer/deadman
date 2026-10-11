@@ -130,6 +130,8 @@ class VaultState {
     this.rentPayer = '',
     this.rentPaid = 0,
     this.vestPeriodSecs = 0,
+    this.skrFeeReserve = 0,
+    this.skrReserveMint,
   });
 
   final String address;
@@ -188,7 +190,40 @@ class VaultState {
   /// (plans created before installments existed).
   final int vestPeriodSecs;
 
+  /// SKR (base units) the owner set aside to pay release fees in SKR, at
+  /// the lower SKR rate, instead of in each payout's asset. Held in the
+  /// vault's token account of [skrReserveMint], next to any SKR the tiers
+  /// pay out, but never paid to a tier or withdrawn as tier funds.
+  final int skrFeeReserve;
+
+  /// Mint the reserve is held in; null when the plan never had one.
+  final String? skrReserveMint;
+
   bool get isVesting => kind == PlanKind.vesting;
+
+  /// The part of the vault's balance of [mint] (null = SOL) that is the SKR
+  /// fee reserve (mirrors the program's `fee_reserve_in`).
+  int feeReserveIn(String? mint) =>
+      skrFeeReserve > 0 && mint != null && mint == skrReserveMint
+      ? skrFeeReserve
+      : 0;
+
+  /// What [balance] of [mint] leaves for tiers and schedules: everything
+  /// but the SKR fee reserve.
+  int tierFunds(String? mint, int balance) {
+    final left = balance - feeReserveIn(mint);
+    return left > 0 ? left : 0;
+  }
+
+  /// Whether payouts of [mint] (null = SOL) at [fees] may pay their fee in
+  /// SKR from the reserve: the plan holds a reserve in the configured SKR
+  /// mint and the payout is not itself in SKR. The program still falls
+  /// back to the asset fee when a price is unusable or the reserve short.
+  bool paysFeeInSkr(FeeSchedule fees, String? mint) =>
+      skrFeeReserve > 0 &&
+      fees.skrMint != null &&
+      skrReserveMint == fees.skrMint &&
+      !fees.isSkr(mint);
 
   /// Seconds of schedule time counted at [now]: vesting stops at revocation.
   int _elapsed(int now) =>
@@ -359,10 +394,12 @@ class VaultState {
     return total;
   }
 
-  /// Amount of [mint] (null = SOL) the owner cannot withdraw: vesting
-  /// commitments plus the shares reserved for skipped, unpaid tiers
-  /// (mirrors the program's `locked_for_owner`).
-  int lockedForOwner(String? mint) => committed(mint) + reservedFor(mint);
+  /// Amount of [mint] (null = SOL) the owner cannot withdraw as tier
+  /// funds: vesting commitments, the shares reserved for skipped, unpaid
+  /// tiers (the program's `locked_for_owner`) and the SKR fee reserve,
+  /// which has its own withdrawal.
+  int lockedForOwner(String? mint) =>
+      committed(mint) + reservedFor(mint) + feeReserveIn(mint);
 
   /// Some skipped tier still holds a reserved share: the plan cannot be
   /// closed until its beneficiary claims it.
@@ -372,12 +409,15 @@ class VaultState {
   /// Gross amount tier [index] pays from [balance] of its asset (mirrors
   /// the program's `payout_gross`): a skipped tier gets its reserved share;
   /// any other tier works on the balance minus every reserved share.
+  /// [balance] is the vault's whole balance: the SKR fee reserve is left
+  /// out here, as the program does before calling `payout_gross`.
   int payoutGross(int index, int balance) {
     final r = rules[index];
+    final funds = tierFunds(r.mint, balance);
     if (r.skipped && r.reserved > 0) {
-      return r.reserved < balance ? r.reserved : balance;
+      return r.reserved < funds ? r.reserved : funds;
     }
-    final left = balance - reservedFor(r.mint, except: index);
+    final left = funds - reservedFor(r.mint, except: index);
     if (left <= 0) return 0;
     return switch (r.mode) {
       AmountMode.fixed => r.amount < left ? r.amount : left,
@@ -594,6 +634,9 @@ abstract class DeadmanApi {
   /// Creates plan [planId], funds the guard key with fee money if it holds
   /// less than that, and optionally deposits [depositLamports] and tokens
   /// ([tokenDeposits]: mint -> base units, from the owner's ATA), in one tx.
+  /// [skrReserve] (base units of the configured SKR mint) goes into the
+  /// plan's SKR fee reserve in the same transaction (see
+  /// [buildFundSkrReserve]).
   Future<Uint8List> buildCreateVault({
     required String owner,
     required int planId,
@@ -604,6 +647,7 @@ abstract class DeadmanApi {
     required List<RuleSpec> rules,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   });
 
   Future<Uint8List> buildDeposit({
@@ -669,7 +713,9 @@ abstract class DeadmanApi {
   /// rule). For token rules it also creates, idempotently, the
   /// beneficiary's ATA and, when the payout leaves a fee for the treasury,
   /// the treasury's (paid by [executor]): the program pays into any token
-  /// account the beneficiary owns but no longer creates one.
+  /// account the beneficiary owns but no longer creates one. A plan with an
+  /// SKR fee reserve also gets the price feeds and SKR accounts the program
+  /// needs to take the fee in SKR (`DeadmanClient.skrFeeFor`).
   Future<Uint8List> buildExecuteRule({
     required String executor,
     required String vaultOwner,
@@ -705,6 +751,27 @@ abstract class DeadmanApi {
     int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
+  });
+
+  /// Moves [amount] SKR (base units of the configured SKR mint) from the
+  /// owner's wallet into plan [planId]'s SKR fee reserve. Each release then
+  /// pays its fee in SKR at the lower SKR rate (part burned) from the
+  /// reserve, and the beneficiary receives the whole payout; a payout the
+  /// reserve cannot cover, or whose price is stale, pays the normal fee in
+  /// its own asset. Allowed at any time, like a deposit.
+  Future<Uint8List> buildFundSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
+  });
+
+  /// Returns [amount] of plan [planId]'s SKR fee reserve to the owner's
+  /// wallet, free. Blocked during lockdown, like every withdrawal.
+  Future<Uint8List> buildWithdrawSkrReserve({
+    required String owner,
+    required int planId,
+    required int amount,
   });
 
   /// Stops future vesting of a revocable plan (owner wallet).
@@ -763,9 +830,10 @@ abstract class DeadmanApi {
   String? get feeToken;
   set feeToken(String? mint);
 
-  /// Closes plan [planId]: every token it holds goes back to the owner's
-  /// token accounts and its SOL to the owner (the rent to the rent payer),
-  /// in one transaction. Vesting plans close only once nothing is owed.
+  /// Closes plan [planId]: every token it holds, the SKR fee reserve
+  /// included, goes back to the owner's token accounts and its SOL to the
+  /// owner (the rent to the rent payer), in one transaction. Vesting plans
+  /// close only once nothing is owed.
   Future<Uint8List> buildCloseVault({
     required String owner,
     required int planId,

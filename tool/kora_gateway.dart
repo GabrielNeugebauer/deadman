@@ -265,6 +265,10 @@ typedef SponsorClaim = ({String name, String vault, int index, PlanKind kind});
 
 /// SOL claims the sponsor pays when the beneficiary claims for itself:
 /// discriminator and the plan kind the program requires.
+///
+/// A plan with an SKR fee reserve needs [skrFeeAccountCount] more accounts
+/// after the five named ones (the program checks each against its price
+/// registry, the config and the plan).
 const sponsorClaimIxs = <String, ({List<int> disc, PlanKind kind})>{
   'execute_sol_rule': (disc: Disc.executeSolRule, kind: PlanKind.inheritance),
   'release_vested_sol': (disc: Disc.releaseVestedSol, kind: PlanKind.vesting),
@@ -344,8 +348,10 @@ SponsorRequest validateSponsorTx(List<int> wire, SponsorPolicy policy) {
                 .firstOrNull
           : null;
       if (claim != null) {
-        // [executor, vault, config, beneficiary, treasury]
-        if (a.length != 5 || a[1] < tx.requiredSigs) {
+        // [executor, vault, config, beneficiary, treasury], then the SKR
+        // fee accounts when the plan has a reserve.
+        if ((a.length != 5 && a.length != 5 + skrFeeAccountCount) ||
+            a[1] < tx.requiredSigs) {
           _reject('Malformed Deadman ${claim.key}');
         }
         if (keys[a[0]] != signer || keys[a[3]] != signer) {
@@ -568,17 +574,18 @@ const defaultMinLockdownLamports = 10000000;
 /// Whether [a] (the vault at [address]) is worth a sponsored lockdown
 /// (audit M-3): a current-layout plan, not revoked, with a payout still
 /// pending, that holds at least [minLamports] above its rent ([vaultRent])
-/// or a token a
-/// pending rule pays. [holdsTokens] tells whether the vault's classic SPL
-/// Token ATA of any of the given mints holds a balance; it is only called
-/// when the SOL test fails.
+/// or a token a pending rule pays (beyond its SKR fee reserve).
+/// [holdsTokens] tells whether the vault's classic SPL Token ATA of any of
+/// the given mints holds more than the amount given for it; it is only
+/// called when the SOL test fails.
 Future<bool> isFundedVault(
   VaultAccount? a,
   String address,
   String programId, {
   required int minLamports,
   required int vaultRent,
-  required Future<bool> Function(String vault, Set<String> mints) holdsTokens,
+  required Future<bool> Function(String vault, Map<String, int> above)
+  holdsTokens,
 }) async {
   final v = _decodeCurrentVault(a, programId, rentExemptMinimum: vaultRent);
   if (v == null || v.revokedAt != 0) return false;
@@ -588,8 +595,8 @@ Future<bool> isFundedVault(
   ];
   if (pending.isEmpty) return false;
   if (v.withdrawableLamports >= minLamports) return true;
-  final mints = {for (final r in pending) ?r.mint};
-  return mints.isNotEmpty && await holdsTokens(address, mints);
+  final above = {for (final r in pending) ?r.mint: v.feeReserveIn(r.mint)};
+  return above.isNotEmpty && await holdsTokens(address, above);
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +616,20 @@ typedef PaymentAta = ({
   String tokenProgram,
   Map<PaymasterTier, int> minAmounts,
 });
+
+/// Remaining accounts of a payout that may pay its fee in SKR from the
+/// plan's reserve: asset PriceFeed, its price account, SKR PriceFeed, its
+/// price account, vault SKR ATA, SKR mint, treasury SKR ATA, Token program.
+const skrFeeAccountCount = 8;
+
+/// Payouts that take either no remaining accounts or exactly the
+/// [skrFeeAccountCount] of a plan with an SKR fee reserve.
+const skrFeePayouts = {
+  'execute_sol_rule',
+  'execute_token_rule',
+  'release_vested_sol',
+  'release_vested_token',
+};
 
 /// A Deadman instruction the paymaster pays for: its exact account count
 /// (plus up to [PaymasterPolicy.maxExtraAccounts] remaining accounts when
@@ -687,6 +708,20 @@ const paymasterDeadmanIxs = <String, DeadmanIxSpec>{
     extra: false,
     koraSlot: null,
   ),
+  // Owner SKR fee reserve: a deposit (Kora may fund the vault's SKR ATA
+  // created before it) and a fee-free withdrawal.
+  'fund_skr_reserve': (
+    disc: [147, 244, 156, 77, 169, 208, 230, 220],
+    accounts: 7,
+    extra: false,
+    koraSlot: null,
+  ),
+  'withdraw_skr_reserve': (
+    disc: [142, 16, 23, 220, 111, 167, 150, 73],
+    accounts: 6,
+    extra: false,
+    koraSlot: null,
+  ),
   'skip_rule': (
     disc: [240, 82, 139, 70, 215, 222, 129, 174],
     accounts: 3,
@@ -727,6 +762,7 @@ const _deniedDeadmanIxs = <String, List<int>>{
   'propose_admin': [121, 214, 199, 212, 87, 39, 117, 234],
   'accept_admin': [112, 42, 45, 90, 116, 181, 13, 170],
   'unlock': [101, 155, 40, 21, 158, 189, 56, 203],
+  'set_price_feed': [13, 15, 231, 129, 61, 7, 28, 122],
 };
 
 class PaymasterPolicy {
@@ -981,7 +1017,10 @@ PaymasterRequest validatePaymasterTx(
       final spec = entry.value;
       final max =
           spec.accounts + (spec.extra ? PaymasterPolicy.maxExtraAccounts : 0);
-      if (a.length < spec.accounts || a.length > max) {
+      final skrFee =
+          skrFeePayouts.contains(name) &&
+          a.length == spec.accounts + skrFeeAccountCount;
+      if (!skrFee && (a.length < spec.accounts || a.length > max)) {
         _reject('Malformed Deadman $name');
       }
       if (a[0] != owner) {
@@ -1005,10 +1044,19 @@ PaymasterRequest validatePaymasterTx(
         if (a[1] == kora) koraFundedPlan = keys[a[2]];
       }
       vaults.add(keys[a[spec.koraSlot == 1 ? 2 : 1]]);
-      if (name == 'withdraw_token' && d.length >= 16) {
+      if ((name == 'withdraw_token' || name == 'withdraw_skr_reserve') &&
+          d.length >= 16) {
         // [owner, vault, mint, vault_token, owner_token, token_program]
         final amount = _uLe(d.sublist(8, 16));
         credits.update(keys[a[4]], (v) => v + amount, ifAbsent: () => amount);
+      }
+      if (name == 'fund_skr_reserve' && d.length >= 16) {
+        // [owner, vault, config, mint, vault_token, owner_token,
+        //  token_program]: the program moves the SKR from owner_token
+        // into the vault's ATA, which the program checks.
+        final amount = _uLe(d.sublist(8, 16));
+        outflow.update(keys[a[5]], (v) => v + amount, ifAbsent: () => amount);
+        if (amount > BigInt.zero) deposits.add((keys[a[4]], keys[a[3]]));
       }
       if (name == 'execute_token_rule' || name == 'release_vested_token') {
         // [executor, vault, config, mint, vault_token, beneficiary,
@@ -1423,12 +1471,13 @@ class SponsorRoute implements GatewayRoute {
     );
   }
 
-  Future<bool> _holdsTokens(String vault, Set<String> mints) async {
+  Future<bool> _holdsTokens(String vault, Map<String, int> above) async {
     final atas = [
-      for (final m in mints) associatedTokenAddress(vault, m, tokenProgramId),
+      for (final m in above.keys)
+        associatedTokenAddress(vault, m, tokenProgramId),
     ];
     final accounts = await fetchAccounts(atas);
-    for (final (i, mint) in mints.indexed) {
+    for (final (i, mint) in above.keys.indexed) {
       final a = i < accounts.length ? accounts[i] : null;
       final d = a?.data;
       if (a != null &&
@@ -1437,7 +1486,7 @@ class SponsorRoute implements GatewayRoute {
           d.length >= 165 &&
           base58encode(d.sublist(0, 32)) == mint &&
           base58encode(d.sublist(32, 64)) == vault &&
-          _uLe(d.sublist(64, 72)) > BigInt.zero) {
+          _uLe(d.sublist(64, 72)) > BigInt.from(above[mint]!)) {
         return true;
       }
     }

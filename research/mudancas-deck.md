@@ -52,3 +52,22 @@ O dono trocou o modelo de negócio: a assinatura Plus saiu por completo. Agora a
 ## Pendente
 
 - **Print do app no slide 8 (Plan funds):** a imagem embutida mostra "No fee · monthly plan active" nas duas opções de entrega e "≈ 100 SOL to this person … (no fee)". Isso é da assinatura antiga e contradiz o slide 12. É pixel, não texto, então não mudei. Tire um print novo da tela "New payout" do app atualizado (que deve mostrar a taxa de 2%) e troque a imagem do frame do slide 8.
+
+# Mudanças no deck (2026-10-09): taxa paga em $SKR via reserva
+
+O dono definiu como a taxa em $SKR funciona: o dono do plano pode pagar a taxa de liberação em $SKR, a **1,5% do valor liberado** em vez de 2% do próprio ativo. O valor é cotado pelo **Pyth no momento da liberação** e sai de uma **reserva de $SKR que o dono mantém no plano**. Da taxa em $SKR, 10% é queimado e 90% vai para a tesouraria, e o herdeiro recebe 100% do pagamento. Se a reserva não cobre a taxa ou o preço do oracle está velho, a liberação volta para os 2% no ativo. Heranças que já são em $SKR seguem com 1,5% cobrado no próprio $SKR, e NFTs continuam sem taxa. Saques continuam grátis e não há assinatura. Mudei só texto do slide 12. Layout, fontes e imagens ficaram iguais. Backup: `scratchpad/deck.backup-2026-10-09.html`; script: `scratchpad/edit_deck_skrfee.py "<backup>" "<destino>"`.
+
+| Slide                  | Antes                                                                  | Depois                                                                 |
+| ---------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 12 · Modelo de negócio | "02 · PAID IN $SKR: 1.5% only on release / inheritance in $SKR"         | "02 · $SKR RESERVE: 1.5% paid in $SKR / Pyth price at release"          |
+
+- O resto do slide 12 já batia com o modelo e ficou igual: "No subscription. A fee only when a vault releases.", "01 · RELEASE FEE: 2% only on release / withdrawals always free" e "03 · $SKR BURN: 10% of $SKR BURNED / from every $SKR fee".
+- Testei textos mais longos ("from your $SKR reserve, priced by Pyth", "priced by Pyth at release"). Os dois quebravam linha, o que aumentava os cards e desalinhava a chama em pixel art (posição absoluta). Por isso a palavra "reserva" foi para o título do card e a linha cinza ficou curta.
+- O HTML passa no `html.parser` sem tags abertas nem erros de fechamento, com 17 slides. O slide 12 foi renderizado em headless Chrome a 1920×1080 e ficou com a mesma altura de antes.
+- O status honesto de devnet (slides 14 e 15) não mudou. O demo (slide 10) continua "1 SOL tier → 0.98 SOL" e "0.02 SOL (2%), only on release", que segue certo para o caminho padrão sem reserva.
+
+## Pendente
+
+- **Slide 10 (demo):** se quiserem mostrar o caminho em $SKR, um texto curto seria "or 1.5% in $SKR, heir gets 1 SOL". Não mudei porque o slide mostra um caso concreto e o caminho padrão continua sendo 2%.
+- **Print do slide 8** continua com "No fee · monthly plan active" da assinatura antiga (ver pendência de 2026-10-08).
+- O deck diz que a taxa em $SKR é cotada pelo Pyth. Isso depende da mudança no programa (registro de PriceFeed, reserva no Vault) que está sendo feita agora e ainda não foi publicada na devnet. Além disso, o feed SKR/USD não é patrocinado: o nosso pusher precisa mantê-lo atualizado, senão toda liberação cai nos 2%.

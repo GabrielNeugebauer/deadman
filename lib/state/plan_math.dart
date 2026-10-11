@@ -11,7 +11,9 @@ int? heldBalance(VaultState v, String? mint, Map<String, int>? tokens) =>
 bool? tierFunded(VaultState v, int index, Map<String, int>? tokens) {
   final balance = heldBalance(v, v.rules[index].mint, tokens);
   if (balance == null) return null;
-  return v.isVesting ? balance > 0 : v.payoutGross(index, balance) > 0;
+  return v.isVesting
+      ? v.tierFunds(v.rules[index].mint, balance) > 0
+      : v.payoutGross(index, balance) > 0;
 }
 
 /// Assets of [v]'s unpaid tiers that would pay nothing today.

@@ -356,14 +356,15 @@ bool vestingSettled(VaultState v) => [
 ].every((done) => done);
 
 /// Base units of [mint] above what the plan owes its beneficiaries, given
-/// the vault [balance] (withdrawable lamports for SOL).
+/// the vault [balance] (withdrawable lamports for SOL). The SKR fee
+/// reserve is not counted: it has its own withdrawal.
 int uncommitted(VaultState v, String? mint, int balance) {
-  final free = balance - v.committed(mint);
+  final free = v.tierFunds(mint, balance) - v.committed(mint);
   return free > 0 ? free : 0;
 }
 
 /// Base units of [mint] missing for every schedule to pay in full.
 int shortfall(VaultState v, String? mint, int balance) {
-  final gap = v.committed(mint) - balance;
+  final gap = v.committed(mint) - v.tierFunds(mint, balance);
   return gap > 0 ? gap : 0;
 }

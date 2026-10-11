@@ -781,6 +781,7 @@ void main() {
 
   claimTests();
   paymasterTests();
+  skrReserveTests();
 }
 
 const usdc = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
@@ -2608,6 +2609,259 @@ void claimTests() {
           ),
           rejects('does not exist'),
         );
+      },
+    );
+  });
+}
+
+/// The SKR fee reserve: its owner instructions on the paymaster, the 8 SKR
+/// fee accounts payouts of a plan with a reserve carry, and lockdowns that
+/// do not count the reserve as plan funds.
+void skrReserveTests() {
+  const skr = 'Skr1111111111111111111111111111111111111111';
+  final vault = vaultPda(owner, 0).address;
+  final vaultSkr = associatedTokenAddress(vault, skr, tokenProgramId);
+  late Ed25519HDKeyPair o;
+
+  setUpAll(() async => o = await keypair(41));
+
+  List<AccountMeta> skrAccounts(String vaultAddress, String? asset) =>
+      skrFeeAccounts(
+        vault: vaultAddress,
+        assetMint: asset,
+        skrMint: skr,
+        treasury: treasury,
+        assetPriceAccount: pythPriceAccount(PythFeedIds.solUsd),
+        skrPriceAccount: pythPriceAccount(PythFeedIds.skrUsd),
+      );
+
+  Instruction withExtra(Instruction ix, List<AccountMeta> extra) =>
+      deadmanIx([...ix.accounts, ...extra], ix.data.toList());
+
+  group('SKR fee reserve', () {
+    test(
+      'a sponsored SOL claim may carry exactly the 8 SKR fee accounts',
+      () async {
+        final heir = await keypair(42);
+        final claimVault = vaultPda(claimVaultOwner, 0).address;
+        final policy = policyFor(koraPayer: kora);
+        final claim = solClaimIx(
+          heir.address,
+          heir.address,
+          Disc.executeSolRule,
+        );
+        final ok = await wire(
+          [withExtra(claim, skrAccounts(claimVault, null))],
+          signers: [heir],
+        );
+        expect(validateSponsorTx(ok, policy).claim?.vault, claimVault);
+        for (final n in [1, 7, 9]) {
+          final extra = [
+            ...skrAccounts(claimVault, null),
+            ro(key(77)),
+          ].take(n).toList();
+          final bad = await wire([withExtra(claim, extra)], signers: [heir]);
+          expect(
+            () => validateSponsorTx(bad, policy),
+            rejects('Malformed Deadman execute_sol_rule'),
+            reason: '$n extra accounts',
+          );
+        }
+      },
+    );
+
+    test('paid payouts take no extra accounts or exactly the 8', () async {
+      final heir = await keypair(43);
+      for (final (payout, asset) in [
+        (solClaimIx(heir.address, heir.address, Disc.executeSolRule), null),
+        (solClaimIx(heir.address, heir.address, Disc.releaseVestedSol), null),
+        (
+          payoutIx(
+            heir.address,
+            claimVaultOwner,
+            heir.address,
+            treasury,
+            Disc.executeTokenRule,
+          ),
+          usdc,
+        ),
+        (
+          payoutIx(
+            heir.address,
+            claimVaultOwner,
+            heir.address,
+            treasury,
+            Disc.releaseVestedToken,
+          ),
+          usdc,
+        ),
+      ]) {
+        final accounts = skrAccounts(
+          vaultPda(claimVaultOwner, 0).address,
+          asset,
+        );
+        final ok = await wire(
+          [withExtra(payout, accounts), pay(heir.address, amount: 20000)],
+          payer: kora,
+          signers: [heir],
+        );
+        expect(validatePaymasterTx(ok, pmPolicy).tier, PaymasterTier.basic);
+        final bad = await wire(
+          [
+            withExtra(payout, accounts.take(7).toList()),
+            pay(heir.address, amount: 20000),
+          ],
+          signers: [heir],
+        );
+        expect(
+          () => validatePaymasterTx(bad, pmPolicy),
+          rejects('Malformed Deadman'),
+        );
+      }
+    });
+
+    Instruction fund(int amount) => fundSkrReserveIxs(
+      owner: o.address,
+      planId: 0,
+      mint: skr,
+      amount: amount,
+      payer: kora,
+    ).last;
+
+    Instruction openVaultSkr(String payer) => Instruction(
+      programId: pk(ataProgramId),
+      accounts: [
+        rw(payer, signer: payer == o.address),
+        rw(
+          associatedTokenAddress(
+            vaultPda(o.address, 0).address,
+            skr,
+            tokenProgramId,
+          ),
+        ),
+        ro(vaultPda(o.address, 0).address),
+        ro(skr),
+        ro(systemProgramId),
+        ro(tokenProgramId),
+      ],
+      data: ByteArray([1]),
+    );
+
+    test('fund_skr_reserve: Kora may open the vault SKR account (account '
+        'tier), and the SKR leaves the owner', () async {
+      final tx = await wire(
+        [openVaultSkr(kora), fund(5000), pay(o.address, amount: 500000)],
+        signers: [o],
+      );
+      final r = validatePaymasterTx(tx, pmPolicy);
+      expect(r.instructions, [
+        'ata.create_idempotent',
+        'deadman.fund_skr_reserve',
+        'token.transfer_checked',
+      ]);
+      expect(r.tier, PaymasterTier.account);
+      expect(r.koraAtas, 1);
+      expect(r.vaultChecks, isEmpty, reason: 'the vault is named');
+
+      // A later top-up is basic; an empty one justifies no Kora account.
+      final topUp = await wire(
+        [fund(5000), pay(o.address, amount: 20000)],
+        signers: [o],
+      );
+      expect(validatePaymasterTx(topUp, pmPolicy).tier, PaymasterTier.basic);
+      final empty = await wire(
+        [openVaultSkr(kora), fund(0), pay(o.address, amount: 500000)],
+        signers: [o],
+      );
+      expect(
+        () => validatePaymasterTx(empty, pmPolicy),
+        rejects('only funds a token account the transaction pays'),
+      );
+    });
+
+    test('withdraw_skr_reserve is basic and credits the owner', () async {
+      final ix = withdrawSkrReserveIxs(
+        owner: o.address,
+        planId: 0,
+        mint: usdc,
+        amount: 7000,
+      ).last;
+      final tx = await wire([ix, pay(o.address, amount: 20000)], signers: [o]);
+      final r = validatePaymasterTx(tx, pmPolicy);
+      expect(r.instructions.first, 'deadman.withdraw_skr_reserve');
+      expect(r.tier, PaymasterTier.basic);
+      // 20 000 paid minus the 7 000 the withdrawal brings in.
+      expect(r.paymentSourceNeeds, BigInt.from(13000));
+    });
+
+    test('set_price_feed is never paid for', () async {
+      final tx = await wire(
+        [
+          setPriceFeedIx(
+            admin: o.address,
+            mint: nativeMint,
+            feedId: PythFeedIds.solUsd,
+            maxAgeSecs: 600,
+          ),
+          pay(o.address, amount: 20000),
+        ],
+        signers: [o],
+      );
+      expect(
+        () => validatePaymasterTx(tx, pmPolicy),
+        rejects('Deadman set_price_feed is not paid by the paymaster'),
+      );
+    });
+
+    test(
+      'a lockdown does not count the SKR fee reserve as plan funds',
+      () async {
+        final g = await keypair(44);
+        VaultAccount plan(int reserve) => (
+          owner: AppConfig.programId,
+          lamports: rentExemptLamports(vaultAccountSize),
+          data: Uint8List.fromList(
+            vaultBytes(
+              owner: owner,
+              guard: g.address,
+              skrFeeReserve: reserve,
+              skrReserveMint: skr,
+              rules: [
+                RuleState(
+                  beneficiary: key(45),
+                  rail: Rail.solana,
+                  afterSecs: 3600,
+                  mode: AmountMode.fixed,
+                  amount: 1000000,
+                  mint: skr,
+                  executedAt: 0,
+                  paid: 0,
+                ),
+              ],
+            ),
+          ),
+        );
+        final chain = <String, VaultAccount?>{
+          vault: plan(1000),
+          vaultSkr: tokenAccount(vault, 1000, mint: skr),
+        };
+        final route = SponsorRoute(
+          policy: policyFor(koraPayer: kora),
+          limiter: UsageLimiter(),
+          fetchAccounts: (a) async => [for (final k in a) chain[k]],
+        );
+        final lockdown = await wire(
+          [
+            deadmanIx([ro(g.address, signer: true), rw(vault)], Disc.lockdown),
+          ],
+          signers: [g],
+        );
+        await expectLater(
+          route.admit(lockdown),
+          rejects('Lockdowns are sponsored only for a plan'),
+        );
+        chain[vault] = plan(999);
+        await route.admit(lockdown);
       },
     );
   });

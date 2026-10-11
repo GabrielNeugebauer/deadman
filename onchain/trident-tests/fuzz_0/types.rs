@@ -863,6 +863,165 @@ pub mod deadman {
     }
 
     // ....................................................................
+    // Instruction: FundSkrReserve
+    // ....................................................................
+
+    /// Main instruction struct for FundSkrReserve
+    pub struct FundSkrReserveInstruction {
+        pub accounts: FundSkrReserveInstructionAccountMetas,
+        pub data: FundSkrReserveInstructionData,
+        pub remaining_accounts: Vec<AccountMeta>,
+    }
+
+    /// Account metadata for FundSkrReserve instruction
+    #[derive(Debug, Clone, Default)]
+    pub struct FundSkrReserveInstructionAccountMetas {
+        pub owner: AccountMeta,
+
+        pub vault: AccountMeta,
+
+        pub config: AccountMeta,
+
+        pub mint: AccountMeta,
+
+        pub vault_token: AccountMeta,
+
+        pub owner_token: AccountMeta,
+
+        pub token_program: AccountMeta,
+    }
+
+    /// Account pubkeys for FundSkrReserve instruction
+    #[derive(Debug, Clone)]
+    pub struct FundSkrReserveInstructionAccounts {
+        pub owner: Pubkey,
+
+        pub vault: Pubkey,
+
+        pub config: Pubkey,
+
+        pub mint: Pubkey,
+
+        pub vault_token: Pubkey,
+
+        pub owner_token: Pubkey,
+    }
+
+    impl FundSkrReserveInstructionAccounts {
+        pub fn new(
+            owner: Pubkey,
+
+            vault: Pubkey,
+
+            config: Pubkey,
+
+            mint: Pubkey,
+
+            vault_token: Pubkey,
+
+            owner_token: Pubkey,
+        ) -> Self {
+            Self {
+                owner,
+
+                vault,
+
+                config,
+
+                mint,
+
+                vault_token,
+
+                owner_token,
+            }
+        }
+    }
+
+    /// Instruction data for FundSkrReserve
+    #[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+    pub struct FundSkrReserveInstructionData {
+        pub amount: u64,
+    }
+
+    impl FundSkrReserveInstructionData {
+        pub fn new(amount: u64) -> Self {
+            Self { amount }
+        }
+    }
+
+    /// Implementation for FundSkrReserveInstruction
+    impl FundSkrReserveInstruction {
+        fn discriminator() -> [u8; 8] {
+            [147u8, 244u8, 156u8, 77u8, 169u8, 208u8, 230u8, 220u8]
+        }
+
+        pub fn data(data: FundSkrReserveInstructionData) -> Self {
+            Self {
+                accounts: FundSkrReserveInstructionAccountMetas::default(),
+                data,
+                remaining_accounts: Vec::new(),
+            }
+        }
+
+        pub fn accounts(mut self, accounts: FundSkrReserveInstructionAccounts) -> Self {
+            self.accounts.owner = AccountMeta::new_readonly(accounts.owner, true);
+
+            self.accounts.vault = AccountMeta::new(accounts.vault, false);
+
+            self.accounts.config = AccountMeta::new_readonly(accounts.config, false);
+
+            self.accounts.mint = AccountMeta::new_readonly(accounts.mint, false);
+
+            self.accounts.vault_token = AccountMeta::new(accounts.vault_token, false);
+
+            self.accounts.owner_token = AccountMeta::new(accounts.owner_token, false);
+
+            self.accounts.token_program = AccountMeta::new_readonly(
+                pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+                false,
+            );
+
+            self
+        }
+
+        pub fn remaining_accounts(mut self, accounts: Vec<AccountMeta>) -> Self {
+            self.remaining_accounts = accounts;
+            self
+        }
+
+        fn to_account_metas(&self) -> Vec<AccountMeta> {
+            let mut metas = Vec::new();
+
+            metas.push(self.accounts.owner.clone());
+
+            metas.push(self.accounts.vault.clone());
+
+            metas.push(self.accounts.config.clone());
+
+            metas.push(self.accounts.mint.clone());
+
+            metas.push(self.accounts.vault_token.clone());
+
+            metas.push(self.accounts.owner_token.clone());
+
+            metas.push(self.accounts.token_program.clone());
+
+            metas.extend(self.remaining_accounts.clone());
+            metas
+        }
+
+        pub fn instruction(&self) -> Instruction {
+            let mut buffer: Vec<u8> = Vec::new();
+
+            buffer.extend_from_slice(&Self::discriminator());
+
+            self.data.serialize(&mut buffer).unwrap();
+
+            Instruction::new_with_bytes(program_id(), &buffer, self.to_account_metas())
+        }
+    }
+
+    // ....................................................................
     // Instruction: InitConfig
     // ....................................................................
 
@@ -2019,6 +2178,135 @@ pub mod deadman {
     }
 
     // ....................................................................
+    // Instruction: SetPriceFeed
+    // ....................................................................
+
+    /// Main instruction struct for SetPriceFeed
+    pub struct SetPriceFeedInstruction {
+        pub accounts: SetPriceFeedInstructionAccountMetas,
+        pub data: SetPriceFeedInstructionData,
+        pub remaining_accounts: Vec<AccountMeta>,
+    }
+
+    /// Account metadata for SetPriceFeed instruction
+    #[derive(Debug, Clone, Default)]
+    pub struct SetPriceFeedInstructionAccountMetas {
+        pub admin: AccountMeta,
+
+        pub config: AccountMeta,
+
+        pub price_feed: AccountMeta,
+
+        pub system_program: AccountMeta,
+    }
+
+    /// Account pubkeys for SetPriceFeed instruction
+    #[derive(Debug, Clone)]
+    pub struct SetPriceFeedInstructionAccounts {
+        pub admin: Pubkey,
+
+        pub config: Pubkey,
+
+        pub price_feed: Pubkey,
+    }
+
+    impl SetPriceFeedInstructionAccounts {
+        pub fn new(admin: Pubkey, config: Pubkey, price_feed: Pubkey) -> Self {
+            Self {
+                admin,
+
+                config,
+
+                price_feed,
+            }
+        }
+    }
+
+    /// Instruction data for SetPriceFeed
+    #[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+    pub struct SetPriceFeedInstructionData {
+        pub mint: Pubkey,
+
+        pub feed_id: [u8; 32],
+
+        pub shard_id: u16,
+
+        pub max_age_secs: u32,
+    }
+
+    impl SetPriceFeedInstructionData {
+        pub fn new(mint: Pubkey, feed_id: [u8; 32], shard_id: u16, max_age_secs: u32) -> Self {
+            Self {
+                mint,
+
+                feed_id,
+
+                shard_id,
+
+                max_age_secs,
+            }
+        }
+    }
+
+    /// Implementation for SetPriceFeedInstruction
+    impl SetPriceFeedInstruction {
+        fn discriminator() -> [u8; 8] {
+            [13u8, 15u8, 231u8, 129u8, 61u8, 7u8, 28u8, 122u8]
+        }
+
+        pub fn data(data: SetPriceFeedInstructionData) -> Self {
+            Self {
+                accounts: SetPriceFeedInstructionAccountMetas::default(),
+                data,
+                remaining_accounts: Vec::new(),
+            }
+        }
+
+        pub fn accounts(mut self, accounts: SetPriceFeedInstructionAccounts) -> Self {
+            self.accounts.admin = AccountMeta::new(accounts.admin, true);
+
+            self.accounts.config = AccountMeta::new_readonly(accounts.config, false);
+
+            self.accounts.price_feed = AccountMeta::new(accounts.price_feed, false);
+
+            self.accounts.system_program =
+                AccountMeta::new_readonly(pubkey!("11111111111111111111111111111111"), false);
+
+            self
+        }
+
+        pub fn remaining_accounts(mut self, accounts: Vec<AccountMeta>) -> Self {
+            self.remaining_accounts = accounts;
+            self
+        }
+
+        fn to_account_metas(&self) -> Vec<AccountMeta> {
+            let mut metas = Vec::new();
+
+            metas.push(self.accounts.admin.clone());
+
+            metas.push(self.accounts.config.clone());
+
+            metas.push(self.accounts.price_feed.clone());
+
+            metas.push(self.accounts.system_program.clone());
+
+            metas.extend(self.remaining_accounts.clone());
+            metas
+        }
+
+        pub fn instruction(&self) -> Instruction {
+            let mut buffer: Vec<u8> = Vec::new();
+
+            buffer.extend_from_slice(&Self::discriminator());
+
+            self.data.serialize(&mut buffer).unwrap();
+
+            Instruction::new_with_bytes(program_id(), &buffer, self.to_account_metas())
+        }
+    }
+
+    // ....................................................................
     // Instruction: SkipRule
     // ....................................................................
 
@@ -2338,6 +2626,156 @@ pub mod deadman {
             metas.push(self.accounts.owner.clone());
 
             metas.push(self.accounts.vault.clone());
+
+            metas.extend(self.remaining_accounts.clone());
+            metas
+        }
+
+        pub fn instruction(&self) -> Instruction {
+            let mut buffer: Vec<u8> = Vec::new();
+
+            buffer.extend_from_slice(&Self::discriminator());
+
+            self.data.serialize(&mut buffer).unwrap();
+
+            Instruction::new_with_bytes(program_id(), &buffer, self.to_account_metas())
+        }
+    }
+
+    // ....................................................................
+    // Instruction: WithdrawSkrReserve
+    // ....................................................................
+
+    /// Main instruction struct for WithdrawSkrReserve
+    pub struct WithdrawSkrReserveInstruction {
+        pub accounts: WithdrawSkrReserveInstructionAccountMetas,
+        pub data: WithdrawSkrReserveInstructionData,
+        pub remaining_accounts: Vec<AccountMeta>,
+    }
+
+    /// Account metadata for WithdrawSkrReserve instruction
+    #[derive(Debug, Clone, Default)]
+    pub struct WithdrawSkrReserveInstructionAccountMetas {
+        pub owner: AccountMeta,
+
+        pub vault: AccountMeta,
+
+        pub mint: AccountMeta,
+
+        pub vault_token: AccountMeta,
+
+        pub owner_token: AccountMeta,
+
+        pub token_program: AccountMeta,
+    }
+
+    /// Account pubkeys for WithdrawSkrReserve instruction
+    #[derive(Debug, Clone)]
+    pub struct WithdrawSkrReserveInstructionAccounts {
+        pub owner: Pubkey,
+
+        pub vault: Pubkey,
+
+        pub mint: Pubkey,
+
+        pub vault_token: Pubkey,
+
+        pub owner_token: Pubkey,
+
+        pub token_program: Pubkey,
+    }
+
+    impl WithdrawSkrReserveInstructionAccounts {
+        pub fn new(
+            owner: Pubkey,
+
+            vault: Pubkey,
+
+            mint: Pubkey,
+
+            vault_token: Pubkey,
+
+            owner_token: Pubkey,
+
+            token_program: Pubkey,
+        ) -> Self {
+            Self {
+                owner,
+
+                vault,
+
+                mint,
+
+                vault_token,
+
+                owner_token,
+
+                token_program,
+            }
+        }
+    }
+
+    /// Instruction data for WithdrawSkrReserve
+    #[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+    pub struct WithdrawSkrReserveInstructionData {
+        pub amount: u64,
+    }
+
+    impl WithdrawSkrReserveInstructionData {
+        pub fn new(amount: u64) -> Self {
+            Self { amount }
+        }
+    }
+
+    /// Implementation for WithdrawSkrReserveInstruction
+    impl WithdrawSkrReserveInstruction {
+        fn discriminator() -> [u8; 8] {
+            [142u8, 16u8, 23u8, 220u8, 111u8, 167u8, 150u8, 73u8]
+        }
+
+        pub fn data(data: WithdrawSkrReserveInstructionData) -> Self {
+            Self {
+                accounts: WithdrawSkrReserveInstructionAccountMetas::default(),
+                data,
+                remaining_accounts: Vec::new(),
+            }
+        }
+
+        pub fn accounts(mut self, accounts: WithdrawSkrReserveInstructionAccounts) -> Self {
+            self.accounts.owner = AccountMeta::new(accounts.owner, true);
+
+            self.accounts.vault = AccountMeta::new(accounts.vault, false);
+
+            self.accounts.mint = AccountMeta::new_readonly(accounts.mint, false);
+
+            self.accounts.vault_token = AccountMeta::new(accounts.vault_token, false);
+
+            self.accounts.owner_token = AccountMeta::new(accounts.owner_token, false);
+
+            self.accounts.token_program = AccountMeta::new_readonly(accounts.token_program, false);
+
+            self
+        }
+
+        pub fn remaining_accounts(mut self, accounts: Vec<AccountMeta>) -> Self {
+            self.remaining_accounts = accounts;
+            self
+        }
+
+        fn to_account_metas(&self) -> Vec<AccountMeta> {
+            let mut metas = Vec::new();
+
+            metas.push(self.accounts.owner.clone());
+
+            metas.push(self.accounts.vault.clone());
+
+            metas.push(self.accounts.mint.clone());
+
+            metas.push(self.accounts.vault_token.clone());
+
+            metas.push(self.accounts.owner_token.clone());
+
+            metas.push(self.accounts.token_program.clone());
 
             metas.extend(self.remaining_accounts.clone());
             metas
@@ -2811,6 +3249,72 @@ impl PolicyUpdated {
     }
 }
 
+/// Custom struct: PriceFeed
+#[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+pub struct PriceFeed {
+    pub mint: Pubkey,
+
+    pub feed_id: [u8; 32],
+
+    pub price_account: Pubkey,
+
+    pub max_age_secs: u32,
+
+    pub bump: u8,
+}
+
+impl PriceFeed {
+    pub fn new(
+        mint: Pubkey,
+
+        feed_id: [u8; 32],
+
+        price_account: Pubkey,
+
+        max_age_secs: u32,
+
+        bump: u8,
+    ) -> Self {
+        Self {
+            mint,
+
+            feed_id,
+
+            price_account,
+
+            max_age_secs,
+
+            bump,
+        }
+    }
+}
+
+/// Custom struct: PriceFeedSet
+#[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+pub struct PriceFeedSet {
+    pub mint: Pubkey,
+
+    pub feed_id: [u8; 32],
+
+    pub price_account: Pubkey,
+
+    pub max_age_secs: u32,
+}
+
+impl PriceFeedSet {
+    pub fn new(mint: Pubkey, feed_id: [u8; 32], price_account: Pubkey, max_age_secs: u32) -> Self {
+        Self {
+            mint,
+
+            feed_id,
+
+            price_account,
+
+            max_age_secs,
+        }
+    }
+}
+
 /// Custom struct: Pulsed
 #[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
 pub struct Pulsed {
@@ -3059,6 +3563,32 @@ impl RuleSkipped {
     }
 }
 
+/// Custom struct: SkrFeePaid
+#[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
+pub struct SkrFeePaid {
+    pub vault: Pubkey,
+
+    pub index: u8,
+
+    pub fee: u64,
+
+    pub burned: u64,
+}
+
+impl SkrFeePaid {
+    pub fn new(vault: Pubkey, index: u8, fee: u64, burned: u64) -> Self {
+        Self {
+            vault,
+
+            index,
+
+            fee,
+
+            burned,
+        }
+    }
+}
+
 /// Custom struct: Unlocked
 #[derive(Debug, BorshDeserialize, BorshSerialize, Clone)]
 pub struct Unlocked {
@@ -3126,7 +3656,11 @@ pub struct Vault {
 
     pub vest_period_secs: i64,
 
-    pub _reserved: [u8; 55],
+    pub skr_fee_reserve: u64,
+
+    pub skr_reserve_mint: Pubkey,
+
+    pub _reserved: [u8; 15],
 }
 
 impl Vault {
@@ -3181,7 +3715,11 @@ impl Vault {
 
         vest_period_secs: i64,
 
-        _reserved: [u8; 55],
+        skr_fee_reserve: u64,
+
+        skr_reserve_mint: Pubkey,
+
+        _reserved: [u8; 15],
     ) -> Self {
         Self {
             owner,
@@ -3233,6 +3771,10 @@ impl Vault {
             stipend_paid,
 
             vest_period_secs,
+
+            skr_fee_reserve,
+
+            skr_reserve_mint,
 
             _reserved,
         }

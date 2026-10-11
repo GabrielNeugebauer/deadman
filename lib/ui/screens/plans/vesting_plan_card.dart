@@ -18,6 +18,7 @@ import '../../widgets/vesting_progress.dart';
 import 'plan_actions.dart';
 import 'plan_card_shell.dart';
 import 'release_plan_card.dart';
+import 'skr_reserve_section.dart';
 
 /// What happens next on vesting plan [v]: its start, the next installment
 /// or unlock, or that it finished.
@@ -157,7 +158,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     final revoked = v.revokedAt != 0;
     final settled = vestingSettled(v);
     final held = <String, int>{AppConfig.usdcMint: ?usdc, ...tokens};
-    final leftovers = holdingsText(v, held);
+    final leftovers = holdingsText(v, withFeeReserve(v, held));
     final (next, nextColor) = vestingNext(v, now);
     const button = Size.fromHeight(48);
 
@@ -168,12 +169,19 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
       for (final MapEntry(:key, :value) in tokens.entries)
         key: uncommitted(v, key, value),
     });
-    void close() =>
-        closePlanFlow(context, ref, v, cancel: false, held: held, now: now);
+    void close() => closePlanFlow(
+      context,
+      ref,
+      v,
+      cancel: false,
+      held: withFeeReserve(v, held),
+      now: now,
+    );
 
     final List<Widget> footer;
     if (released) {
       footer = [
+        SkrReserveSection(vault: v, tokens: held, released: true),
         if (leftovers.isNotEmpty) ...[
           const SizedBox(height: DMSpace.lg),
           OutlinedButton(
@@ -192,6 +200,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
     } else {
       footer = [
         PlanFeeLine(vault: v),
+        SkrReserveSection(vault: v, tokens: held),
         const SizedBox(height: DMSpace.lg),
         Row(
           children: [
@@ -258,7 +267,7 @@ class _VestingPlanCardState extends ConsumerState<VestingPlanCard> {
           : const Sticker('Vesting'),
       summary: released
           ? (leftovers.isEmpty ? 'Nothing left in the plan' : '$leftovers left')
-          : '${balancesText(v, held)} in plan',
+          : '${balancesText(v, tierHoldings(v, held))} in plan',
       next: next,
       nextColor: nextColor,
       body: Column(

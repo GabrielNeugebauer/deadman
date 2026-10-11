@@ -120,7 +120,8 @@ class VaultActions {
   /// Creates a new plan with the next free id. Every plan uses this
   /// device's guard key so one check-in covers all of them. Returns the
   /// active plans still guarded by another device (e.g. after "Forget this
-  /// device"): they need "Move guard to this phone".
+  /// device"): they need "Move guard to this phone". [skrReserve] SKR
+  /// goes into the plan's fee reserve in the same approval.
   Future<List<VaultState>> createVault({
     required String label,
     required List<RuleSpec> rules,
@@ -128,6 +129,7 @@ class VaultActions {
     required int skipGraceSecs,
     required int depositLamports,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) => _decoy(
     () async {
       final store = ref.read(secureStoreProvider);
@@ -145,6 +147,7 @@ class VaultActions {
           rules: rules,
           depositLamports: depositLamports,
           tokenDeposits: tokenDeposits,
+          skrReserve: skrReserve,
         ),
       ]);
       ref.invalidate(guardAddressProvider);
@@ -168,6 +171,7 @@ class VaultActions {
   /// transaction. Uses this device's guard key so panic lockdown covers it.
   /// Schedules unlock in installments every [periodSecs] (0 = continuously).
   /// Returns the active inheritance plans guarded by another device.
+  /// [skrReserve] SKR goes into the plan's fee reserve.
   Future<List<VaultState>> createVesting({
     required String label,
     required int startAt,
@@ -177,6 +181,7 @@ class VaultActions {
     int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) => _decoy(
     () async {
       final store = ref.read(secureStoreProvider);
@@ -196,6 +201,7 @@ class VaultActions {
           periodSecs: periodSecs,
           depositLamports: depositLamports,
           tokenDeposits: tokenDeposits,
+          skrReserve: skrReserve,
         ),
       ]);
       ref.invalidate(guardAddressProvider);
@@ -450,6 +456,30 @@ class VaultActions {
       ),
     ]),
     (w) => w.withdraw(planId, mint, amount),
+  );
+
+  /// Moves [amount] SKR from the wallet into plan [planId]'s fee reserve.
+  Future<void> fundSkrReserve(int planId, int amount) => _decoy(
+    () async => _signAndSend([
+      await _api.buildFundSkrReserve(
+        owner: _owner,
+        planId: planId,
+        amount: amount,
+      ),
+    ]),
+    (_) {},
+  );
+
+  /// Returns [amount] of plan [planId]'s SKR fee reserve to the wallet.
+  Future<void> withdrawSkrReserve(int planId, int amount) => _decoy(
+    () async => _signAndSend([
+      await _api.buildWithdrawSkrReserve(
+        owner: _owner,
+        planId: planId,
+        amount: amount,
+      ),
+    ]),
+    (_) {},
   );
 
   /// [rules] are the new pending tiers only (see

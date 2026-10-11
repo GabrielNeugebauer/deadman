@@ -1,0 +1,17 @@
+{
+  "name": "deadman-pyth-pusher",
+  "private": true,
+  "description": "Pyth price pusher (Solana mode) that keeps the unsponsored shard-0 push-oracle accounts Deadman reads fresh; started by scripts/pyth_pusher_start.sh",
+  "scripts": {
+    "pusher": "pyth-price-pusher"
+  },
+  "dependencies": {
+    "@pythnetwork/price-pusher": "11.3.0"
+  },
+  "overrides": {
+    "@injectivelabs/ts-types": "1.14.47",
+    "jito-ts": {
+      "@solana/web3.js": "1.99.0"
+    }
+  }
+}

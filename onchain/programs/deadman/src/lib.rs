@@ -115,7 +115,10 @@ pub mod deadman {
         instructions::funds::handle_withdraw_token(ctx, amount)
     }
 
-    pub fn execute_sol_rule(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+    pub fn execute_sol_rule<'info>(
+        ctx: Context<'info, ExecuteSolRule<'info>>,
+        index: u8,
+    ) -> Result<()> {
         instructions::funds::handle_execute_sol_rule(ctx, index)
     }
 
@@ -152,7 +155,10 @@ pub mod deadman {
         instructions::vault::handle_revoke_vesting(ctx)
     }
 
-    pub fn release_vested_sol(ctx: Context<ExecuteSolRule>, index: u8) -> Result<()> {
+    pub fn release_vested_sol<'info>(
+        ctx: Context<'info, ExecuteSolRule<'info>>,
+        index: u8,
+    ) -> Result<()> {
         instructions::funds::handle_release_vested_sol(ctx, index)
     }
 
@@ -168,6 +174,27 @@ pub mod deadman {
         index: u8,
     ) -> Result<()> {
         instructions::funds::handle_execute_token_rule(ctx, index)
+    }
+
+    pub fn set_price_feed(
+        ctx: Context<SetPriceFeed>,
+        mint: Pubkey,
+        feed_id: [u8; 32],
+        shard_id: u16,
+        max_age_secs: u32,
+    ) -> Result<()> {
+        instructions::config::handle_set_price_feed(ctx, mint, feed_id, shard_id, max_age_secs)
+    }
+
+    pub fn fund_skr_reserve(ctx: Context<FundSkrReserve>, amount: u64) -> Result<()> {
+        instructions::funds::handle_fund_skr_reserve(ctx, amount)
+    }
+
+    pub fn withdraw_skr_reserve<'info>(
+        ctx: Context<'info, WithdrawToken<'info>>,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::funds::handle_withdraw_skr_reserve(ctx, amount)
     }
 
     pub fn recover_legacy_vault(ctx: Context<RecoverLegacyVault>, plan_id: u16) -> Result<()> {

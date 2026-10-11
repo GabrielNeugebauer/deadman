@@ -654,6 +654,286 @@ void main() {
       expect(rpc.sent, isEmpty);
     });
   });
+
+  group('SKR fee reserve', () {
+    test('values the treasury SKR share at the SKR price, else at the '
+        "payout's value", () {
+      // 900 of 1000 SKR units to the treasury at 2 lamports each.
+      expect(
+        skrShareLamports(
+          fee: 1000,
+          burnBps: 1000,
+          gross: 1000000000,
+          feeBpsSkr: 150,
+          skrLamportsPerUnit: 2,
+          assetLamportsPerUnit: 1,
+        ),
+        1800,
+      );
+      // 1.35% (1.5% minus the 10% burned) of 1 SOL.
+      expect(
+        skrShareLamports(
+          fee: 1000,
+          burnBps: 1000,
+          gross: 1000000000,
+          feeBpsSkr: 150,
+          assetLamportsPerUnit: 1,
+        ),
+        13500000,
+      );
+      expect(
+        skrShareLamports(
+          fee: 1000,
+          burnBps: 1000,
+          gross: 1000000,
+          feeBpsSkr: 150,
+        ),
+        0,
+        reason: 'no price at all',
+      );
+    });
+
+    const share = (fee: 4000, burnBps: 1000, treasuryLamports: 13500);
+
+    test('a SOL payout paid in SKR gives the heir everything', () {
+      final d = decideSol(
+        rule(amount: 1000000),
+        SolFacts(
+          available: 5000000,
+          feeBps: 200,
+          beneficiaryLamports: 0,
+          beneficiaryRentMin: 890880,
+          treasuryLamports: 1000000000,
+          treasuryRentMin: 890880,
+          skrFee: share,
+        ),
+        canSkip: false,
+      );
+      expect(d.action, KeeperAction.execute);
+      expect(
+        d.reason,
+        'pays 1000000 lamports, fee 4000 SKR from the reserve (400 burned)',
+      );
+    });
+
+    test('the SKR share must cover the network fee', () {
+      final d = decideSol(
+        rule(amount: 1000000),
+        SolFacts(
+          available: 5000000,
+          feeBps: 200,
+          beneficiaryLamports: 0,
+          beneficiaryRentMin: 890880,
+          treasuryLamports: 1000000000,
+          treasuryRentMin: 890880,
+          skrFee: (fee: 4000, burnBps: 1000, treasuryLamports: 4999),
+        ),
+        canSkip: true,
+      );
+      expect(d.action, KeeperAction.wait);
+      expect(d.reason, contains('fee worth ~4999 lamports does not cover'));
+    });
+
+    test('a waived SOL fee never touches the reserve', () {
+      // The treasury is below rent, so the program folds the fee in and
+      // skips the SKR path.
+      final d = decideSol(
+        rule(amount: 900720),
+        SolFacts(
+          available: 5000000,
+          feeBps: 200,
+          beneficiaryLamports: 0,
+          beneficiaryRentMin: 890880,
+          treasuryLamports: 0,
+          treasuryRentMin: 890880,
+          skrFee: share,
+        ),
+        canSkip: false,
+      );
+      expect(d.reason, startsWith('pays 900720 lamports, fee 0:'));
+    });
+
+    test('a token payout paid in SKR', () {
+      final f = TokenFacts(
+        classicMint: true,
+        vaultBalance: 1000000,
+        feeBps: 200,
+        beneficiaryAta: AtaStatus.usable,
+        treasuryAta: AtaStatus.usable,
+        ataRent: 2039280,
+        skrFee: share,
+      );
+      final d = decideToken(rule(mint: mint), treasury, f, canSkip: false);
+      expect(d.action, KeeperAction.execute);
+      expect(
+        d.reason,
+        'pays 1000000, fee 4000 SKR from the reserve (400 burned) '
+        '(~13500 lamports) covers 5000 lamports',
+      );
+      expect(d.treasuryFee, isTrue, reason: 'the program may fall back');
+    });
+
+    group('Keeper.decide reads the oracles', () {
+      const skr = 'Skr1111111111111111111111111111111111111111';
+      const fees = FeeSchedule(
+        treasury: '7ZQi6r2ZbKGCDFqKpvVjwMBVHzH2bqoqXuRnDKxDtjXY',
+        feeBpsPublic: 200,
+        feeBpsPrivate: 200,
+        skrMint: skr,
+        feeBpsSkr: 150,
+        skrBurnBps: 1000,
+      );
+      final owner = key(30);
+      final vault = vaultPda(owner, 0).address;
+      late FakeRpc rpc;
+      late Keeper keeper;
+      late int now;
+
+      VaultState plan({String? ruleMint, int reserve = 1000000000}) =>
+          decodeVault(
+            vaultBytes(
+              owner: owner,
+              guard: key(31),
+              skrFeeReserve: reserve,
+              skrReserveMint: skr,
+              rules: [
+                RuleState(
+                  beneficiary: heir,
+                  rail: Rail.solana,
+                  afterSecs: 90000,
+                  mode: AmountMode.fixed,
+                  amount: 1000000000,
+                  mint: ruleMint,
+                  executedAt: 0,
+                  paid: 0,
+                ),
+              ],
+            ),
+            address: vault,
+            lamports: 3000000000,
+            rentExemptMinimum: 2000000,
+          );
+
+      void tokenAccount(String holder, String m, int amount) =>
+          rpc.accounts[ataAddress(holder, m)] = FakeAccount(
+            tokenProgramId,
+            tokenAccountBytes(mint: m, owner: holder, amount: amount)
+              ..[108] = 1,
+          );
+
+      void price(String feedId, int price, {int age = 10}) =>
+          rpc.accounts[pythPriceAccount(feedId)] = FakeAccount(
+            pythReceiverId,
+            priceUpdateBytes(
+              feedId: feedId,
+              price: price,
+              expo: -8,
+              publishTime: now - age,
+              conf: price ~/ 1000,
+            ),
+          );
+
+      setUp(() async {
+        now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        rpc = await FakeRpc.start();
+        final sol = rpc.client();
+        keeper = Keeper(
+          sol,
+          DeadmanClient.withKora(client: sol),
+          await Ed25519HDKeyPair.random(),
+        );
+        rpc.accounts
+          ..[heir] = const FakeAccount(systemProgramId, [], lamports: 5000000)
+          ..[fees.treasury] = const FakeAccount(
+            systemProgramId,
+            [],
+            lamports: 5000000,
+          )
+          ..[skr] = FakeAccount(tokenProgramId, mintBytes(6))
+          ..[mint] = FakeAccount(tokenProgramId, mintBytes(6));
+        for (final (m, feedId) in [
+          (nativeMint, PythFeedIds.solUsd),
+          (skr, PythFeedIds.skrUsd),
+        ]) {
+          rpc.accounts[priceFeedPda(m).address] = FakeAccount(
+            AppConfig.programId,
+            priceFeedBytes(mint: m, feedId: feedId, maxAgeSecs: 600),
+          );
+        }
+        // SOL $150, SKR $0.03: 1 SOL = 5000 SKR, so 1.5% of 1 SOL is 75 SKR.
+        price(PythFeedIds.solUsd, 15000000000);
+        price(PythFeedIds.skrUsd, 3000000);
+        tokenAccount(vault, skr, 1000000000);
+        tokenAccount(fees.treasury, skr, 0);
+      });
+
+      tearDown(() => rpc.close());
+
+      test(
+        'a SOL tier pays its fee in SKR and passes the 8 accounts',
+        () async {
+          final d = await keeper.decide(plan(), 0, fees, now);
+          expect(d.action, KeeperAction.execute);
+          expect(
+            d.reason,
+            'pays 1000000000 lamports, fee 75000000 SKR from the reserve '
+            '(7500000 burned)',
+          );
+          expect(d.skrFeeAccounts, hasLength(8));
+          expect(
+            d.skrFeeAccounts.map((a) => a.pubKey.toBase58()).toList(),
+            skrFeeAccounts(
+              vault: vault,
+              assetMint: null,
+              skrMint: skr,
+              treasury: fees.treasury,
+              assetPriceAccount: pythPriceAccount(PythFeedIds.solUsd),
+              skrPriceAccount: pythPriceAccount(PythFeedIds.skrUsd),
+            ).map((a) => a.pubKey.toBase58()).toList(),
+          );
+        },
+      );
+
+      test('a stale price falls back to the asset fee, with the accounts '
+          'still passed', () async {
+        price(PythFeedIds.skrUsd, 3000000, age: 601);
+        final d = await keeper.decide(plan(), 0, fees, now);
+        expect(d.action, KeeperAction.execute);
+        expect(d.reason, 'pays 980000000 lamports, fee 20000000');
+        expect(d.skrFeeAccounts, hasLength(8));
+      });
+
+      test('a reserve that cannot cover the fee falls back', () async {
+        final d = await keeper.decide(plan(reserve: 74999999), 0, fees, now);
+        expect(d.reason, 'pays 980000000 lamports, fee 20000000');
+        expect(d.skrFeeAccounts, hasLength(8));
+      });
+
+      test('an SKR tier pays in kind, never from the reserve', () async {
+        tokenAccount(heir, skr, 0);
+        final v = plan(ruleMint: skr);
+        expect(
+          (await keeper.decide(v, 0, fees, now)).reason,
+          'vault holds none of the mint; not skippable',
+          reason: 'the whole balance is the reserve',
+        );
+        // The reserve is not tier funds: the tier gets the other 500 SKR.
+        tokenAccount(vault, skr, 1500000000);
+        final d = await keeper.decide(v, 0, fees, now);
+        expect(d.skrFeeAccounts, isEmpty);
+        expect(
+          d.reason,
+          startsWith('pays 492500000, fee 7500000 (750000 burned)'),
+        );
+      });
+
+      test('a plan without a reserve passes nothing', () async {
+        final d = await keeper.decide(plan(reserve: 0), 0, fees, now);
+        expect(d.skrFeeAccounts, isEmpty);
+        expect(d.reason, 'pays 980000000 lamports, fee 20000000');
+      });
+    });
+  });
 }
 
 /// Captures what the keeper prints.

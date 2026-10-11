@@ -32,11 +32,20 @@ abstract final class Disc {
   static const setConfig = [108, 158, 154, 175, 212, 98, 52, 66];
   static const proposeAdmin = [121, 214, 199, 212, 87, 39, 117, 234];
   static const acceptAdmin = [112, 42, 45, 90, 116, 181, 13, 170];
+  static const fundSkrReserve = [147, 244, 156, 77, 169, 208, 230, 220];
+  static const withdrawSkrReserve = [142, 16, 23, 220, 111, 167, 150, 73];
+  static const setPriceFeed = [13, 15, 231, 129, 61, 7, 28, 122];
 
   static const configAccount = [155, 12, 170, 224, 30, 250, 204, 130];
   static const vaultAccount = [211, 8, 232, 43, 2, 152, 117, 119];
+  static const priceFeedAccount = [189, 103, 252, 23, 152, 35, 243, 156];
 
   static const feeBurnedEvent = [145, 91, 45, 171, 189, 224, 44, 218];
+  static const skrFeePaidEvent = [255, 149, 252, 158, 12, 54, 65, 163];
+
+  /// Pyth Solana Receiver `PriceUpdateV2`
+  /// (`sha256("account:PriceUpdateV2")[..8]`).
+  static const priceUpdateV2 = [34, 241, 35, 99, 157, 126, 244, 205];
 }
 
 /// `Vault::SPACE` (8 + `Vault::INIT_SPACE`). A Vault account of any other
@@ -68,6 +77,13 @@ abstract final class Limits {
   static const maxVestSecs = 20 * 366 * 86400;
   static const maxVestStartSkewSecs = 366 * 86400;
   static const minVestPeriodSecs = 60;
+
+  /// Highest `PriceFeed.max_age_secs` the admin may set.
+  static const maxPriceAgeSecs = 3600;
+
+  /// A price whose confidence interval is wider than this share of it is
+  /// unusable (`MAX_PRICE_CONF_BPS`).
+  static const maxPriceConfBps = 200;
 }
 
 const systemProgramId = SystemProgram.programId;
@@ -78,6 +94,29 @@ const tokenMetadataProgramId = 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s';
 
 /// All-zero key (`Pubkey::default()`).
 const defaultPubkey = '11111111111111111111111111111111';
+
+/// Wrapped SOL mint: the price registry keys SOL under it.
+const nativeMint = 'So11111111111111111111111111111111111111112';
+
+/// Pyth Solana Receiver, owner of every `PriceUpdateV2` account.
+const pythReceiverId = 'rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ';
+
+/// Pyth push oracle: canonical price accounts are its PDAs.
+const pythPushOracleId = 'pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT';
+
+/// Pyth price feed ids (hex), the same on every cluster.
+abstract final class PythFeedIds {
+  static const solUsd =
+      'ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d';
+  static const usdcUsd =
+      'eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a';
+  static const skrUsd =
+      '38846ec4d0dbe808091817f5c0d6ab8058e25422348ddf97db52b6c378a93bf9';
+  static const oreUsd =
+      '142b804c658e14ff60886783e46e5a51bdf398b4871d9d8f7c28aa1585cad504';
+  static const jitoSolUsd =
+      '67be9f519b95cf24338801051f9a808eff0a578ccb388db73b7f6fe1de019ffb';
+}
 
 typedef Pda = ({String address, int bump});
 
@@ -120,6 +159,33 @@ bool labelFits(String label) =>
     utf8.encode(label).length <= Limits.maxLabelBytes;
 
 Pda configPda() => findPda([utf8.encode('config')]);
+
+/// Price registry entry of [mint] (SOL: [nativeMint]): seeds
+/// `["price_feed", mint]`.
+Pda priceFeedPda(String mint) => findPda([
+  utf8.encode('price_feed'),
+  Ed25519HDPublicKey.fromBase58(mint).bytes,
+]);
+
+/// Canonical push-oracle price account of Pyth feed [feedId] (hex):
+/// seeds `[shard as u16 LE, feed id]` under [pythPushOracleId].
+String pythPriceAccount(String feedId, {int shard = 0}) => findPda([
+  (BorshWriter()..u16(shard)).toBytes(),
+  feedIdBytes(feedId),
+], programId: pythPushOracleId).address;
+
+/// The 32 bytes of a hex feed id (an optional `0x` prefix is ignored).
+List<int> feedIdBytes(String feedId) {
+  final hex = feedId.startsWith('0x') ? feedId.substring(2) : feedId;
+  if (hex.length != 64) throw FormatException('Bad feed id $feedId');
+  return [
+    for (var i = 0; i < 64; i += 2)
+      int.parse(hex.substring(i, i + 2), radix: 16),
+  ];
+}
+
+String _hex(List<int> bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 /// Token Metadata account of [mint]: seeds `["metadata", program, mint]`
 /// under the Token Metadata program.
@@ -233,6 +299,7 @@ class BorshReader {
   int u8() => _d.getUint8(_take(1));
   int u16() => _d.getUint16(_take(2), Endian.little);
   int u32() => _d.getUint32(_take(4), Endian.little);
+  int i32() => _d.getInt32(_take(4), Endian.little);
   int i64() => _int64(signed: true);
   int u64() => _int64(signed: false);
 
@@ -382,6 +449,32 @@ Uint8List encodeRecoverLegacyVault(int planId) =>
     (BorshWriter()
           ..bytes(Disc.recoverLegacyVault)
           ..u16(planId))
+        .toBytes();
+
+Uint8List encodeFundSkrReserve(int amount) =>
+    (BorshWriter()
+          ..bytes(Disc.fundSkrReserve)
+          ..u64(amount))
+        .toBytes();
+
+Uint8List encodeWithdrawSkrReserve(int amount) =>
+    (BorshWriter()
+          ..bytes(Disc.withdrawSkrReserve)
+          ..u64(amount))
+        .toBytes();
+
+Uint8List encodeSetPriceFeed({
+  required String mint,
+  required String feedId,
+  int shardId = 0,
+  required int maxAgeSecs,
+}) =>
+    (BorshWriter()
+          ..bytes(Disc.setPriceFeed)
+          ..pubkey(mint)
+          ..bytes(feedIdBytes(feedId))
+          ..u16(shardId)
+          ..u32(maxAgeSecs))
         .toBytes();
 
 /// Tiers `update_plan` keeps as history in front of the new rules: every
@@ -546,7 +639,9 @@ VaultState decodeVault(
   final label = r.string();
   r.u8(); // bump
   r.u8(); // stipend_paid
-  final vestPeriodSecs = r.i64(); // 55 reserved (zero) bytes follow.
+  final vestPeriodSecs = r.i64();
+  final skrFeeReserve = r.u64();
+  final skrReserveMint = r.pubkey(); // 15 reserved (zero) bytes follow.
   final rentReserve = rentPaid > rentExemptMinimum
       ? rentPaid
       : rentExemptMinimum;
@@ -576,7 +671,135 @@ VaultState decodeVault(
     rentPayer: rentPayer,
     rentPaid: rentPaid,
     vestPeriodSecs: vestPeriodSecs,
+    skrFeeReserve: skrFeeReserve,
+    skrReserveMint: skrReserveMint == defaultPubkey ? null : skrReserveMint,
   );
+}
+
+/// A `PriceFeed` registry entry: the Pyth feed pricing [mint] and the one
+/// price account payouts may read it from. [maxAgeSecs] 0 = disabled.
+typedef PriceFeedEntry = ({
+  String mint,
+  String feedId,
+  String priceAccount,
+  int maxAgeSecs,
+});
+
+/// `PriceFeed::SPACE`.
+const priceFeedAccountSize = 109;
+
+PriceFeedEntry decodePriceFeed(List<int> data) {
+  if (!hasDiscriminator(data, Disc.priceFeedAccount)) {
+    throw const FormatException('Not a PriceFeed account');
+  }
+  final r = BorshReader(data)..offset = 8;
+  final mint = r.pubkey();
+  if (data.length < priceFeedAccountSize) {
+    throw const FormatException('Account data too short');
+  }
+  final feedId = _hex(data.sublist(40, 72));
+  r.offset = 72;
+  return (
+    mint: mint,
+    feedId: feedId,
+    priceAccount: r.pubkey(),
+    maxAgeSecs: r.u32(),
+  );
+}
+
+/// The price message of a Pyth `PriceUpdateV2` account. [full] is
+/// `VerificationLevel::Full`; partially verified prices are unusable.
+typedef PythPrice = ({
+  String feedId,
+  int price,
+  int conf,
+  int expo,
+  int publishTime,
+  bool full,
+});
+
+/// Decodes a `PriceUpdateV2`: discriminator, write authority, verification
+/// level (0 = Partial with a signature count, 1 = Full), then the price
+/// message (feed id, price, conf, exponent, publish time, ...).
+PythPrice decodePriceUpdate(List<int> data) {
+  if (!hasDiscriminator(data, Disc.priceUpdateV2)) {
+    throw const FormatException('Not a PriceUpdateV2 account');
+  }
+  final r = BorshReader(data)..offset = 40;
+  final full = switch (r.u8()) {
+    0 => () {
+      r.u8(); // num_signatures
+      return false;
+    }(),
+    1 => true,
+    final v => throw FormatException('Bad verification level $v'),
+  };
+  final at = r.offset;
+  if (data.length < at + 60) {
+    throw const FormatException('Account data too short');
+  }
+  final feedId = _hex(data.sublist(at, at + 32));
+  r.offset = at + 32;
+  return (
+    feedId: feedId,
+    price: r.i64(),
+    conf: r.u64(),
+    expo: r.i32(),
+    publishTime: r.i64(),
+    full: full,
+  );
+}
+
+/// [p] as the program would use it under registry entry [feed] at [now]:
+/// (price, exponent), or null when it is not fully verified, of another
+/// feed, older than `max_age_secs` (0 = disabled), not positive, or with a
+/// confidence interval over [Limits.maxPriceConfBps] of the price (mirrors
+/// `PriceFeed::usable_price`; the caller checks the account owner).
+(int, int)? usablePrice(PriceFeedEntry feed, PythPrice p, int now) {
+  final tight =
+      BigInt.from(p.conf) * BigInt.from(Limits.bpsDenominator) <=
+      BigInt.from(p.price) * BigInt.from(Limits.maxPriceConfBps);
+  return p.full &&
+          p.feedId == feed.feedId &&
+          feed.maxAgeSecs > 0 &&
+          p.publishTime + feed.maxAgeSecs >= now &&
+          p.price > 0 &&
+          tight
+      ? (p.price, p.expo)
+      : null;
+}
+
+/// SKR base units worth [feeBps] of [gross] units of an asset, from both
+/// prices (price, exponent) and decimals, rounded up (mirrors the
+/// program's `skr_fee_quote`); null when it cannot be priced or does not
+/// fit a u64.
+int? skrFeeQuote({
+  required int gross,
+  required (int, int) asset,
+  required int assetDecimals,
+  required (int, int) skr,
+  required int skrDecimals,
+  required int feeBps,
+}) {
+  // The program works in checked u128: any step past it means no quote.
+  BigInt? u128(BigInt v) => v.bitLength > 128 ? null : v;
+  final scale = asset.$2 - skr.$2 + skrDecimals - assetDecimals;
+  final pow = u128(BigInt.from(10).pow(scale.abs()));
+  var num = u128(BigInt.from(gross) * BigInt.from(asset.$1));
+  num = num == null ? null : u128(num * BigInt.from(feeBps));
+  var den = u128(BigInt.from(Limits.bpsDenominator) * BigInt.from(skr.$1));
+  if (pow == null || num == null || den == null || den == BigInt.zero) {
+    return null;
+  }
+  if (scale >= 0) {
+    num = u128(num * pow);
+  } else {
+    den = u128(den * pow);
+  }
+  if (num == null || den == null) return null;
+  final fee = (num + den - BigInt.one) ~/ den;
+  // A u64 above Dart's int range cannot come out of a real reserve anyway.
+  return fee.bitLength > 63 ? null : fee.toInt();
 }
 
 class DeadmanConfig {
@@ -945,6 +1168,102 @@ List<Instruction> withdrawTokenIxs({
   ];
 }
 
+/// `fund_skr_reserve`: [amount] of the SKR [mint] from the owner's ATA into
+/// the vault's (created idempotently, [payer] default the owner, funds it).
+List<Instruction> fundSkrReserveIxs({
+  required String owner,
+  required int planId,
+  required String mint,
+  required int amount,
+  String? payer,
+}) {
+  final vault = vaultPda(owner, planId).address;
+  return [
+    createAtaIdempotentIx(payer: payer ?? owner, owner: vault, mint: mint),
+    deadmanIx([
+      _r(owner, signer: true),
+      _w(vault),
+      _r(configPda().address),
+      _r(mint),
+      _w(ataAddress(vault, mint)),
+      _w(ataAddress(owner, mint)),
+      _r(tokenProgramId),
+    ], encodeFundSkrReserve(amount)),
+  ];
+}
+
+/// `withdraw_skr_reserve` (the accounts of `withdraw_token`), after
+/// recreating the owner's ATA if it was closed ([payer], default the
+/// owner, funds it). [mint] is `Vault.skr_reserve_mint`.
+List<Instruction> withdrawSkrReserveIxs({
+  required String owner,
+  required int planId,
+  required String mint,
+  required int amount,
+  String? payer,
+}) {
+  final vault = vaultPda(owner, planId).address;
+  return [
+    createAtaIdempotentIx(payer: payer ?? owner, owner: owner, mint: mint),
+    deadmanIx([
+      _w(owner, signer: true),
+      _w(vault),
+      _r(mint),
+      _w(ataAddress(vault, mint)),
+      _w(ataAddress(owner, mint)),
+      _r(tokenProgramId),
+    ], encodeWithdrawSkrReserve(amount)),
+  ];
+}
+
+/// `set_price_feed` (admin): registers Pyth feed [feedId] for [mint] (SOL:
+/// [nativeMint]); the program derives the price account from [shardId].
+Instruction setPriceFeedIx({
+  required String admin,
+  required String mint,
+  required String feedId,
+  int shardId = 0,
+  required int maxAgeSecs,
+}) => deadmanIx(
+  [
+    _w(admin, signer: true),
+    _r(configPda().address),
+    _w(priceFeedPda(mint).address),
+    _r(systemProgramId),
+  ],
+  encodeSetPriceFeed(
+    mint: mint,
+    feedId: feedId,
+    shardId: shardId,
+    maxAgeSecs: maxAgeSecs,
+  ),
+);
+
+/// The remaining accounts a payout of [assetMint] (null = SOL) passes when
+/// [vault] holds an SKR fee reserve, in the program's order: the asset's
+/// PriceFeed and its price account, SKR's PriceFeed and its price account,
+/// the vault's SKR ATA, the SKR mint and the treasury's SKR ATA (both
+/// writable) and the Token program. A price account is null when its mint
+/// has no PriceFeed yet: the program then reads no price (any account
+/// fills the slot) and the fee is paid in the asset.
+List<AccountMeta> skrFeeAccounts({
+  required String vault,
+  required String? assetMint,
+  required String skrMint,
+  required String treasury,
+  required String? assetPriceAccount,
+  required String? skrPriceAccount,
+}) => [
+  _r(priceFeedPda(assetMint ?? nativeMint).address),
+  _r(assetPriceAccount ?? systemProgramId),
+  _r(priceFeedPda(skrMint).address),
+  _r(skrPriceAccount ?? systemProgramId),
+  _w(ataAddress(vault, skrMint)),
+  _w(skrMint),
+  _w(ataAddress(treasury, skrMint)),
+  _r(tokenProgramId),
+];
+
 /// `execute_sol_rule` or, for a token rule, idempotent creates of the
 /// treasury's (when [treasuryFee]) and the beneficiary's ATAs (paid by
 /// [payer], default [executor]; the program no longer creates either)
@@ -958,6 +1277,9 @@ List<Instruction> withdrawTokenIxs({
 ///
 /// Token rules use classic SPL Token mints only; the program rejects any
 /// other mint when the plan is created or updated.
+///
+/// [skrFee] ([skrFeeAccounts]) is required when the plan holds an SKR fee
+/// reserve and the payout charges a fee and is not in SKR.
 List<Instruction> executeRuleIxs({
   required String executor,
   required String vaultOwner,
@@ -967,6 +1289,7 @@ List<Instruction> executeRuleIxs({
   required String treasury,
   String? payer,
   bool treasuryFee = true,
+  List<AccountMeta> skrFee = const [],
 }) => _payoutIxs(
   executor: executor,
   vaultOwner: vaultOwner,
@@ -975,6 +1298,7 @@ List<Instruction> executeRuleIxs({
   treasury: treasury,
   payer: payer,
   treasuryFee: treasuryFee,
+  skrFee: skrFee,
   data: encodeExecuteRule(index, token: rule.mint != null),
 );
 
@@ -990,6 +1314,7 @@ List<Instruction> releaseVestedIxs({
   required String treasury,
   String? payer,
   bool treasuryFee = true,
+  List<AccountMeta> skrFee = const [],
 }) => _payoutIxs(
   executor: executor,
   vaultOwner: vaultOwner,
@@ -998,11 +1323,13 @@ List<Instruction> releaseVestedIxs({
   treasury: treasury,
   payer: payer,
   treasuryFee: treasuryFee,
+  skrFee: skrFee,
   data: encodeReleaseVested(index, token: rule.mint != null),
 );
 
 /// [payer] (default: [executor]) funds any missing ATA. The mint is
 /// writable so the burned share of an SKR fee can leave its supply.
+/// [skrFee] follows the named accounts as remaining accounts.
 List<Instruction> _payoutIxs({
   required String executor,
   required String vaultOwner,
@@ -1011,6 +1338,7 @@ List<Instruction> _payoutIxs({
   required String treasury,
   required String? payer,
   required bool treasuryFee,
+  required List<AccountMeta> skrFee,
   required List<int> data,
 }) {
   final vault = vaultPda(vaultOwner, planId).address;
@@ -1023,6 +1351,7 @@ List<Instruction> _payoutIxs({
         _r(configPda().address),
         _w(rule.beneficiary),
         _w(treasury),
+        ...skrFee,
       ], data),
     ];
   }
@@ -1045,6 +1374,7 @@ List<Instruction> _payoutIxs({
       _w(ataAddress(rule.beneficiary, mint)),
       treasuryFee ? _w(ataAddress(treasury, mint)) : _r(AppConfig.programId),
       _r(tokenProgramId),
+      ...skrFee,
     ], data),
   ];
 }

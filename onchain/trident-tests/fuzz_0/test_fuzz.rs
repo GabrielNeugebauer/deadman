@@ -23,6 +23,11 @@
 //! - INV-STIPEND: the gas stipend is paid at most once per rule and never
 //!   out of SOL owed to vesting beneficiaries or skipped tiers.
 //! - INV-LOCK: no withdrawal, policy change, revocation or close while locked.
+//! - INV-SKR: the SKR fee reserve is always backed by the vault's SKR
+//!   account, moves only by funding, withdrawal or a SOL payout's SKR fee,
+//!   is never paid to tiers or withdrawn as tier funds, and blocks closing.
+//!   A SOL payout that pays its fee in SKR pays the beneficiary in full and
+//!   burns exactly `skr_burn_bps` of that fee.
 //!
 //! Set `FUZZ_STIPEND_LIVENESS=1` to also require that an eligible rule gets
 //! its stipend (ON-L1, fixed).
@@ -69,6 +74,13 @@ const PLANS: usize = 3;
 const BENS: usize = 4;
 const TOKEN_PROGRAM: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ADMIN: Pubkey = Pubkey::new_from_array([7u8; 32]);
+const NATIVE_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
+const PYTH_RECEIVER: Pubkey = pubkey!("rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ");
+const PUSH_ORACLE: Pubkey = pubkey!("pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT");
+const PRICE_UPDATE_DISC: [u8; 8] = [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
+const SOL_FEED: &str = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
+const SKR_FEED: &str = "38846ec4d0dbe808091817f5c0d6ab8058e25422348ddf97db52b6c378a93bf9";
+const MAX_PRICE_AGE: u32 = 120;
 
 #[derive(Clone, Copy, Debug)]
 enum Op {
@@ -85,6 +97,8 @@ enum Op {
     Withdraw(usize),
     Revoke(usize),
     Close(usize),
+    /// fund_skr_reserve / withdraw_skr_reserve
+    Reserve(usize),
 }
 
 #[derive(Clone)]
@@ -125,6 +139,10 @@ struct World {
     stipends: Vec<Vec<u8>>,
     lamport_keys: Vec<Pubkey>,
     token_keys: Vec<Pubkey>,
+    /// SKR worlds: PriceFeed PDAs and canonical price accounts of SOL and
+    /// SKR (in that order).
+    feeds: Vec<Pubkey>,
+    prices: Vec<Pubkey>,
 }
 
 #[derive(FuzzTestMethods)]
@@ -132,6 +150,10 @@ struct FuzzTest {
     trident: Trident,
     fuzz_accounts: AccountAddresses,
     w: World,
+}
+
+fn feed_id(hex: &str) -> [u8; 32] {
+    hex::decode(hex).unwrap().try_into().unwrap()
 }
 
 fn bytes<T: BorshSerialize>(t: &T) -> Vec<u8> {
@@ -292,6 +314,70 @@ impl FuzzTest {
             .0
     }
 
+    fn price_feed_pda(&self, mint: &Pubkey) -> Pubkey {
+        self.trident
+            .find_program_address(&[b"price_feed", mint.as_ref()], &program_id())
+            .0
+    }
+
+    /// Remaining accounts of a SOL payout's SKR fee path.
+    fn skr_fee_accounts(&self, p: usize) -> Vec<AccountMeta> {
+        vec![
+            AccountMeta::new_readonly(self.w.feeds[0], false),
+            AccountMeta::new_readonly(self.w.prices[0], false),
+            AccountMeta::new_readonly(self.w.feeds[1], false),
+            AccountMeta::new_readonly(self.w.prices[1], false),
+            AccountMeta::new(self.w.vault_atas[p], false),
+            AccountMeta::new(self.w.mint, false),
+            AccountMeta::new(self.w.treasury_ata, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+        ]
+    }
+
+    /// Writes a random `PriceUpdateV2` for SOL and SKR at their canonical
+    /// accounts: mostly usable, sometimes stale, partial, wide, negative or
+    /// of the wrong feed.
+    fn post_prices(&mut self) {
+        let now = self.trident.get_current_timestamp();
+        for (k, feed, base) in [(0, SOL_FEED, 15_000_000_000i64), (1, SKR_FEED, 2_000_000)] {
+            let kind = self.trident.random_from_range(0..16u8);
+            let mut price = self.trident.random_from_range(base / 4..base * 4);
+            if kind == 6 {
+                price = -price;
+            }
+            let conf = price.unsigned_abs() / if kind == 5 { 10 } else { 1_000 };
+            let age = if kind == 3 {
+                self.trident
+                    .random_from_range(i64::from(MAX_PRICE_AGE) + 1..10_000)
+            } else {
+                self.trident.random_from_range(0..60i64)
+            };
+            let id = feed_id(if kind == 7 { SOL_FEED } else { feed });
+            let id = if kind == 7 && k == 0 {
+                feed_id(SKR_FEED)
+            } else {
+                id
+            };
+            let mut d = PRICE_UPDATE_DISC.to_vec();
+            d.extend_from_slice(&[9u8; 32]);
+            if kind == 4 {
+                d.extend_from_slice(&[0, 3]);
+            } else {
+                d.push(1);
+            }
+            d.extend_from_slice(&id);
+            d.extend_from_slice(&price.to_le_bytes());
+            d.extend_from_slice(&conf.to_le_bytes());
+            d.extend_from_slice(&(-8i32).to_le_bytes());
+            d.extend_from_slice(&(now - age).to_le_bytes());
+            d.resize(134, 0);
+            let mut acc = AccountSharedData::new(self.rent_min(134), 134, &PYTH_RECEIVER);
+            acc.set_data_from_slice(&d);
+            let addr = self.w.prices[k];
+            self.trident.set_account_custom(&addr, &acc);
+        }
+    }
+
     /// Plan creation and edits take the token mint in the remaining accounts.
     fn mint_meta(&self) -> Vec<AccountMeta> {
         vec![AccountMeta::new_readonly(self.w.mint, false)]
@@ -423,8 +509,8 @@ impl FuzzTest {
         );
         if burned > 0 {
             inv!(
-                self.w.skr && matches!(op, Op::Pay { token: true, .. }),
-                "INV-FEE {label} burned tokens outside an SKR payout"
+                self.w.skr && matches!(op, Op::Pay { .. }),
+                "INV-FEE {label} burned tokens outside a payout"
             );
         }
 
@@ -437,9 +523,23 @@ impl FuzzTest {
                     "INV-RENT vault {p} below rent_paid after {label}"
                 );
             }
+            if let Some(va) = va {
+                let vt = a.tokens[self.tok_idx(&self.w.vault_atas[p])];
+                inv!(
+                    vt >= va.v.skr_fee_reserve,
+                    "INV-SKR plan {p} reserve {} above its SKR balance {vt} after {label}",
+                    va.v.skr_fee_reserve
+                );
+            }
             let (Some(vb), Some(va)) = (vb, va) else {
                 continue;
             };
+            if vb.v.skr_fee_reserve != va.v.skr_fee_reserve {
+                inv!(
+                    matches!(op, Op::Reserve(q) | Op::Pay { plan: q, token: false, .. } if q == p),
+                    "INV-SKR plan {p} reserve moved by {label}"
+                );
+            }
             // INV-ONCE: paid or skipped history is never lost or rewritten,
             // except the target tier of a payout (a skipped tier being claimed).
             let target = match op {
@@ -544,7 +644,7 @@ impl FuzzTest {
                         .filter(|r| r.mint.is_some() && r.executed_at == 0 && r.skipped_at != 0)
                         .map(|r| r.reserved)
                         .sum();
-                    vest + reserved
+                    vest + reserved + v.skr_fee_reserve
                 };
                 if tok_after != tok_before && tok_before >= owed_tok(&vb.v) {
                     inv!(
@@ -575,6 +675,11 @@ impl FuzzTest {
                         .iter()
                         .any(|r| r.executed_at == 0 && r.skipped_at != 0 && r.reserved > 0),
                     "INV-RESERVE plan {p} closed with a pending skipped reserve"
+                );
+                inv_eq!(
+                    vb.v.skr_fee_reserve,
+                    0,
+                    "INV-SKR plan {p} closed with an SKR fee reserve"
                 );
                 if is_vesting(&vb.v) {
                     for i in 0..vb.v.rules.len() {
@@ -630,6 +735,28 @@ impl FuzzTest {
                             || r.executed_at != 0
                             || r.skipped_at != 0,
                         "INV-DEADLINE skip out of per-asset order"
+                    );
+                }
+            }
+            Op::Reserve(p) => {
+                inv!(self.w.skr, "INV-SKR {label} succeeded without an SKR mint");
+                let vb = b.vaults[p].as_ref().unwrap();
+                let va = a.vaults[p].as_ref().unwrap();
+                let moved = self.tdelta(b, a, &self.w.vault_atas[p]);
+                inv_eq!(
+                    va.v.skr_fee_reserve as i128 - vb.v.skr_fee_reserve as i128,
+                    moved,
+                    "INV-SKR {label}: reserve delta differs from the tokens moved"
+                );
+                inv_eq!(
+                    self.tdelta(b, a, &self.w.owner_ata),
+                    -moved,
+                    "INV-SKR {label}: owner leg differs"
+                );
+                if moved < 0 {
+                    inv!(
+                        now >= vb.v.locked_until,
+                        "INV-LOCK reserve withdrawn while locked"
                     );
                 }
             }
@@ -719,8 +846,27 @@ impl FuzzTest {
                 "INV-FEE {label}: token fee is not the configured rate"
             );
         }
+        // INV-SKR: only SOL payouts may pay their fee from the reserve.
+        let skr_fee = vb.v.skr_fee_reserve as i128 - va.v.skr_fee_reserve as i128;
+        inv!(skr_fee >= 0, "INV-SKR {label} grew the reserve");
+        if skr_fee > 0 {
+            inv!(!token, "INV-SKR token payout {label} spent the reserve");
+            inv_eq!(fee, 0, "INV-SKR {label} charged SOL on top of the SKR fee");
+            inv_eq!(
+                -self.tdelta(b, a, &self.w.vault_atas[p]),
+                skr_fee,
+                "INV-SKR {label}: vault SKR leg differs from the reserve spent"
+            );
+            inv_eq!(
+                self.tdelta(b, a, &self.w.treasury_ata) + burned,
+                skr_fee,
+                "INV-SKR {label}: treasury + burn differ from the SKR fee"
+            );
+        }
         let want_burn = if skr {
             (fee as u128) * cfg.skr_burn_bps as u128 / BPS
+        } else if skr_fee > 0 {
+            (skr_fee as u128) * cfg.skr_burn_bps as u128 / BPS
         } else {
             0
         };
@@ -949,6 +1095,36 @@ impl FuzzTest {
         if self.trident.random_bool() {
             self.set_config();
         }
+        if self.w.skr {
+            let mints = [NATIVE_MINT, self.w.mint];
+            self.w.feeds = mints.iter().map(|m| self.price_feed_pda(m)).collect();
+            self.w.lamport_keys.extend(self.w.feeds.clone());
+            for (mint, feed) in mints.into_iter().zip([SOL_FEED, SKR_FEED]) {
+                let id = feed_id(feed);
+                let price = self
+                    .trident
+                    .find_program_address(&[&0u16.to_le_bytes(), &id], &PUSH_ORACLE)
+                    .0;
+                self.w.prices.push(price);
+                let ix = SetPriceFeedInstruction::data(SetPriceFeedInstructionData::new(
+                    mint,
+                    id,
+                    0,
+                    MAX_PRICE_AGE,
+                ))
+                .accounts(SetPriceFeedInstructionAccounts::new(
+                    ADMIN,
+                    self.config_pda(),
+                    self.price_feed_pda(&mint),
+                ))
+                .instruction();
+                inv!(
+                    self.exec(&[ix], "set_price_feed", Op::Other),
+                    "set_price_feed failed"
+                );
+            }
+            self.post_prices();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1079,7 +1255,7 @@ impl FuzzTest {
         self.fund(p);
     }
 
-    #[flow(weight = 18)]
+    #[flow(weight = 14)]
     fn warp(&mut self) {
         let secs = match self.trident.random_from_range(0..5u8) {
             0 => self.trident.random_from_range(1..120i64),
@@ -1091,7 +1267,7 @@ impl FuzzTest {
         self.trident.forward_in_time(secs);
     }
 
-    #[flow(weight = 6)]
+    #[flow(weight = 5)]
     fn pulse(&mut self) {
         let p = self.pick_plan();
         let signer = if self.trident.random_bool() {
@@ -1123,17 +1299,30 @@ impl FuzzTest {
             ben,
             self.w.treasury,
         );
+        // SKR worlds usually pass the SKR fee accounts; without them a plan
+        // with a reserve cannot pay a SOL fee.
+        let extra = if self.w.skr && self.trident.random_from_range(0..8u8) != 0 {
+            // Prices go stale across warps; usually refresh them first.
+            if self.trident.random_bool() {
+                self.post_prices();
+            }
+            self.skr_fee_accounts(p)
+        } else {
+            Vec::new()
+        };
         let ix = if vesting {
             ReleaseVestedSolInstruction::data(ReleaseVestedSolInstructionData::new(i as u8))
                 .accounts(ReleaseVestedSolInstructionAccounts::new(
                     accs.0, accs.1, accs.2, accs.3, accs.4,
                 ))
+                .remaining_accounts(extra)
                 .instruction()
         } else {
             ExecuteSolRuleInstruction::data(ExecuteSolRuleInstructionData::new(i as u8))
                 .accounts(ExecuteSolRuleInstructionAccounts::new(
                     accs.0, accs.1, accs.2, accs.3, accs.4,
                 ))
+                .remaining_accounts(extra)
                 .instruction()
         };
         let label = if vesting {
@@ -1222,7 +1411,7 @@ impl FuzzTest {
         }
     }
 
-    #[flow(weight = 6)]
+    #[flow(weight = 5)]
     fn skip_rule(&mut self) {
         let p = self.pick_plan();
         let Some(vs) = self.vault_snap(p) else { return };
@@ -1273,7 +1462,7 @@ impl FuzzTest {
         self.exec(&[ix], "withdraw", Op::Withdraw(p));
     }
 
-    #[flow(weight = 6)]
+    #[flow(weight = 5)]
     fn update_plan(&mut self) {
         let p = self.pick_plan();
         let rules = self.random_rules();
@@ -1300,7 +1489,7 @@ impl FuzzTest {
         self.exec(&[ix], "update_plan", Op::UpdatePlan(p));
     }
 
-    #[flow(weight = 4)]
+    #[flow(weight = 3)]
     fn lockdown_or_unlock(&mut self) {
         let p = self.pick_plan();
         let ix = match self.trident.random_from_range(0..4u8) {
@@ -1321,7 +1510,7 @@ impl FuzzTest {
         self.exec(&[ix], "lockdown_or_unlock", Op::Other);
     }
 
-    #[flow(weight = 4)]
+    #[flow(weight = 3)]
     fn revoke(&mut self) {
         let p = self.pick_plan();
         let ix = RevokeVestingInstruction::data(RevokeVestingInstructionData::new())
@@ -1347,6 +1536,53 @@ impl FuzzTest {
         if self.exec(&[ix], "close_vault", Op::Close(p)) {
             self.w.stipends[p].clear();
         }
+    }
+
+    #[flow(weight = 3)]
+    fn post_price(&mut self) {
+        if self.w.skr {
+            self.post_prices();
+        }
+    }
+
+    #[flow(weight = 4)]
+    fn fund_skr_reserve(&mut self) {
+        let p = self.pick_plan();
+        let amount = self.trident.random_from_range(0..5_000_000_000u64);
+        let ix = FundSkrReserveInstruction::data(FundSkrReserveInstructionData::new(amount))
+            .accounts(FundSkrReserveInstructionAccounts::new(
+                self.w.owner,
+                self.w.vaults[p],
+                self.config_pda(),
+                self.w.mint,
+                self.w.vault_atas[p],
+                self.w.owner_ata,
+            ))
+            .instruction();
+        self.exec(&[ix], "fund_skr_reserve", Op::Reserve(p));
+    }
+
+    #[flow(weight = 3)]
+    fn withdraw_skr_reserve(&mut self) {
+        let p = self.pick_plan();
+        let Some(vs) = self.vault_snap(p) else { return };
+        let amount = if self.trident.random_bool() {
+            vs.v.skr_fee_reserve
+        } else {
+            self.trident.random_from_range(0..5_000_000_000u64)
+        };
+        let ix =
+            WithdrawSkrReserveInstruction::data(WithdrawSkrReserveInstructionData::new(amount))
+                .accounts(WithdrawSkrReserveInstructionAccounts::new(
+                    self.w.owner,
+                    self.w.vaults[p],
+                    self.w.mint,
+                    self.w.vault_atas[p],
+                    self.w.owner_ata,
+                    TOKEN_PROGRAM,
+                ))
+                .instruction();
+        self.exec(&[ix], "withdraw_skr_reserve", Op::Reserve(p));
     }
 
     #[flow(weight = 3)]
@@ -1389,7 +1625,7 @@ impl FuzzTest {
 
     /// Two-step admin rotation: only the proposed key can accept. The
     /// fuzz admin re-proposes itself, so later admin flows keep working.
-    #[flow(weight = 3)]
+    #[flow(weight = 2)]
     fn rotate_admin(&mut self) {
         let config = self.config_pda();
         let ix = ProposeAdminInstruction::data(ProposeAdminInstructionData::new(ADMIN))

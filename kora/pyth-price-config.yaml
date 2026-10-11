@@ -1,0 +1,20 @@
+# Pyth price-pusher config (scripts/pyth_pusher_start.sh): the feeds Pyth
+# does not sponsor on Solana, pushed to their shard-0 push-oracle accounts so
+# Deadman's PriceFeed registry (tool/set_price_feed.dart) reads a fresh price
+# when a plan pays its release fee in SKR. SOL/USD and USDC/USD are
+# sponsored (Pyth keeps them fresh) and are not listed.
+#
+# The program accepts a price up to the registered max age (600 s by
+# default, tool/set_price_feed.dart): push at least every 120 s, sooner on a
+# 0.5% move. Both feeds go in one batch; each push is a few transactions
+# paid by kora/pyth-pusher-key.json.
+- alias: SKR/USD
+  id: 38846ec4d0dbe808091817f5c0d6ab8058e25422348ddf97db52b6c378a93bf9
+  time_difference: 120
+  price_deviation: 0.5
+  confidence_ratio: 50
+- alias: ORE/USD
+  id: 142b804c658e14ff60886783e46e5a51bdf398b4871d9d8f7c28aa1585cad504
+  time_difference: 120
+  price_deviation: 0.5
+  confidence_ratio: 50

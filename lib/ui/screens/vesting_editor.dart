@@ -12,11 +12,13 @@ import '../../state/plan_draft.dart';
 import '../../state/plan_math.dart';
 import '../../state/protocol_fees.dart';
 import '../../state/providers.dart';
+import '../../state/skr_reserve.dart';
 import '../../state/vesting.dart';
 import '../format.dart' show installmentDate;
 import '../widgets/brand/brand.dart';
 import '../widgets/editor/fund_asset_card.dart';
 import '../widgets/editor/plan_steps.dart';
+import '../widgets/editor/skr_reserve_card.dart';
 import '../widgets/feedback.dart';
 import '../widgets/vesting_progress.dart';
 import 'plan_editor/editor_providers.dart';
@@ -58,6 +60,14 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   int _step = 0;
   bool _check = false;
   bool _checkFund = false;
+
+  /// "Pay fees in $SKR": the reserve goes in with the plan.
+  bool _skrFees = false;
+  final _skrCtrl = TextEditingController();
+  final _skrKey = GlobalKey();
+
+  /// Suggested reserve for the current deposits, as of the last build.
+  AsyncValue<int?> _skrSuggested = const AsyncData(null);
   bool _ack = false;
   bool _ackLocked = false;
   bool _ackError = false;
@@ -67,6 +77,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   @override
   void dispose() {
     _label.dispose();
+    _skrCtrl.dispose();
     for (final c in _deposits.values) {
       c.dispose();
     }
@@ -256,6 +267,30 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
     });
   }
 
+  /// The SKR option is offered for schedules whose fee a reserve can pay.
+  bool _skrOffered(FeeInfo fee) {
+    final fees = fee.fees;
+    return fees?.skrMint != null &&
+        _schedules.any((s) => skrReserveCovers(fees!, s.mint));
+  }
+
+  /// SKR going into the reserve: 0 when the option is off, null when the
+  /// typed amount is unreadable or no suggestion is known yet.
+  int? _skrReserve(FeeInfo fee) => _skrFees && _skrOffered(fee)
+      ? chosenSkrReserve(_skrCtrl.text, _skrSuggested.value, fee.fees!.skrMint!)
+      : 0;
+
+  String? _skrError(FeeInfo fee) {
+    if (!_skrFees || !_skrOffered(fee)) return null;
+    final skr = fee.fees!.skrMint!;
+    return skrReserveError(
+      amount: _skrReserve(fee) ?? (_skrCtrl.text.trim().isEmpty ? 0 : null),
+      wallet: ref.read(walletTokenProvider(skr)).value,
+      skrMint: skr,
+      alsoSpent: _assets.contains(skr) ? _depositOf(skr) ?? 0 : 0,
+    );
+  }
+
   void _next(FeeInfo fee, int reserve) {
     switch (_step) {
       case 0:
@@ -281,6 +316,11 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         if (bad.isNotEmpty) {
           setState(() => _checkFund = true);
           _reveal(_depositKeys[bad.first]!);
+          return;
+        }
+        if (_skrError(fee) != null) {
+          setState(() => _checkFund = true);
+          _reveal(_skrKey);
           return;
         }
         _goTo(2);
@@ -320,6 +360,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
       return;
     }
     final deposits = {for (final m in _assets) m: _depositOf(m) ?? 0};
+    final skrReserve = _skrReserve(fee) ?? 0;
     setState(() => _busy = true);
     var unguarded = const <VaultState>[];
     final ok = await runGuarded(
@@ -338,6 +379,7 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
               for (final e in deposits.entries)
                 if (e.key != null && e.value > 0) e.key!: e.value,
             },
+            skrReserve: skrReserve,
           ),
     );
     if (!mounted) return;
@@ -371,6 +413,11 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
   Widget build(BuildContext context) {
     final fee = watchFeeInfo(ref);
     final reserve = watchFeeReserve(ref);
+    _skrSuggested = _skrFees && _skrOffered(fee)
+        ? watchSkrSuggestion(ref, fee.fees, {
+            for (final m in _assets) m: _depositOf(m) ?? 0,
+          })
+        : const AsyncData(null);
     return StepScaffold(
       title: 'New vesting plan',
       steps: _steps,
@@ -603,7 +650,27 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
         _fundCard(mint, totals[mint] ?? 0, fee, reserve),
         const SizedBox(height: DMSpace.md),
       ],
+      if (_skrOffered(fee)) _skrCard(fee),
     ];
+  }
+
+  Widget _skrCard(FeeInfo fee) {
+    final skr = fee.fees!.skrMint!;
+    return SkrReserveCard(
+      key: _skrKey,
+      fees: fee.fees!,
+      noun: 'release',
+      on: _skrFees,
+      onToggle: (v) => setState(() => _skrFees = v),
+      controller: _skrCtrl,
+      onChanged: () => setState(() {}),
+      suggested: _skrSuggested,
+      wallet: ref.watch(walletTokenProvider(skr)),
+      errorText:
+          _checkFund || (_skrReserve(fee) == null && _skrCtrl.text.isNotEmpty)
+          ? _skrError(fee)
+          : null,
+    );
   }
 
   Widget _fundCard(String? mint, int total, FeeInfo fee, int reserve) {
@@ -658,9 +725,12 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
     final startAt = _startAt(now);
     final start = startText(startAt, now);
     final solMode = ref.watch(feeModeProvider) == FeeMode.sol;
+    final skrReserve = _skrReserve(fee) ?? 0;
     final deposits = [
       for (final m in _assets)
         if ((_depositOf(m) ?? 0) > 0) moneyText(_depositOf(m)!, m),
+      if (skrReserve > 0)
+        '${moneyText(skrReserve, fee.fees!.skrMint)} fee reserve',
     ];
     final danger = _hasDanger(fee);
     return [
@@ -747,6 +817,14 @@ class _VestingEditorPageState extends ConsumerState<VestingEditorPage> {
                 ? 'fee loading…'
                 : releaseFeeTerms(fee.fees!, 'release'),
           ),
+          if (skrReserve > 0)
+            CostRow(
+              'Fees in SKR',
+              'The ${moneyText(skrReserve, fee.fees!.skrMint)} reserve pays '
+                  '${percentText(fee.fees!.feeBpsSkr / 10000)} of each release '
+                  "in SKR, so releases arrive whole. When it can't, a release "
+                  'pays the normal fee instead.',
+            ),
           CostRow(
             'Network & setup',
             solMode

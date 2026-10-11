@@ -208,6 +208,21 @@ Future<void> withdrawFromPlan(
   );
 }
 
+/// [held] (mint -> base units) with the plan's SKR fee reserve counted:
+/// what closing the plan returns.
+Map<String, int> withFeeReserve(VaultState vault, Map<String, int> held) {
+  final mint = vault.skrReserveMint;
+  if (mint == null || vault.skrFeeReserve == 0) return held;
+  return {...held, mint: held[mint] ?? vault.skrFeeReserve};
+}
+
+/// [held] (mint -> base units) without the plan's SKR fee reserve: what
+/// its tiers and schedules can pay out.
+Map<String, int> tierHoldings(VaultState vault, Map<String, int> held) => {
+  for (final MapEntry(:key, :value) in held.entries)
+    key: vault.tierFunds(key, value),
+};
+
 /// "0.500 SOL · 250 USDC · 1200 SKR": what a plan holds, SOL first, empty
 /// assets left out; [tokens] maps mint -> base units.
 String holdingsText(VaultState vault, Map<String, int> tokens) => [

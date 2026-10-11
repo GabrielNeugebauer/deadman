@@ -14,12 +14,14 @@ import '../../state/plan_draft.dart';
 import '../../state/plan_math.dart';
 import '../../state/protocol_fees.dart';
 import '../../state/providers.dart';
+import '../../state/skr_reserve.dart';
 import '../../state/vesting.dart' show isAddress;
 import '../format.dart';
 import '../rules_format.dart';
 import '../widgets/brand/brand.dart';
 import '../widgets/editor/fund_asset_card.dart';
 import '../widgets/editor/plan_steps.dart';
+import '../widgets/editor/skr_reserve_card.dart';
 import '../widgets/feedback.dart';
 import '../widgets/nft.dart';
 import 'plan_editor/editor_providers.dart';
@@ -60,6 +62,7 @@ class _Model {
     required this.payoutIssues,
     required this.fundAssets,
     required this.assetIssues,
+    this.skrSuggested = const AsyncData(null),
   });
 
   final FeeInfo fee;
@@ -74,6 +77,9 @@ class _Model {
   final List<List<PlanIssue>> payoutIssues;
   final List<String?> fundAssets;
   final Map<String?, List<PlanIssue>> assetIssues;
+
+  /// The SKR fee reserve suggested for the deposits (create only).
+  final AsyncValue<int?> skrSuggested;
 
   List<PlanIssue> get dangers => [
     for (final l in [...payoutIssues, ...assetIssues.values])
@@ -117,6 +123,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   final _ackKey = GlobalKey();
   final _advanced = ExpansibleController();
 
+  /// "Pay fees in $SKR": the reserve goes in with the plan.
+  bool _skrFees = false;
+  final _skrCtrl = TextEditingController();
+  final _skrKey = GlobalKey();
+
   bool _ack = false;
   bool _ackError = false;
   int _shake = 0;
@@ -144,6 +155,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
   void dispose() {
     _label.dispose();
     _guardian.dispose();
+    _skrCtrl.dispose();
     for (final c in _deposits.values) {
       c.dispose();
     }
@@ -373,6 +385,38 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     }
   }
 
+  /// The SKR option is offered when creating a plan with a payout whose
+  /// fee an SKR reserve can pay.
+  bool _skrOffered(FeeInfo fee) {
+    final fees = fee.fees;
+    return _creating &&
+        fees?.skrMint != null &&
+        _payouts.any((p) => skrReserveCovers(fees!, p.mint));
+  }
+
+  bool _skrChosen(_Model m) => _skrFees && _skrOffered(m.fee);
+
+  /// SKR going into the reserve: 0 when the option is off, null when the
+  /// typed amount is unreadable or no suggestion is known yet.
+  int? _skrReserve(_Model m) => _skrChosen(m)
+      ? chosenSkrReserve(
+          _skrCtrl.text,
+          m.skrSuggested.value,
+          m.fee.fees!.skrMint!,
+        )
+      : 0;
+
+  String? _skrError(_Model m) {
+    if (!_skrChosen(m)) return null;
+    final skr = m.fee.fees!.skrMint!;
+    return skrReserveError(
+      amount: _skrReserve(m) ?? (_skrCtrl.text.trim().isEmpty ? 0 : null),
+      wallet: ref.read(walletTokenProvider(skr)).value,
+      skrMint: skr,
+      alsoSpent: m.fundAssets.contains(skr) ? _depositOf(skr) ?? 0 : 0,
+    );
+  }
+
   _Model _model() {
     watchNftNames(ref, [
       for (final p in _payouts) p.mint,
@@ -420,6 +464,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
     ];
     return _Model(
       fee: fee,
+      skrSuggested: _skrFees && _skrOffered(fee)
+          ? watchSkrSuggestion(ref, fee.fees, {
+              for (final m in fundAssets) m: _depositOf(m) ?? 0,
+            })
+          : const AsyncData(null),
       reserve: reserve,
       stipend: stipend,
       preview: preview,
@@ -485,6 +534,11 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
           _depositFocus[bad.first]?.requestFocus();
           return;
         }
+        if (_skrError(m) != null) {
+          setState(() => _checkFund = true);
+          _reveal(_skrKey);
+          return;
+        }
         _goTo(_step + 1);
       case _Step.review:
         _save(m);
@@ -508,6 +562,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
         if (a != null && (_depositOf(a) ?? 0) > 0) a: _depositOf(a)!,
     };
     final lamports = m.fundAssets.contains(null) ? _depositOf(null) ?? 0 : 0;
+    final skrReserve = _skrReserve(m) ?? 0;
 
     setState(() => _busy = true);
     final actions = ref.read(actionsProvider);
@@ -522,6 +577,7 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
               skipGraceSecs: _grace,
               depositLamports: lamports,
               tokenDeposits: tokens,
+              skrReserve: skrReserve,
             )
           : await actions.updatePolicy(
               planId: _vault!.planId,
@@ -871,6 +927,10 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       _fundCard(m, mint),
       const SizedBox(height: DMSpace.md),
     ],
+    if (_skrOffered(m.fee)) ...[
+      _skrCard(m),
+      const SizedBox(height: DMSpace.md),
+    ],
     const SizedBox(height: DMSpace.xxs),
     Text(
       'You can add more later from the plan card. Payouts that are shares '
@@ -878,6 +938,27 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
       style: _note,
     ),
   ];
+
+  Widget _skrCard(_Model m) {
+    final skr = m.fee.fees!.skrMint!;
+    final amount = _skrReserve(m);
+    return SkrReserveCard(
+      key: _skrKey,
+      fees: m.fee.fees!,
+      on: _skrFees,
+      onToggle: (v) => setState(() {
+        _skrFees = v;
+        _dirty = true;
+      }),
+      controller: _skrCtrl,
+      onChanged: () => setState(() => _dirty = true),
+      suggested: m.skrSuggested,
+      wallet: ref.watch(walletTokenProvider(skr)),
+      errorText: _checkFund || (amount == null && _skrCtrl.text.isNotEmpty)
+          ? _skrError(m)
+          : null,
+    );
+  }
 
   Widget _fundCard(_Model m, String? mint) {
     final a = m.preview.assets.where((x) => x.mint == mint).firstOrNull;
@@ -972,9 +1053,12 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
         if (a.feeTotal != null && a.feeTotal! > 0)
           moneyText(a.feeTotal!, a.mint),
     ];
+    final skrReserve = _skrReserve(m) ?? 0;
     final deposits = [
       for (final a in m.fundAssets)
         if ((_depositOf(a) ?? 0) > 0) moneyText(_depositOf(a)!, a),
+      if (skrReserve > 0)
+        '${moneyText(skrReserve, fee.fees!.skrMint)} fee reserve',
     ];
     final dangers = m.dangers;
     return [
@@ -1063,6 +1147,14 @@ class _RulesEditorPageState extends ConsumerState<RulesEditorPage> {
                 : '${releaseFeeTerms(fee.fees!, 'payout')}'
                       '${feeSums.isEmpty ? '' : ' If every payout runs: ≈ ${feeSums.join(' · ')}.'}',
           ),
+          if (skrReserve > 0)
+            CostRow(
+              'Fees in SKR',
+              'The ${moneyText(skrReserve, fee.fees!.skrMint)} reserve pays '
+                  '${percentText(fee.fees!.feeBpsSkr / 10000)} of each payout '
+                  "in SKR, so payouts arrive whole. When it can't, a payout "
+                  'pays the normal fee instead.',
+            ),
           if (_creating) ...[
             CostRow(
               'Network & setup',

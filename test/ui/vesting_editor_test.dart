@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
+import 'package:deadman/state/prices.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/state/vesting.dart';
 import 'package:deadman/ui/screens/vesting_editor.dart';
@@ -11,6 +14,8 @@ import 'package:deadman/ui/widgets/vesting_progress.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
@@ -21,13 +26,15 @@ class _Created {
     this.revocable,
     this.lamports,
     this.tokens,
-    this.periodSecs,
-  );
+    this.periodSecs, [
+    this.skrReserve = 0,
+  ]);
   final List<VestingSpec> schedules;
   final bool revocable;
   final int lamports;
   final Map<String, int> tokens;
   final int periodSecs;
+  final int skrReserve;
 }
 
 class _FakeActions extends VaultActions {
@@ -45,6 +52,7 @@ class _FakeActions extends VaultActions {
     int periodSecs = 0,
     int depositLamports = 0,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
     created.add(
       _Created(
@@ -53,6 +61,7 @@ class _FakeActions extends VaultActions {
         depositLamports,
         tokenDeposits,
         periodSecs,
+        skrReserve,
       ),
     );
     return const [];
@@ -65,6 +74,7 @@ Future<List<_Created>> _pump(
   Size size = const Size(1200, 6000),
   double textScale = 1,
   ThemeData? theme,
+  FeeSchedule? fees,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -79,10 +89,29 @@ Future<List<_Created>> _pump(
         actionsProvider.overrideWith((ref) => _FakeActions(ref, created)),
         apiProvider.overrideWithValue(api ?? FakeApi(const [])),
         feesProvider.overrideWith(
-          (ref) async => FeeSchedule(
-            treasury: addr(9),
-            feeBpsPublic: 200,
-            feeBpsPrivate: 300,
+          (ref) async =>
+              fees ??
+              FeeSchedule(
+                treasury: addr(9),
+                feeBpsPublic: 200,
+                feeBpsPrivate: 300,
+              ),
+        ),
+        usdPricesServiceProvider.overrideWithValue(
+          UsdPrices(
+            client: MockClient(
+              (req) async => http.Response(
+                jsonEncode({
+                  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': {
+                    'usdPrice': 1,
+                  },
+                  'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3': {
+                    'usdPrice': 0.02,
+                  },
+                }),
+                req.url.host.contains('hermes') ? 401 : 200,
+              ),
+            ),
           ),
         ),
         walletBalanceProvider.overrideWith((ref) async => 5000000000),
@@ -158,6 +187,34 @@ Future<void> _schedule(
 void main() {
   const usdc = AppConfig.usdcMint;
   final heldUsdc = FakeApi(const [])..tokens['${addr(30)}:$usdc'] = 1;
+
+  testWidgets('pay fees in SKR: the reserve goes in with the plan', (
+    tester,
+  ) async {
+    final created = await _pump(
+      tester,
+      api: heldUsdc,
+      fees: FeeSchedule(
+        treasury: addr(9),
+        feeBpsPublic: 200,
+        feeBpsPrivate: 200,
+        skrMint: AppConfig.skrMint,
+        feeBpsSkr: 150,
+        skrBurnBps: 1000,
+      ),
+    );
+    await _schedule(tester, total: '100');
+    await _tap(tester, 'Done');
+    await _tap(tester, 'Next: fund the plan');
+    await _tap(tester, r'Pay fees in $SKR (1.5% instead of 2%)');
+    // 100 USD x 1.5% = 1.5 USD = 75 SKR, x 1.3 = 97.5 SKR.
+    expect(find.textContaining('Suggested: 97.5 SKR'), findsOneWidget);
+    expect(find.textContaining('Each release pays its fee in SKR'), findsOne);
+    await _tap(tester, 'Next: review');
+    expect(find.text('Fees in SKR'), findsOneWidget);
+    await _tap(tester, 'Create vesting plan');
+    expect(created.single.skrReserve, 97500000);
+  });
 
   testWidgets('USDC totals in USDC; deposit defaults to the total', (
     tester,

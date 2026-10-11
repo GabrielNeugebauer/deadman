@@ -1,7 +1,8 @@
 # Deadman SPONSOR node (Kora 2.0.5), port 8090, API key required.
 # Only tool/kora_gateway.dart (public :8080) holds the key; it forwards guard-key
 # `pulse` / `lockdown` and a beneficiary's own SOL claim (`execute_sol_rule` /
-# `release_vested_sol`, which move lamports out of the vault with no CPI).
+# `release_vested_sol`, which move lamports out of the vault; the only CPIs
+# are the SPL Token burn and transfer of a fee paid from an SKR reserve).
 # Free pricing: Kora pays the network fee.
 # The fee payer may not move SOL or tokens, create accounts or approve anything.
 # Schema: crates/lib/src/config.rs at tag v2.0.5.
@@ -51,11 +52,16 @@ allow_durable_transactions = false
 
 # Checked against every instruction, including CPIs found by simulation.
 # Kora cannot filter by instruction discriminator; the gateway does (pulse,
-# lockdown, SOL claims). This list is the second line: create_plan and token
-# claims fail here (System / Token CPI).
+# lockdown, SOL claims). This list is the second line: create_plan fails
+# here (System CPI). SPL Token is listed because a SOL claim from a plan
+# with an SKR fee reserve pays the fee in SKR: the vault burns and
+# transfers SKR by CPI. Top-level token instructions never reach Kora (the
+# gateway refuses them), and the fee payer policy below forbids Kora any
+# token role.
 allowed_programs = [
     "ACHVLMoLDM3YPpGbNST4cZW4Tf2jx6nzJGuusyLJHofL", # Deadman
     "ComputeBudget111111111111111111111111111111",  # Compute Budget
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token (SKR fee CPIs)
 ]
 # Kora refuses to start with an empty list. Only transferTransaction (disabled)
 # and getSupportedTokens read it; nothing is accepted as payment here.

@@ -111,6 +111,8 @@ class FeeModelCard extends ConsumerWidget {
         ? ', and ${percentText(fees.skrBurnBps / 10000)} of that fee is '
               'burned'
         : '';
-    return 'Payouts in SKR pay $rate on every rail$burn.';
+    return 'Payouts in SKR pay $rate on every rail$burn. Any other payout '
+        'can pay $rate in SKR too, from an SKR fee reserve kept in the '
+        'plan: its beneficiary then receives all of it.';
   }
 }

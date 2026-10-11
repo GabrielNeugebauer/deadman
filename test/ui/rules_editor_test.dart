@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:deadman/core/config.dart';
 import 'package:deadman/solana/deadman_api.dart';
 import 'package:deadman/state/actions.dart';
 import 'package:deadman/state/providers.dart';
 import 'package:deadman/state/plan_draft.dart';
+import 'package:deadman/state/prices.dart';
 import 'package:deadman/ui/screens/rules_editor.dart';
 import 'package:deadman/ui/theme.dart';
 import 'package:deadman/ui/widgets/brand/brand.dart';
@@ -10,6 +13,8 @@ import 'package:deadman/ui/widgets/editor/plan_steps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/fakes.dart';
@@ -17,11 +22,18 @@ import '../state/fakes.dart';
 const usdc = AppConfig.usdcMint;
 
 class _Sent {
-  _Sent(this.rules, this.lamports, this.tokens, this.skipGraceSecs);
+  _Sent(
+    this.rules,
+    this.lamports,
+    this.tokens,
+    this.skipGraceSecs, [
+    this.skrReserve = 0,
+  ]);
   final List<RuleSpec> rules;
   final int lamports;
   final Map<String, int> tokens;
   final int skipGraceSecs;
+  final int skrReserve;
 }
 
 class _FakeActions extends VaultActions {
@@ -37,8 +49,11 @@ class _FakeActions extends VaultActions {
     required int skipGraceSecs,
     required int depositLamports,
     Map<String, int> tokenDeposits = const {},
+    int skrReserve = 0,
   }) async {
-    sent.add(_Sent(rules, depositLamports, tokenDeposits, skipGraceSecs));
+    sent.add(
+      _Sent(rules, depositLamports, tokenDeposits, skipGraceSecs, skrReserve),
+    );
     return const [];
   }
 
@@ -53,6 +68,31 @@ class _FakeActions extends VaultActions {
   }) async => sent.add(_Sent(rules, 0, const {}, skipGraceSecs));
 }
 
+/// The program's SKR rate: 1.5% in SKR, 10% burned.
+final _skrFees = FeeSchedule(
+  treasury: addr(9),
+  feeBpsPublic: 200,
+  feeBpsPrivate: 200,
+  skrMint: AppConfig.skrMint,
+  feeBpsSkr: 150,
+  skrBurnBps: 1000,
+);
+
+/// Hermes refuses; Jupiter prices USDC at 1 and SKR at 0.02 USD.
+UsdPrices _fakePrices() => UsdPrices(
+  client: MockClient(
+    (req) async => req.url.host.contains('hermes')
+        ? http.Response('unauthorized', 401)
+        : http.Response(
+            jsonEncode({
+              'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': {'usdPrice': 1},
+              'SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3': {'usdPrice': 0.02},
+            }),
+            200,
+          ),
+  ),
+);
+
 Future<List<_Sent>> _pump(
   WidgetTester tester,
   VaultState? v, {
@@ -60,6 +100,7 @@ Future<List<_Sent>> _pump(
   Size size = const Size(1200, 6000),
   double textScale = 1,
   ThemeData? theme,
+  FeeSchedule? fees,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -76,12 +117,15 @@ Future<List<_Sent>> _pump(
         walletTokenProvider.overrideWith((ref, mint) async => 12000000),
         walletBalanceProvider.overrideWith((ref) async => 2000000000),
         feesProvider.overrideWith(
-          (ref) async => FeeSchedule(
-            treasury: addr(9),
-            feeBpsPublic: 200,
-            feeBpsPrivate: 300,
-          ),
+          (ref) async =>
+              fees ??
+              FeeSchedule(
+                treasury: addr(9),
+                feeBpsPublic: 200,
+                feeBpsPrivate: 300,
+              ),
         ),
+        usdPricesServiceProvider.overrideWithValue(_fakePrices()),
       ],
       child: MaterialApp(
         theme: theme,
@@ -214,6 +258,74 @@ void main() {
     expect(s.rules.single.mint, usdc);
     expect(s.tokens, {usdc: 1000000});
     expect(s.lamports, 0);
+  });
+
+  group('pay fees in SKR', () {
+    Future<List<_Sent>> toFund(WidgetTester tester) async {
+      final sent = await _pump(tester, null, fees: _skrFees);
+      await _usdcPayout(tester);
+      await _tap(tester, 'Done');
+      await _tap(tester, 'Next: fund the plan');
+      await tester.enterText(_field('Put in this plan'), '10');
+      await tester.pumpAndSettle();
+      return sent;
+    }
+
+    testWidgets('the reserve is sized from the deposit and sent with the '
+        'plan', (tester) async {
+      final sent = await toFund(tester);
+      final option = find.text(r'Pay fees in $SKR (1.5% instead of 2%)');
+      await _scrollTo(tester, option);
+      expect(find.text('SKR fee reserve'), findsNothing);
+      await tester.tap(option);
+      await tester.pumpAndSettle();
+      // 10 USD x 1.5% = 0.15 USD = 7.5 SKR, x 1.3 = 9.75 SKR.
+      expect(
+        find.textContaining('Suggested: 9.75 SKR, 1.5% of what goes into'),
+        findsOneWidget,
+      );
+      expect(find.text('In your wallet: 12 SKR'), findsOneWidget);
+      expect(find.textContaining('pays the normal 2%'), findsOneWidget);
+
+      await _tap(tester, 'Next: review');
+      expect(find.text('Fees in SKR'), findsOneWidget);
+      expect(find.textContaining('9.75 SKR fee reserve'), findsOneWidget);
+      await _tap(tester, 'Create plan');
+      expect(sent.single.skrReserve, 9750000);
+      expect(sent.single.tokens, {usdc: 10000000});
+    });
+
+    testWidgets('a typed amount over the wallet blocks Next', (tester) async {
+      final sent = await toFund(tester);
+      await _tap(tester, r'Pay fees in $SKR (1.5% instead of 2%)');
+      await tester.enterText(_field('SKR fee reserve'), '20');
+      await tester.pumpAndSettle();
+      await _tap(tester, 'Next: review');
+      expect(find.text('Your wallet holds 12 SKR.'), findsOneWidget);
+      expect(find.text('Create plan'), findsNothing);
+
+      await tester.enterText(_field('SKR fee reserve'), '5');
+      await tester.pumpAndSettle();
+      await _tap(tester, 'Next: review');
+      await _tap(tester, 'Create plan');
+      expect(sent.single.skrReserve, 5000000);
+    });
+
+    testWidgets('off by default', (tester) async {
+      final sent = await toFund(tester);
+      await _tap(tester, 'Next: review');
+      expect(find.text('Fees in SKR'), findsNothing);
+      await _tap(tester, 'Create plan');
+      expect(sent.single.skrReserve, 0);
+    });
+
+    testWidgets('not offered without an SKR rate', (tester) async {
+      await _pump(tester, null);
+      await _usdcPayout(tester);
+      await _tap(tester, 'Done');
+      await _tap(tester, 'Next: fund the plan');
+      expect(find.textContaining(r'Pay fees in $SKR'), findsNothing);
+    });
   });
 
   testWidgets('share and fixed keep their own values', (tester) async {

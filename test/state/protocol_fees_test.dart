@@ -73,11 +73,11 @@ void main() {
     test('from the on-chain schedule', () {
       expect(
         feeSummaryText(defaults),
-        '2% on release · 1.5% for SKR (10% burned) · withdrawals free',
+        '2% on release · 1.5% in SKR (10% burned) · withdrawals free',
       );
       expect(
         feeSummaryText(fees),
-        '2% (3% private rails) on release · 1.5% for SKR (10% burned) · '
+        '2% (3% private rails) on release · 1.5% in SKR (10% burned) · '
         'withdrawals free',
       );
     });
@@ -97,7 +97,7 @@ void main() {
       );
       expect(
         feeSummaryText(noBurn),
-        '2% on release · 1.5% for SKR · withdrawals free',
+        '2% on release · 1.5% in SKR · withdrawals free',
       );
       final noSkr = FeeSchedule(
         treasury: addr(9),
@@ -111,13 +111,15 @@ void main() {
     test('review terms', () {
       expect(
         releaseFeeTerms(defaults, 'payout'),
-        '2% of each payout, 1.5% for SKR (10% of it burned), taken when it '
-        'runs.',
+        '2% of each payout, taken when it runs. 1.5% when paid in SKR (10% '
+        'of it burned): SKR payouts pay it themselves, others from an SKR '
+        'fee reserve.',
       );
       expect(
         releaseFeeTerms(fees, 'release'),
-        '2% of each normal release, 3% of each private one, 1.5% for SKR '
-        '(10% of it burned), taken when it runs.',
+        '2% of each normal release, 3% of each private one, taken when it '
+        'runs. 1.5% when paid in SKR (10% of it burned): SKR releases pay it '
+        'themselves, others from an SKR fee reserve.',
       );
     });
   });

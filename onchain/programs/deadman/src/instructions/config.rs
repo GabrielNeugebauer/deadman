@@ -3,8 +3,8 @@ use anchor_lang::{prelude::*, system_program};
 use crate::{
     constants::*,
     error::DeadmanError,
-    events::{AdminChanged, AdminProposed},
-    state::{Config, ConfigV1},
+    events::{AdminChanged, AdminProposed, PriceFeedSet},
+    state::{Config, ConfigV1, PriceFeed},
 };
 
 /// The treasury must be able to receive lamports as a writable account:
@@ -223,6 +223,61 @@ pub fn handle_accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
     emit!(AdminChanged {
         old_admin,
         new_admin: config.admin,
+    });
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(mint: Pubkey)]
+pub struct SetPriceFeed<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = admin @ DeadmanError::Unauthorized
+    )]
+    pub config: Account<'info, Config>,
+    #[account(
+        init_if_needed,
+        payer = admin,
+        space = PriceFeed::SPACE,
+        seeds = [PRICE_FEED_SEED, mint.as_ref()],
+        bump
+    )]
+    pub price_feed: Account<'info, PriceFeed>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Registers or updates the Pyth feed that prices `mint` (SOL: the wrapped
+/// SOL mint) for SKR fee payments. The price account is the push oracle's
+/// `shard_id` account of `feed_id`, so payouts only ever read a canonical,
+/// continuously updated account. `max_age_secs` 0 disables the feed.
+pub fn handle_set_price_feed(
+    ctx: Context<SetPriceFeed>,
+    mint: Pubkey,
+    feed_id: [u8; 32],
+    shard_id: u16,
+    max_age_secs: u32,
+) -> Result<()> {
+    require!(
+        mint != Pubkey::default() && max_age_secs <= MAX_PRICE_AGE_SECS,
+        DeadmanError::InvalidConfig
+    );
+    let (price_account, _) =
+        Pubkey::find_program_address(&[&shard_id.to_le_bytes(), &feed_id], &PYTH_PUSH_ORACLE_ID);
+    ctx.accounts.price_feed.set_inner(PriceFeed {
+        mint,
+        feed_id,
+        price_account,
+        max_age_secs,
+        bump: ctx.bumps.price_feed,
+    });
+    emit!(PriceFeedSet {
+        mint,
+        feed_id,
+        price_account,
+        max_age_secs,
     });
     Ok(())
 }

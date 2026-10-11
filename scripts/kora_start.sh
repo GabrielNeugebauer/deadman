@@ -13,6 +13,8 @@
 # Needs kora/.env (KORA_SIGNER_PRIVATE_KEY, optional RPC_URL and
 # TEST_USDC_MINT; SPONSOR_API_KEY and PAYMASTER_API_KEY are generated on first
 # run), the `kora` binary (kora-cli 2.0.5), Dart and Docker for Redis.
+# When kora/pyth-pusher-key.json exists it also starts the Pyth price pusher
+# (scripts/pyth_pusher_start.sh; PYTH_HERMES_* settings from kora/.env).
 #
 # CLUSTER=mainnet-beta CONFIRM_MAINNET=yes scripts/kora_start.sh runs the
 # mainnet stack instead: kora/sponsor.mainnet.toml and ONE margin-priced
@@ -209,6 +211,23 @@ start_gateway() {
 }
 
 start_gateway
+
+# Pyth price pusher for the feeds Pyth does not sponsor (SKR/USD, ORE/USD),
+# once its key exists. Only the settings it needs cross over: not the Kora
+# signer key or the API keys sourced above.
+PUSHER_KEY="$KDIR/pyth-pusher-key.json"
+[[ "$CLUSTER" == "mainnet-beta" ]] && PUSHER_KEY="$KDIR/mainnet/pyth-pusher-key.json"
+if [[ -f "$PUSHER_KEY" ]]; then
+  env -i PATH="$PATH" HOME="$HOME" CLUSTER="$CLUSTER" \
+    CONFIRM_MAINNET="${CONFIRM_MAINNET:-}" RPC_URL="$RPC_URL" \
+    ${PYTH_HERMES_URL:+PYTH_HERMES_URL="$PYTH_HERMES_URL"} \
+    ${PYTH_HERMES_ACCESS_TOKEN:+PYTH_HERMES_ACCESS_TOKEN="$PYTH_HERMES_ACCESS_TOKEN"} \
+    ${PYTH_PUSHER_CU_PRICE:+PYTH_PUSHER_CU_PRICE="$PYTH_PUSHER_CU_PRICE"} \
+    "$ROOT/scripts/pyth_pusher_start.sh" ||
+    echo "warning: pyth-pusher not started; SKR fees fall back to the asset fee once SKR/USD goes stale" >&2
+else
+  echo "pyth-pusher skipped: no ${PUSHER_KEY#"$ROOT/"} (docs/ADMIN_DEVNET.md)"
+fi
 
 LAN_IP="$(hostname -I | awk '{print $1}')"
 echo "sponsor   (public gateway): http://$LAN_IP:8080"

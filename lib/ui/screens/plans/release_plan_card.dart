@@ -18,6 +18,7 @@ import '../../widgets/nft.dart';
 import '../../widgets/plan_pricing.dart';
 import 'plan_actions.dart';
 import 'plan_card_shell.dart';
+import 'skr_reserve_section.dart';
 
 /// Status of pending tier [index] of [v]: due once its time has come,
 /// else alive (counting down from the last check-in).
@@ -97,7 +98,8 @@ class ReleasePlanCard extends ConsumerWidget {
         : unfundedAssets(vault, tokens);
     final rails = {for (final r in vault.rules) r.rail};
     final (next, nextColor) = _nextEvent(vault, now);
-    final leftovers = holdingsText(vault, held);
+    final forTiers = tierHoldings(vault, held);
+    final leftovers = holdingsText(vault, withFeeReserve(vault, held));
 
     Future<void> run(
       String title,
@@ -109,9 +111,10 @@ class ReleasePlanCard extends ConsumerWidget {
       await runGuarded(context, () => action(lamports), success: done);
     }
 
-    // A skipped tier's reserved share stays for its beneficiary.
+    // A skipped tier's reserved share stays for its beneficiary; the SKR
+    // fee reserve has its own withdrawal.
     int free(String? mint, int held) {
-      final left = held - vault.reservedFor(mint);
+      final left = vault.tierFunds(mint, held) - vault.reservedFor(mint);
       return left > 0 ? left : 0;
     }
 
@@ -132,6 +135,7 @@ class ReleasePlanCard extends ConsumerWidget {
                 child: const Text('Withdraw leftovers'),
               ),
             ],
+            SkrReserveSection(vault: vault, tokens: tokens, released: true),
             const SizedBox(height: DMSpace.md),
             OutlinedButton(
               style: OutlinedButton.styleFrom(minimumSize: button),
@@ -140,7 +144,7 @@ class ReleasePlanCard extends ConsumerWidget {
                 ref,
                 vault,
                 cancel: false,
-                held: held,
+                held: withFeeReserve(vault, held),
                 now: now,
               ),
               child: const Text('Close plan'),
@@ -148,6 +152,7 @@ class ReleasePlanCard extends ConsumerWidget {
           ]
         : [
             PlanFeeLine(vault: vault),
+            SkrReserveSection(vault: vault, tokens: tokens),
             const SizedBox(height: DMSpace.lg),
             Row(
               children: [
@@ -205,7 +210,7 @@ class ReleasePlanCard extends ConsumerWidget {
                 ref,
                 vault,
                 cancel: true,
-                held: held,
+                held: withFeeReserve(vault, held),
                 now: now,
               ),
             ),
@@ -219,7 +224,7 @@ class ReleasePlanCard extends ConsumerWidget {
           : _planSticker(vault, now),
       summary: released
           ? (leftovers.isEmpty ? 'Nothing left in the plan' : '$leftovers left')
-          : '${balancesText(vault, held)} protected',
+          : '${balancesText(vault, forTiers)} protected',
       next: next,
       nextColor: nextColor,
       body: Column(
